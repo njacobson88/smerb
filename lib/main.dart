@@ -7,6 +7,8 @@ import 'features/debug/screens/debug_screen.dart';
 import 'features/storage/database/database.dart';
 import 'features/capture/services/capture_service.dart';
 import 'features/sync/services/upload_service.dart';
+import 'features/sync/services/background_sync_service.dart';
+import 'features/ocr/services/ocr_service.dart';
 import 'features/onboarding/services/participant_service.dart';
 import 'features/onboarding/screens/enrollment_screen.dart';
 
@@ -43,11 +45,13 @@ class AppInitializer extends StatefulWidget {
   State<AppInitializer> createState() => _AppInitializerState();
 }
 
-class _AppInitializerState extends State<AppInitializer> {
+class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObserver {
   late final AppDatabase _database;
   late final ParticipantService _participantService;
   CaptureService? _captureService;
   UploadService? _uploadService;
+  OcrService? _ocrService;
+  BackgroundSyncService? _backgroundSyncService;
 
   bool _initialized = false;
   bool _enrolled = false;
@@ -55,7 +59,26 @@ class _AppInitializerState extends State<AppInitializer> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initialize();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    // Handle app lifecycle changes for background sync
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // App going to background - trigger immediate sync
+      print('[App] App pausing - triggering sync');
+      _backgroundSyncService?.syncNow();
+    } else if (state == AppLifecycleState.resumed) {
+      // App coming back to foreground - ensure sync is running
+      print('[App] App resumed');
+      if (_backgroundSyncService != null && !_backgroundSyncService!.isRunning) {
+        _backgroundSyncService!.start();
+      }
+    }
   }
 
   Future<void> _initialize() async {
@@ -95,6 +118,25 @@ class _AppInitializerState extends State<AppInitializer> {
     // Initialize upload service
     _uploadService = UploadService(database: _database);
 
+    // Initialize OCR service
+    _ocrService = OcrService(database: _database);
+
+    // Initialize and start background sync service
+    _backgroundSyncService = BackgroundSyncService(
+      database: _database,
+      uploadService: _uploadService!,
+      ocrService: _ocrService!,
+    );
+
+    // Listen for sync status changes (optional - for UI updates)
+    _backgroundSyncService!.onSyncStatusChanged = (status) {
+      print('[App] Sync status: ${status.state.name} - '
+          'pending: ${status.pendingEvents} events, ${status.pendingOcr} OCR');
+    };
+
+    // Start background sync
+    _backgroundSyncService!.start();
+
     // Start a session
     await _captureService!.startSession(
       deviceInfo: {
@@ -104,6 +146,7 @@ class _AppInitializerState extends State<AppInitializer> {
     );
 
     print('[App] Services initialized for participant: $participantId');
+    print('[App] Background sync started (30s interval)');
   }
 
   Future<void> _onEnrolled() async {
@@ -114,6 +157,8 @@ class _AppInitializerState extends State<AppInitializer> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _backgroundSyncService?.dispose();
     _captureService?.endSession();
     _database.close();
     super.dispose();
@@ -146,6 +191,8 @@ class _AppInitializerState extends State<AppInitializer> {
       database: _database,
       captureService: _captureService!,
       uploadService: _uploadService!,
+      ocrService: _ocrService!,
+      backgroundSyncService: _backgroundSyncService!,
       participantService: _participantService,
       child: Builder(
         builder: (context) => Navigator(
@@ -180,12 +227,16 @@ class _ServicesProvider extends InheritedWidget {
   final AppDatabase database;
   final CaptureService captureService;
   final UploadService uploadService;
+  final OcrService ocrService;
+  final BackgroundSyncService backgroundSyncService;
   final ParticipantService participantService;
 
   const _ServicesProvider({
     required this.database,
     required this.captureService,
     required this.uploadService,
+    required this.ocrService,
+    required this.backgroundSyncService,
     required this.participantService,
     required super.child,
   });
