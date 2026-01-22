@@ -4,16 +4,19 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../../../features/capture/services/capture_service.dart';
 import '../../../features/capture/services/screenshot_service.dart';
 import '../../../features/storage/database/database.dart';
+import '../../../features/sync/services/upload_service.dart';
 import '../../../features/debug/screens/debug_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   final CaptureService captureService;
   final AppDatabase database;
+  final UploadService uploadService;
 
   const BrowserScreen({
     super.key,
     required this.captureService,
     required this.database,
+    required this.uploadService,
   });
 
   @override
@@ -148,6 +151,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   builder: (context) => DebugScreen(
                     captureService: widget.captureService,
                     database: widget.database,
+                    uploadService: widget.uploadService,
                   ),
                 ),
               );

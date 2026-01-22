@@ -6,6 +6,7 @@ import 'features/browser/screens/browser_screen.dart';
 import 'features/debug/screens/debug_screen.dart';
 import 'features/storage/database/database.dart';
 import 'features/capture/services/capture_service.dart';
+import 'features/sync/services/upload_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +35,7 @@ class SmerbApp extends StatelessWidget {
           return DebugScreen(
             captureService: services.captureService,
             database: services.database,
+            uploadService: services.uploadService,
           );
         },
       },
@@ -52,6 +54,7 @@ class AppInitializer extends StatefulWidget {
 class _AppInitializerState extends State<AppInitializer> {
   late final AppDatabase _database;
   late final CaptureService _captureService;
+  late final UploadService _uploadService;
   bool _initialized = false;
 
   @override
@@ -73,6 +76,9 @@ class _AppInitializerState extends State<AppInitializer> {
       database: _database,
       participantId: participantId,
     );
+
+    // Initialize upload service
+    _uploadService = UploadService(database: _database);
 
     // Start a session
     await _captureService.startSession(
@@ -112,9 +118,11 @@ class _AppInitializerState extends State<AppInitializer> {
     return _ServicesProvider(
       database: _database,
       captureService: _captureService,
+      uploadService: _uploadService,
       child: BrowserScreen(
         captureService: _captureService,
         database: _database,
+        uploadService: _uploadService,
       ),
     );
   }
@@ -124,10 +132,12 @@ class _AppInitializerState extends State<AppInitializer> {
 class _ServicesProvider extends InheritedWidget {
   final AppDatabase database;
   final CaptureService captureService;
+  final UploadService uploadService;
 
   const _ServicesProvider({
     required this.database,
     required this.captureService,
+    required this.uploadService,
     required super.child,
   });
 

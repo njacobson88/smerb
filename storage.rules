@@ -1,0 +1,16 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Screenshots folder - allow read/write for test mode
+    // In production, restrict to authenticated users
+    match /screenshots/{participantId}/{sessionId}/{filename} {
+      allow read, write: if true;
+    }
+
+    // Deny all other access by default
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

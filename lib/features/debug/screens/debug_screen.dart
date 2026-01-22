@@ -5,15 +5,18 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../../../features/capture/services/capture_service.dart';
 import '../../../features/storage/database/database.dart';
+import '../../../features/sync/services/upload_service.dart';
 
 class DebugScreen extends StatefulWidget {
   final CaptureService captureService;
   final AppDatabase database;
+  final UploadService uploadService;
 
   const DebugScreen({
     super.key,
     required this.captureService,
     required this.database,
+    required this.uploadService,
   });
 
   @override
@@ -26,6 +29,8 @@ class _DebugScreenState extends State<DebugScreen> {
   int _totalEvents = 0;
   String? _selectedEventType;
   bool _isLoading = true;
+  bool _isSyncing = false;
+  Map<String, int> _syncStatus = {'total': 0, 'synced': 0, 'pending': 0};
 
   final DateFormat _dateFormat = DateFormat('HH:mm:ss');
 
@@ -45,16 +50,50 @@ class _DebugScreenState extends State<DebugScreen> {
 
       final counts = await widget.database.getEventCountByType();
       final total = await widget.database.getEventCount();
+      final syncStatus = await widget.uploadService.getSyncStatus();
 
       setState(() {
         _events = events.reversed.toList(); // Most recent first
         _eventCounts = counts;
         _totalEvents = total;
+        _syncStatus = syncStatus;
         _isLoading = false;
       });
     } catch (e) {
       print('[Debug] Error loading data: $e');
       setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _syncToCloud() async {
+    if (_isSyncing) return;
+
+    setState(() => _isSyncing = true);
+
+    try {
+      final synced = await widget.uploadService.syncEvents();
+      await _loadData();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Synced $synced events to Firebase'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('[Debug] Sync error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Sync failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      setState(() => _isSyncing = false);
     }
   }
 
@@ -135,6 +174,20 @@ class _DebugScreenState extends State<DebugScreen> {
             onPressed: _loadData,
             tooltip: 'Refresh',
           ),
+          IconButton(
+            icon: _isSyncing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Icon(Icons.cloud_upload),
+            onPressed: _isSyncing ? null : _syncToCloud,
+            tooltip: 'Sync to Firebase',
+          ),
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'export') {
@@ -205,12 +258,45 @@ class _DebugScreenState extends State<DebugScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Total Events: $_totalEvents',
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Total Events: $_totalEvents',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _syncStatus['pending'] == 0 ? Colors.green : Colors.orange,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _syncStatus['pending'] == 0 ? Icons.cloud_done : Icons.cloud_queue,
+                      color: Colors.white,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _syncStatus['pending'] == 0
+                          ? 'Synced'
+                          : '${_syncStatus['pending']} pending',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
           Wrap(
