@@ -7,6 +7,8 @@ import 'features/debug/screens/debug_screen.dart';
 import 'features/storage/database/database.dart';
 import 'features/capture/services/capture_service.dart';
 import 'features/sync/services/upload_service.dart';
+import 'features/onboarding/services/participant_service.dart';
+import 'features/onboarding/screens/enrollment_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,21 +31,11 @@ class SmerbApp extends StatelessWidget {
         useMaterial3: true,
       ),
       home: const AppInitializer(),
-      routes: {
-        '/debug': (context) {
-          final services = _ServicesProvider.of(context);
-          return DebugScreen(
-            captureService: services.captureService,
-            database: services.database,
-            uploadService: services.uploadService,
-          );
-        },
-      },
     );
   }
 }
 
-/// Initializes services and shows main screen
+/// Initializes services and shows main screen or enrollment
 class AppInitializer extends StatefulWidget {
   const AppInitializer({super.key});
 
@@ -53,9 +45,12 @@ class AppInitializer extends StatefulWidget {
 
 class _AppInitializerState extends State<AppInitializer> {
   late final AppDatabase _database;
-  late final CaptureService _captureService;
-  late final UploadService _uploadService;
+  late final ParticipantService _participantService;
+  CaptureService? _captureService;
+  UploadService? _uploadService;
+
   bool _initialized = false;
+  bool _enrolled = false;
 
   @override
   void initState() {
@@ -67,11 +62,31 @@ class _AppInitializerState extends State<AppInitializer> {
     // Initialize database
     _database = AppDatabase();
 
-    // For MVP, use a hardcoded participant ID
-    // In production, this would come from enrollment/authentication
-    const participantId = 'mvp_test_participant';
+    // Initialize participant service
+    _participantService = ParticipantService();
 
-    // Initialize capture service
+    // Check enrollment status
+    final isEnrolled = await _participantService.isEnrolled();
+
+    if (isEnrolled) {
+      await _initializeServices();
+    }
+
+    setState(() {
+      _initialized = true;
+      _enrolled = isEnrolled;
+    });
+  }
+
+  Future<void> _initializeServices() async {
+    // Get participant ID from service
+    final participantId = await _participantService.getParticipantId();
+    if (participantId == null) {
+      print('[App] Error: No participant ID found');
+      return;
+    }
+
+    // Initialize capture service with real participant ID
     _captureService = CaptureService(
       database: _database,
       participantId: participantId,
@@ -81,19 +96,25 @@ class _AppInitializerState extends State<AppInitializer> {
     _uploadService = UploadService(database: _database);
 
     // Start a session
-    await _captureService.startSession(
+    await _captureService!.startSession(
       deviceInfo: {
         'platform': 'ios',
         'app_version': '1.0.0',
       },
     );
 
-    setState(() => _initialized = true);
+    print('[App] Services initialized for participant: $participantId');
+  }
+
+  Future<void> _onEnrolled() async {
+    // Re-initialize services after enrollment
+    await _initializeServices();
+    setState(() => _enrolled = true);
   }
 
   @override
   void dispose() {
-    _captureService.endSession();
+    _captureService?.endSession();
     _database.close();
     super.dispose();
   }
@@ -115,14 +136,40 @@ class _AppInitializerState extends State<AppInitializer> {
       );
     }
 
+    // Show enrollment screen if not enrolled
+    if (!_enrolled) {
+      return EnrollmentScreen(onEnrolled: _onEnrolled);
+    }
+
+    // Show main app
     return _ServicesProvider(
       database: _database,
-      captureService: _captureService,
-      uploadService: _uploadService,
-      child: BrowserScreen(
-        captureService: _captureService,
-        database: _database,
-        uploadService: _uploadService,
+      captureService: _captureService!,
+      uploadService: _uploadService!,
+      participantService: _participantService,
+      child: Builder(
+        builder: (context) => Navigator(
+          onGenerateRoute: (settings) {
+            if (settings.name == '/debug') {
+              final services = _ServicesProvider.of(context);
+              return MaterialPageRoute(
+                builder: (_) => DebugScreen(
+                  captureService: services.captureService,
+                  database: services.database,
+                  uploadService: services.uploadService,
+                ),
+              );
+            }
+            return MaterialPageRoute(
+              builder: (_) => BrowserScreen(
+                captureService: _captureService!,
+                database: _database,
+                uploadService: _uploadService!,
+                participantService: _participantService,
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -133,11 +180,13 @@ class _ServicesProvider extends InheritedWidget {
   final AppDatabase database;
   final CaptureService captureService;
   final UploadService uploadService;
+  final ParticipantService participantService;
 
   const _ServicesProvider({
     required this.database,
     required this.captureService,
     required this.uploadService,
+    required this.participantService,
     required super.child,
   });
 

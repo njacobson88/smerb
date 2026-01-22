@@ -5,18 +5,21 @@ import '../../../features/capture/services/capture_service.dart';
 import '../../../features/capture/services/screenshot_service.dart';
 import '../../../features/storage/database/database.dart';
 import '../../../features/sync/services/upload_service.dart';
+import '../../../features/onboarding/services/participant_service.dart';
 import '../../../features/debug/screens/debug_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   final CaptureService captureService;
   final AppDatabase database;
   final UploadService uploadService;
+  final ParticipantService participantService;
 
   const BrowserScreen({
     super.key,
     required this.captureService,
     required this.database,
     required this.uploadService,
+    required this.participantService,
   });
 
   @override
@@ -35,16 +38,32 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // Screenshot capture service
   ScreenshotService? _screenshotService;
 
+  // Login status tracking
+  bool _redditLoggedIn = false;
+  bool _twitterLoggedIn = false;
+
   @override
   void initState() {
     super.initState();
     _initializeCookies();
+    _loadLoginStatus();
   }
 
   @override
   void dispose() {
     _screenshotService?.dispose();
     super.dispose();
+  }
+
+  /// Load initial login status from participant service
+  Future<void> _loadLoginStatus() async {
+    final participant = await widget.participantService.getParticipant();
+    if (participant != null) {
+      setState(() {
+        _redditLoggedIn = participant.redditLoggedIn;
+        _twitterLoggedIn = participant.twitterLoggedIn;
+      });
+    }
   }
 
   /// Prime Reddit cookies before loading
@@ -61,6 +80,53 @@ class _BrowserScreenState extends State<BrowserScreen> {
       print('[Browser] Cookie priming complete for .reddit.com');
     } catch (e) {
       print('[Browser] Error priming cookies: $e');
+    }
+  }
+
+  /// Check login status by examining cookies
+  Future<void> _checkLoginStatus() async {
+    // Check Reddit login
+    final redditCookies = await _cookieManager.getCookies(
+      url: WebUri('https://www.reddit.com'),
+    );
+    final redditLoggedIn = redditCookies.any((cookie) =>
+        cookie.name == 'reddit_session' ||
+        cookie.name == 'token_v2' ||
+        cookie.name == 'loid');
+
+    if (redditLoggedIn && !_redditLoggedIn) {
+      print('[Browser] Reddit login detected!');
+      await widget.participantService.updateRedditLogin(loggedIn: true);
+      setState(() => _redditLoggedIn = true);
+
+      // Log the login event
+      await widget.captureService.processJavaScriptEvent(
+        '{"type": "login", "platform": "reddit", "timestamp": ${DateTime.now().millisecondsSinceEpoch}, "data": {"status": "logged_in"}}',
+      );
+    }
+
+    // Check Twitter login
+    final twitterCookies = await _cookieManager.getCookies(
+      url: WebUri('https://twitter.com'),
+    );
+    final xCookies = await _cookieManager.getCookies(
+      url: WebUri('https://x.com'),
+    );
+    final allTwitterCookies = [...twitterCookies, ...xCookies];
+    final twitterLoggedIn = allTwitterCookies.any((cookie) =>
+        cookie.name == 'auth_token' ||
+        cookie.name == 'ct0' ||
+        cookie.name == 'twid');
+
+    if (twitterLoggedIn && !_twitterLoggedIn) {
+      print('[Browser] Twitter/X login detected!');
+      await widget.participantService.updateTwitterLogin(loggedIn: true);
+      setState(() => _twitterLoggedIn = true);
+
+      // Log the login event
+      await widget.captureService.processJavaScriptEvent(
+        '{"type": "login", "platform": "twitter", "timestamp": ${DateTime.now().millisecondsSinceEpoch}, "data": {"status": "logged_in"}}',
+      );
     }
   }
 
@@ -256,6 +322,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   _isLoading = false;
                 });
                 print('[Browser] Page finished: $url');
+
+                // Check login status on each page load
+                await _checkLoginStatus();
 
                 // Debug: Check cookies
                 try {

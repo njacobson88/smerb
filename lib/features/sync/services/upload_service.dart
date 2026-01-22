@@ -181,4 +181,52 @@ class UploadService {
 
   /// Check if currently syncing
   bool get isSyncing => _isSyncing;
+
+  /// Register a new participant in Firebase
+  Future<void> registerParticipant({
+    required String participantId,
+    required String visitorId,
+    required DateTime enrolledAt,
+  }) async {
+    try {
+      await _firestore.collection('participants').doc(participantId).set({
+        'participantId': participantId,
+        'visitorId': visitorId,
+        'enrolledAt': Timestamp.fromDate(enrolledAt),
+        'registeredAt': FieldValue.serverTimestamp(),
+        'redditLoggedIn': false,
+        'twitterLoggedIn': false,
+      }, SetOptions(merge: true));
+
+      print('[UploadService] Registered participant: $participantId');
+    } catch (e) {
+      print('[UploadService] Failed to register participant: $e');
+      rethrow;
+    }
+  }
+
+  /// Update participant login status in Firebase
+  Future<void> updateParticipantLogin({
+    required String participantId,
+    required String platform,
+    required bool loggedIn,
+    String? username,
+  }) async {
+    try {
+      final updates = <String, dynamic>{
+        '${platform}LoggedIn': loggedIn,
+        '${platform}LoginAt': loggedIn ? FieldValue.serverTimestamp() : null,
+      };
+      if (username != null) {
+        updates['${platform}Username'] = username;
+      }
+
+      await _firestore.collection('participants').doc(participantId).update(updates);
+
+      print('[UploadService] Updated $platform login for $participantId: $loggedIn');
+    } catch (e) {
+      print('[UploadService] Failed to update participant login: $e');
+      // Don't rethrow - login tracking failure shouldn't break the app
+    }
+  }
 }
