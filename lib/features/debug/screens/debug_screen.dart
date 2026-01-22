@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../../../features/capture/services/capture_service.dart';
 import '../../../features/storage/database/database.dart';
 import '../../../features/sync/services/upload_service.dart';
+import '../../../features/ocr/services/ocr_service.dart';
 
 class DebugScreen extends StatefulWidget {
   final CaptureService captureService;
@@ -30,13 +31,17 @@ class _DebugScreenState extends State<DebugScreen> {
   String? _selectedEventType;
   bool _isLoading = true;
   bool _isSyncing = false;
-  Map<String, int> _syncStatus = {'total': 0, 'synced': 0, 'pending': 0};
+  bool _isProcessingOcr = false;
+  Map<String, int> _syncStatus = {};
+  Map<String, int> _ocrStatus = {};
 
+  late final OcrService _ocrService;
   final DateFormat _dateFormat = DateFormat('HH:mm:ss');
 
   @override
   void initState() {
     super.initState();
+    _ocrService = OcrService(database: widget.database);
     _loadData();
   }
 
@@ -51,17 +56,51 @@ class _DebugScreenState extends State<DebugScreen> {
       final counts = await widget.database.getEventCountByType();
       final total = await widget.database.getEventCount();
       final syncStatus = await widget.uploadService.getSyncStatus();
+      final ocrStatus = await _ocrService.getOcrStatus();
 
       setState(() {
         _events = events.reversed.toList(); // Most recent first
         _eventCounts = counts;
         _totalEvents = total;
         _syncStatus = syncStatus;
+        _ocrStatus = ocrStatus;
         _isLoading = false;
       });
     } catch (e) {
       print('[Debug] Error loading data: $e');
       setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _processOcr() async {
+    if (_isProcessingOcr) return;
+
+    setState(() => _isProcessingOcr = true);
+
+    try {
+      final processed = await _ocrService.processPendingScreenshots(batchSize: 10);
+      await _loadData();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Processed OCR for $processed screenshots'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
+    } catch (e) {
+      print('[Debug] OCR error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('OCR processing failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      setState(() => _isProcessingOcr = false);
     }
   }
 
@@ -71,13 +110,14 @@ class _DebugScreenState extends State<DebugScreen> {
     setState(() => _isSyncing = true);
 
     try {
-      final synced = await widget.uploadService.syncEvents();
+      // Use syncAll to sync events and OCR results together
+      final results = await widget.uploadService.syncAll();
       await _loadData();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Synced $synced events to Firebase'),
+            content: Text('Synced ${results['events']} events, ${results['ocrResults']} OCR results'),
             backgroundColor: Colors.green,
           ),
         );
@@ -252,6 +292,9 @@ class _DebugScreenState extends State<DebugScreen> {
   }
 
   Widget _buildStatistics() {
+    final pendingEvents = _syncStatus['pendingEvents'] ?? 0;
+    final pendingOcr = _ocrStatus['pending'] ?? 0;
+
     return Container(
       padding: const EdgeInsets.all(16),
       color: Colors.grey[100],
@@ -268,33 +311,76 @@ class _DebugScreenState extends State<DebugScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _syncStatus['pending'] == 0 ? Colors.green : Colors.orange,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _syncStatus['pending'] == 0 ? Icons.cloud_done : Icons.cloud_queue,
-                      color: Colors.white,
-                      size: 16,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _syncStatus['pending'] == 0
-                          ? 'Synced'
-                          : '${_syncStatus['pending']} pending',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
+              Row(
+                children: [
+                  // OCR status badge
+                  GestureDetector(
+                    onTap: pendingOcr > 0 ? _processOcr : null,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: pendingOcr == 0 ? Colors.blue : Colors.purple,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _isProcessingOcr
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    color: Colors.white,
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Icon(
+                                  pendingOcr == 0 ? Icons.text_fields : Icons.text_snippet,
+                                  color: Colors.white,
+                                  size: 14,
+                                ),
+                          const SizedBox(width: 4),
+                          Text(
+                            pendingOcr == 0 ? 'OCR' : '$pendingOcr OCR',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Sync status badge
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: pendingEvents == 0 ? Colors.green : Colors.orange,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          pendingEvents == 0 ? Icons.cloud_done : Icons.cloud_queue,
+                          color: Colors.white,
+                          size: 14,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          pendingEvents == 0 ? 'Synced' : '$pendingEvents',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -480,6 +566,8 @@ class _DebugScreenState extends State<DebugScreen> {
         return Colors.orange;
       case 'interaction':
         return Colors.purple;
+      case 'screenshot':
+        return Colors.teal;
       default:
         return Colors.grey;
     }

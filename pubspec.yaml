@@ -38,6 +38,9 @@ dependencies:
   # Local Storage
   shared_preferences: ^2.2.0
 
+  # OCR - On-device text recognition
+  flutter_tesseract_ocr: ^0.4.30
+
   # Firebase
   firebase_core: ^3.8.0
   cloud_firestore: ^5.5.0
@@ -58,3 +61,4 @@ flutter:
 
   assets:
     - assets/js/
+    - assets/tessdata/

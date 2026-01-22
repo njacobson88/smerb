@@ -14,27 +14,36 @@ import 'package:drift/drift.dart' as drift;
 class ScreenshotService {
   final AppDatabase database;
   final String sessionId;
+  final String participantId;
 
   Timer? _captureTimer;
   Uint8List? _lastScreenshot;
   InAppWebViewController? _controller;
   bool _isCapturing = false;
+  String _currentPlatform = 'unknown';
 
   ScreenshotService({
     required this.database,
     required this.sessionId,
+    required this.participantId,
   });
 
   /// Start capturing screenshots every second
-  void startCapture(InAppWebViewController controller) {
+  void startCapture(InAppWebViewController controller, {String platform = 'unknown'}) {
     _controller = controller;
+    _currentPlatform = platform;
 
     // Capture every 1 second
     _captureTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _captureScreenshot();
     });
 
-    print('[ScreenshotService] Started screenshot capture');
+    print('[ScreenshotService] Started screenshot capture for $platform');
+  }
+
+  /// Update the current platform
+  void updatePlatform(String platform) {
+    _currentPlatform = platform;
   }
 
   /// Stop capturing screenshots
@@ -136,10 +145,10 @@ class ScreenshotService {
       final event = EventsCompanion(
         id: drift.Value(const Uuid().v4()),
         sessionId: drift.Value(sessionId),
-        participantId: drift.Value('mvp_test_participant'),
+        participantId: drift.Value(participantId),
         eventType: const drift.Value('screenshot'),
-        timestamp: drift.Value(DateTime.now()),
-        platform: const drift.Value('reddit'),
+        timestamp: drift.Value(DateTime.now().toUtc()),
+        platform: drift.Value(_currentPlatform),
         url: drift.Value(url?.toString()),
         data: drift.Value('{"filePath": "$filePath", "timestamp": $timestamp, "fileSize": ${compressedBytes.length}, "originalSize": ${screenshot.length}, "compressionRatio": "$compressionRatio%"}'),
       );

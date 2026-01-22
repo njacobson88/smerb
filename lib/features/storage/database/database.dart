@@ -40,16 +40,43 @@ class Sessions extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// OCR Results table - stores extracted text from screenshots
+class OcrResults extends Table {
+  TextColumn get id => text()();
+  TextColumn get eventId => text()(); // Links to screenshot event
+  TextColumn get participantId => text()();
+  TextColumn get sessionId => text()();
+  TextColumn get extractedText => text()();
+  IntColumn get wordCount => integer().withDefault(const Constant(0))();
+  IntColumn get processingTimeMs => integer().nullable()();
+  DateTimeColumn get capturedAt => dateTime()(); // Original screenshot timestamp
+  DateTimeColumn get processedAt => dateTime().withDefault(currentDateAndTime)();
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 // ============================================================================
 // DATABASE
 // ============================================================================
 
-@DriftDatabase(tables: [Events, Sessions])
+@DriftDatabase(tables: [Events, Sessions, OcrResults])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (Migrator m) => m.createAll(),
+    onUpgrade: (Migrator m, int from, int to) async {
+      if (from < 2) {
+        await m.createTable(ocrResults);
+      }
+    },
+  );
 
   // ==========================================================================
   // EVENT QUERIES
@@ -162,6 +189,91 @@ class AppDatabase extends _$AppDatabase {
   /// Get all sessions
   Future<List<Session>> getAllSessions() {
     return select(sessions).get();
+  }
+
+  // ==========================================================================
+  // OCR RESULTS QUERIES
+  // ==========================================================================
+
+  /// Insert a new OCR result
+  Future<int> insertOcrResult(OcrResultsCompanion result) {
+    return into(ocrResults).insert(result);
+  }
+
+  /// Get OCR result for an event
+  Future<OcrResult?> getOcrResultForEvent(String eventId) {
+    return (select(ocrResults)..where((o) => o.eventId.equals(eventId)))
+        .getSingleOrNull();
+  }
+
+  /// Get unsynced OCR results
+  Future<List<OcrResult>> getUnsyncedOcrResults({int? limit}) {
+    final query = select(ocrResults)..where((o) => o.synced.equals(false));
+    if (limit != null) {
+      query.limit(limit);
+    }
+    return query.get();
+  }
+
+  /// Mark OCR results as synced
+  Future<int> markOcrResultsAsSynced(List<String> resultIds) {
+    return (update(ocrResults)..where((o) => o.id.isIn(resultIds)))
+        .write(const OcrResultsCompanion(synced: Value(true)));
+  }
+
+  /// Get OCR result count
+  Future<int> getOcrResultCount() async {
+    final count = countAll();
+    final query = selectOnly(ocrResults)..addColumns([count]);
+    final result = await query.getSingle();
+    return result.read(count) ?? 0;
+  }
+
+  /// Get pending OCR count (screenshot events without OCR results)
+  Future<int> getPendingOcrCount() async {
+    // Get all screenshot event IDs
+    final screenshotEvents = await (select(events)
+          ..where((e) => e.eventType.equals('screenshot')))
+        .get();
+
+    if (screenshotEvents.isEmpty) return 0;
+
+    // Get OCR results for those events
+    final eventIds = screenshotEvents.map((e) => e.id).toList();
+    final ocrResultsList = await (select(ocrResults)
+          ..where((o) => o.eventId.isIn(eventIds)))
+        .get();
+
+    final processedIds = ocrResultsList.map((o) => o.eventId).toSet();
+    return eventIds.where((id) => !processedIds.contains(id)).length;
+  }
+
+  /// Get screenshot events pending OCR processing
+  Future<List<Event>> getScreenshotsPendingOcr({int? limit}) async {
+    // Get all screenshot events
+    final screenshotEvents = await (select(events)
+          ..where((e) => e.eventType.equals('screenshot')))
+        .get();
+
+    if (screenshotEvents.isEmpty) return [];
+
+    // Get already processed event IDs
+    final eventIds = screenshotEvents.map((e) => e.id).toList();
+    final ocrResultsList = await (select(ocrResults)
+          ..where((o) => o.eventId.isIn(eventIds)))
+        .get();
+
+    final processedIds = ocrResultsList.map((o) => o.eventId).toSet();
+
+    // Filter to unprocessed
+    final pending = screenshotEvents
+        .where((e) => !processedIds.contains(e.id))
+        .toList();
+
+    if (limit != null && pending.length > limit) {
+      return pending.sublist(0, limit);
+    }
+    return pending;
   }
 }
 

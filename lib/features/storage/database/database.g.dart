@@ -832,13 +832,525 @@ class SessionsCompanion extends UpdateCompanion<Session> {
   }
 }
 
+class $OcrResultsTable extends OcrResults
+    with TableInfo<$OcrResultsTable, OcrResult> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $OcrResultsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+      'id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _eventIdMeta =
+      const VerificationMeta('eventId');
+  @override
+  late final GeneratedColumn<String> eventId = GeneratedColumn<String>(
+      'event_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _participantIdMeta =
+      const VerificationMeta('participantId');
+  @override
+  late final GeneratedColumn<String> participantId = GeneratedColumn<String>(
+      'participant_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _extractedTextMeta =
+      const VerificationMeta('extractedText');
+  @override
+  late final GeneratedColumn<String> extractedText = GeneratedColumn<String>(
+      'extracted_text', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _wordCountMeta =
+      const VerificationMeta('wordCount');
+  @override
+  late final GeneratedColumn<int> wordCount = GeneratedColumn<int>(
+      'word_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _processingTimeMsMeta =
+      const VerificationMeta('processingTimeMs');
+  @override
+  late final GeneratedColumn<int> processingTimeMs = GeneratedColumn<int>(
+      'processing_time_ms', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
+  static const VerificationMeta _capturedAtMeta =
+      const VerificationMeta('capturedAt');
+  @override
+  late final GeneratedColumn<DateTime> capturedAt = GeneratedColumn<DateTime>(
+      'captured_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _processedAtMeta =
+      const VerificationMeta('processedAt');
+  @override
+  late final GeneratedColumn<DateTime> processedAt = GeneratedColumn<DateTime>(
+      'processed_at', aliasedName, false,
+      type: DriftSqlType.dateTime,
+      requiredDuringInsert: false,
+      defaultValue: currentDateAndTime);
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+      'synced', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("synced" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        eventId,
+        participantId,
+        sessionId,
+        extractedText,
+        wordCount,
+        processingTimeMs,
+        capturedAt,
+        processedAt,
+        synced
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'ocr_results';
+  @override
+  VerificationContext validateIntegrity(Insertable<OcrResult> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('event_id')) {
+      context.handle(_eventIdMeta,
+          eventId.isAcceptableOrUnknown(data['event_id']!, _eventIdMeta));
+    } else if (isInserting) {
+      context.missing(_eventIdMeta);
+    }
+    if (data.containsKey('participant_id')) {
+      context.handle(
+          _participantIdMeta,
+          participantId.isAcceptableOrUnknown(
+              data['participant_id']!, _participantIdMeta));
+    } else if (isInserting) {
+      context.missing(_participantIdMeta);
+    }
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('extracted_text')) {
+      context.handle(
+          _extractedTextMeta,
+          extractedText.isAcceptableOrUnknown(
+              data['extracted_text']!, _extractedTextMeta));
+    } else if (isInserting) {
+      context.missing(_extractedTextMeta);
+    }
+    if (data.containsKey('word_count')) {
+      context.handle(_wordCountMeta,
+          wordCount.isAcceptableOrUnknown(data['word_count']!, _wordCountMeta));
+    }
+    if (data.containsKey('processing_time_ms')) {
+      context.handle(
+          _processingTimeMsMeta,
+          processingTimeMs.isAcceptableOrUnknown(
+              data['processing_time_ms']!, _processingTimeMsMeta));
+    }
+    if (data.containsKey('captured_at')) {
+      context.handle(
+          _capturedAtMeta,
+          capturedAt.isAcceptableOrUnknown(
+              data['captured_at']!, _capturedAtMeta));
+    } else if (isInserting) {
+      context.missing(_capturedAtMeta);
+    }
+    if (data.containsKey('processed_at')) {
+      context.handle(
+          _processedAtMeta,
+          processedAt.isAcceptableOrUnknown(
+              data['processed_at']!, _processedAtMeta));
+    }
+    if (data.containsKey('synced')) {
+      context.handle(_syncedMeta,
+          synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  OcrResult map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return OcrResult(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
+      eventId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}event_id'])!,
+      participantId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}participant_id'])!,
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      extractedText: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}extracted_text'])!,
+      wordCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}word_count'])!,
+      processingTimeMs: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}processing_time_ms']),
+      capturedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}captured_at'])!,
+      processedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}processed_at'])!,
+      synced: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}synced'])!,
+    );
+  }
+
+  @override
+  $OcrResultsTable createAlias(String alias) {
+    return $OcrResultsTable(attachedDatabase, alias);
+  }
+}
+
+class OcrResult extends DataClass implements Insertable<OcrResult> {
+  final String id;
+  final String eventId;
+  final String participantId;
+  final String sessionId;
+  final String extractedText;
+  final int wordCount;
+  final int? processingTimeMs;
+  final DateTime capturedAt;
+  final DateTime processedAt;
+  final bool synced;
+  const OcrResult(
+      {required this.id,
+      required this.eventId,
+      required this.participantId,
+      required this.sessionId,
+      required this.extractedText,
+      required this.wordCount,
+      this.processingTimeMs,
+      required this.capturedAt,
+      required this.processedAt,
+      required this.synced});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['event_id'] = Variable<String>(eventId);
+    map['participant_id'] = Variable<String>(participantId);
+    map['session_id'] = Variable<String>(sessionId);
+    map['extracted_text'] = Variable<String>(extractedText);
+    map['word_count'] = Variable<int>(wordCount);
+    if (!nullToAbsent || processingTimeMs != null) {
+      map['processing_time_ms'] = Variable<int>(processingTimeMs);
+    }
+    map['captured_at'] = Variable<DateTime>(capturedAt);
+    map['processed_at'] = Variable<DateTime>(processedAt);
+    map['synced'] = Variable<bool>(synced);
+    return map;
+  }
+
+  OcrResultsCompanion toCompanion(bool nullToAbsent) {
+    return OcrResultsCompanion(
+      id: Value(id),
+      eventId: Value(eventId),
+      participantId: Value(participantId),
+      sessionId: Value(sessionId),
+      extractedText: Value(extractedText),
+      wordCount: Value(wordCount),
+      processingTimeMs: processingTimeMs == null && nullToAbsent
+          ? const Value.absent()
+          : Value(processingTimeMs),
+      capturedAt: Value(capturedAt),
+      processedAt: Value(processedAt),
+      synced: Value(synced),
+    );
+  }
+
+  factory OcrResult.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return OcrResult(
+      id: serializer.fromJson<String>(json['id']),
+      eventId: serializer.fromJson<String>(json['eventId']),
+      participantId: serializer.fromJson<String>(json['participantId']),
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      extractedText: serializer.fromJson<String>(json['extractedText']),
+      wordCount: serializer.fromJson<int>(json['wordCount']),
+      processingTimeMs: serializer.fromJson<int?>(json['processingTimeMs']),
+      capturedAt: serializer.fromJson<DateTime>(json['capturedAt']),
+      processedAt: serializer.fromJson<DateTime>(json['processedAt']),
+      synced: serializer.fromJson<bool>(json['synced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'eventId': serializer.toJson<String>(eventId),
+      'participantId': serializer.toJson<String>(participantId),
+      'sessionId': serializer.toJson<String>(sessionId),
+      'extractedText': serializer.toJson<String>(extractedText),
+      'wordCount': serializer.toJson<int>(wordCount),
+      'processingTimeMs': serializer.toJson<int?>(processingTimeMs),
+      'capturedAt': serializer.toJson<DateTime>(capturedAt),
+      'processedAt': serializer.toJson<DateTime>(processedAt),
+      'synced': serializer.toJson<bool>(synced),
+    };
+  }
+
+  OcrResult copyWith(
+          {String? id,
+          String? eventId,
+          String? participantId,
+          String? sessionId,
+          String? extractedText,
+          int? wordCount,
+          Value<int?> processingTimeMs = const Value.absent(),
+          DateTime? capturedAt,
+          DateTime? processedAt,
+          bool? synced}) =>
+      OcrResult(
+        id: id ?? this.id,
+        eventId: eventId ?? this.eventId,
+        participantId: participantId ?? this.participantId,
+        sessionId: sessionId ?? this.sessionId,
+        extractedText: extractedText ?? this.extractedText,
+        wordCount: wordCount ?? this.wordCount,
+        processingTimeMs: processingTimeMs.present
+            ? processingTimeMs.value
+            : this.processingTimeMs,
+        capturedAt: capturedAt ?? this.capturedAt,
+        processedAt: processedAt ?? this.processedAt,
+        synced: synced ?? this.synced,
+      );
+  @override
+  String toString() {
+    return (StringBuffer('OcrResult(')
+          ..write('id: $id, ')
+          ..write('eventId: $eventId, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('extractedText: $extractedText, ')
+          ..write('wordCount: $wordCount, ')
+          ..write('processingTimeMs: $processingTimeMs, ')
+          ..write('capturedAt: $capturedAt, ')
+          ..write('processedAt: $processedAt, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      id,
+      eventId,
+      participantId,
+      sessionId,
+      extractedText,
+      wordCount,
+      processingTimeMs,
+      capturedAt,
+      processedAt,
+      synced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is OcrResult &&
+          other.id == this.id &&
+          other.eventId == this.eventId &&
+          other.participantId == this.participantId &&
+          other.sessionId == this.sessionId &&
+          other.extractedText == this.extractedText &&
+          other.wordCount == this.wordCount &&
+          other.processingTimeMs == this.processingTimeMs &&
+          other.capturedAt == this.capturedAt &&
+          other.processedAt == this.processedAt &&
+          other.synced == this.synced);
+}
+
+class OcrResultsCompanion extends UpdateCompanion<OcrResult> {
+  final Value<String> id;
+  final Value<String> eventId;
+  final Value<String> participantId;
+  final Value<String> sessionId;
+  final Value<String> extractedText;
+  final Value<int> wordCount;
+  final Value<int?> processingTimeMs;
+  final Value<DateTime> capturedAt;
+  final Value<DateTime> processedAt;
+  final Value<bool> synced;
+  final Value<int> rowid;
+  const OcrResultsCompanion({
+    this.id = const Value.absent(),
+    this.eventId = const Value.absent(),
+    this.participantId = const Value.absent(),
+    this.sessionId = const Value.absent(),
+    this.extractedText = const Value.absent(),
+    this.wordCount = const Value.absent(),
+    this.processingTimeMs = const Value.absent(),
+    this.capturedAt = const Value.absent(),
+    this.processedAt = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  OcrResultsCompanion.insert({
+    required String id,
+    required String eventId,
+    required String participantId,
+    required String sessionId,
+    required String extractedText,
+    this.wordCount = const Value.absent(),
+    this.processingTimeMs = const Value.absent(),
+    required DateTime capturedAt,
+    this.processedAt = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        eventId = Value(eventId),
+        participantId = Value(participantId),
+        sessionId = Value(sessionId),
+        extractedText = Value(extractedText),
+        capturedAt = Value(capturedAt);
+  static Insertable<OcrResult> custom({
+    Expression<String>? id,
+    Expression<String>? eventId,
+    Expression<String>? participantId,
+    Expression<String>? sessionId,
+    Expression<String>? extractedText,
+    Expression<int>? wordCount,
+    Expression<int>? processingTimeMs,
+    Expression<DateTime>? capturedAt,
+    Expression<DateTime>? processedAt,
+    Expression<bool>? synced,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (eventId != null) 'event_id': eventId,
+      if (participantId != null) 'participant_id': participantId,
+      if (sessionId != null) 'session_id': sessionId,
+      if (extractedText != null) 'extracted_text': extractedText,
+      if (wordCount != null) 'word_count': wordCount,
+      if (processingTimeMs != null) 'processing_time_ms': processingTimeMs,
+      if (capturedAt != null) 'captured_at': capturedAt,
+      if (processedAt != null) 'processed_at': processedAt,
+      if (synced != null) 'synced': synced,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  OcrResultsCompanion copyWith(
+      {Value<String>? id,
+      Value<String>? eventId,
+      Value<String>? participantId,
+      Value<String>? sessionId,
+      Value<String>? extractedText,
+      Value<int>? wordCount,
+      Value<int?>? processingTimeMs,
+      Value<DateTime>? capturedAt,
+      Value<DateTime>? processedAt,
+      Value<bool>? synced,
+      Value<int>? rowid}) {
+    return OcrResultsCompanion(
+      id: id ?? this.id,
+      eventId: eventId ?? this.eventId,
+      participantId: participantId ?? this.participantId,
+      sessionId: sessionId ?? this.sessionId,
+      extractedText: extractedText ?? this.extractedText,
+      wordCount: wordCount ?? this.wordCount,
+      processingTimeMs: processingTimeMs ?? this.processingTimeMs,
+      capturedAt: capturedAt ?? this.capturedAt,
+      processedAt: processedAt ?? this.processedAt,
+      synced: synced ?? this.synced,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (eventId.present) {
+      map['event_id'] = Variable<String>(eventId.value);
+    }
+    if (participantId.present) {
+      map['participant_id'] = Variable<String>(participantId.value);
+    }
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (extractedText.present) {
+      map['extracted_text'] = Variable<String>(extractedText.value);
+    }
+    if (wordCount.present) {
+      map['word_count'] = Variable<int>(wordCount.value);
+    }
+    if (processingTimeMs.present) {
+      map['processing_time_ms'] = Variable<int>(processingTimeMs.value);
+    }
+    if (capturedAt.present) {
+      map['captured_at'] = Variable<DateTime>(capturedAt.value);
+    }
+    if (processedAt.present) {
+      map['processed_at'] = Variable<DateTime>(processedAt.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OcrResultsCompanion(')
+          ..write('id: $id, ')
+          ..write('eventId: $eventId, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('extractedText: $extractedText, ')
+          ..write('wordCount: $wordCount, ')
+          ..write('processingTimeMs: $processingTimeMs, ')
+          ..write('capturedAt: $capturedAt, ')
+          ..write('processedAt: $processedAt, ')
+          ..write('synced: $synced, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   late final $EventsTable events = $EventsTable(this);
   late final $SessionsTable sessions = $SessionsTable(this);
+  late final $OcrResultsTable ocrResults = $OcrResultsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
   @override
-  List<DatabaseSchemaEntity> get allSchemaEntities => [events, sessions];
+  List<DatabaseSchemaEntity> get allSchemaEntities =>
+      [events, sessions, ocrResults];
 }

@@ -4,7 +4,8 @@
   "description": "Admin scripts for SMERB",
   "type": "module",
   "scripts": {
-    "seed": "node seed_participants.js"
+    "seed": "node seed_participants.js",
+    "seed:test": "node seed_test_users.js"
   },
   "dependencies": {
     "firebase-admin": "^12.0.0"

@@ -155,6 +155,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
         _currentPlatform = platform;
       });
 
+      // Update screenshot service platform
+      _screenshotService?.updatePlatform(platform);
+
       // Load JavaScript from assets
       final jsCode = await rootBundle.loadString(observerFile);
 
@@ -305,8 +308,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 _screenshotService = ScreenshotService(
                   database: widget.database,
                   sessionId: widget.captureService.currentSessionId ?? '',
+                  participantId: widget.captureService.participantId,
                 );
-                _screenshotService?.startCapture(controller);
+                _screenshotService?.startCapture(controller, platform: _currentPlatform);
 
                 print('[Browser] WebView created');
               },

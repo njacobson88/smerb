@@ -125,25 +125,53 @@ class ParticipantService {
     return prefs.containsKey(_participantKey);
   }
 
+  /// Check if an ID matches the test user format (test1-test1000)
+  static bool isTestUserId(String id) {
+    final testMatch = RegExp(r'^test(\d+)$').firstMatch(id.toLowerCase());
+    if (testMatch == null) return false;
+    final num = int.tryParse(testMatch.group(1)!) ?? 0;
+    return num >= 1 && num <= 1000;
+  }
+
+  /// Check if an ID matches the production format (9 digits)
+  static bool isProductionId(String id) {
+    return RegExp(r'^\d{9}$').hasMatch(id);
+  }
+
+  /// Validate participant ID format (local validation before Firebase check)
+  static String? validateIdFormat(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Please enter your Participant ID';
+    }
+    final trimmed = value.trim();
+
+    // Accept test user format (test1-test1000) or 9-digit numeric
+    if (isTestUserId(trimmed) || isProductionId(trimmed)) {
+      return null; // Valid format
+    }
+
+    return 'Invalid format. Enter a 9-digit ID or test ID (test1-test1000)';
+  }
+
   /// Validate a participant ID against Firebase
   /// Returns ValidationResult indicating if the ID is valid and available
   Future<ValidationResult> validateParticipantId(String participantId) async {
-    // Normalize the ID (trim whitespace, ensure proper format)
-    final normalizedId = participantId.trim();
+    // Normalize the ID (trim whitespace)
+    final normalizedId = participantId.trim().toLowerCase();
 
-    // Basic format validation: must be exactly 9 digits
-    if (normalizedId.length != 9) {
-      return ValidationResult.invalid('Participant ID must be exactly 9 digits');
+    // Basic format validation: must be test user or 9-digit numeric
+    if (!isTestUserId(normalizedId) && !isProductionId(participantId.trim())) {
+      return ValidationResult.invalid('Invalid format. Enter a 9-digit ID or test ID (test1-test1000)');
     }
-    if (!RegExp(r'^\d{9}$').hasMatch(normalizedId)) {
-      return ValidationResult.invalid('Participant ID must contain only numbers');
-    }
+
+    // Use the appropriate ID format for lookup
+    final lookupId = isTestUserId(normalizedId) ? normalizedId : participantId.trim();
 
     try {
       // Check if the ID exists in the valid_participants collection
       final doc = await _firestore
           .collection(_validParticipantsCollection)
-          .doc(normalizedId)
+          .doc(lookupId)
           .get();
 
       if (!doc.exists) {

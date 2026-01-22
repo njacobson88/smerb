@@ -66,11 +66,17 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
     if (!_formKey.currentState!.validate()) return;
 
-    // Check if IDs match
+    // Check if IDs match (case-insensitive for test users)
     final participantId = _participantIdController.text.trim();
     final confirmId = _confirmIdController.text.trim();
+    final normalizedId = ParticipantService.isTestUserId(participantId)
+        ? participantId.toLowerCase()
+        : participantId;
+    final normalizedConfirmId = ParticipantService.isTestUserId(confirmId)
+        ? confirmId.toLowerCase()
+        : confirmId;
 
-    if (participantId != confirmId) {
+    if (normalizedId != normalizedConfirmId) {
       setState(() {
         _errorMessage = 'Participant IDs do not match. Please re-enter.';
         _failedAttempts++;
@@ -86,7 +92,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
     try {
       // Validate against Firebase
-      final validationResult = await _participantService.validateParticipantId(participantId);
+      final validationResult = await _participantService.validateParticipantId(normalizedId);
 
       if (!validationResult.isValid) {
         setState(() {
@@ -103,7 +109,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
       // Mark the participant ID as in-use in Firebase
       final marked = await _participantService.markParticipantIdAsInUse(
-        participantId: participantId,
+        participantId: normalizedId,
         visitorId: visitorId,
         deviceInfo: {'platform': 'ios', 'enrolledAt': DateTime.now().toIso8601String()},
       );
@@ -120,7 +126,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
       // Enroll the participant locally
       final participant = await _participantService.enroll(
-        participantId: participantId,
+        participantId: normalizedId,
         visitorId: visitorId,
       );
 
@@ -244,26 +250,14 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                   controller: _participantIdController,
                   decoration: InputDecoration(
                     labelText: 'Participant ID',
-                    hintText: 'e.g., 000000001',
+                    hintText: 'e.g., 123456789 or test1',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                     ),
                     prefixIcon: const Icon(Icons.badge_outlined),
                   ),
-                  keyboardType: TextInputType.number,
-                  maxLength: 9,
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'Please enter your Participant ID';
-                    }
-                    if (value.trim().length != 9) {
-                      return 'Participant ID must be exactly 9 digits';
-                    }
-                    if (!RegExp(r'^\d{9}$').hasMatch(value.trim())) {
-                      return 'Participant ID must contain only numbers';
-                    }
-                    return null;
-                  },
+                  keyboardType: TextInputType.text,
+                  validator: ParticipantService.validateIdFormat,
                 ),
                 const SizedBox(height: 16),
 
@@ -278,20 +272,8 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                     ),
                     prefixIcon: const Icon(Icons.badge_outlined),
                   ),
-                  keyboardType: TextInputType.number,
-                  maxLength: 9,
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'Please confirm your Participant ID';
-                    }
-                    if (value.trim().length != 9) {
-                      return 'Participant ID must be exactly 9 digits';
-                    }
-                    if (!RegExp(r'^\d{9}$').hasMatch(value.trim())) {
-                      return 'Participant ID must contain only numbers';
-                    }
-                    return null;
-                  },
+                  keyboardType: TextInputType.text,
+                  validator: ParticipantService.validateIdFormat,
                 ),
                 const SizedBox(height: 16),
 
