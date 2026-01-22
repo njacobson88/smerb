@@ -5,7 +5,7 @@
 
     <application
         android:usesCleartextTraffic="true"
-        android:label="smerb_app"
+        android:label="SMERB"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

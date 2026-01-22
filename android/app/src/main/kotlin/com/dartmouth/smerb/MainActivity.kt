@@ -1,4 +1,4 @@
-package com.example.smerb_app
+package com.dartmouth.smerb
 
 import io.flutter.embedding.android.FlutterActivity
 

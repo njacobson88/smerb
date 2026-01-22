@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>API_KEY</key>
+	<string>AIzaSyAQCor365hwvWKHdgTi98-R5CFMhMoEhbU</string>
+	<key>GCM_SENDER_ID</key>
+	<string>436153481478</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.dartmouth.smerb</string>
+	<key>PROJECT_ID</key>
+	<string>r01-redditx-suicide</string>
+	<key>STORAGE_BUCKET</key>
+	<string>r01-redditx-suicide.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:436153481478:ios:4d04d2e6257b0f0d9f8687</string>
+</dict>
+</plist>

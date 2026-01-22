@@ -1,10 +1,1 @@
-{
-  "hosting": {
-    "public": "build/web",
-    "ignore": [
-      "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
-    ]
-  }
-}
+{"hosting":{"public":"build/web","ignore":["firebase.json","**/.*","**/node_modules/**"]},"flutter":{"platforms":{"android":{"default":{"projectId":"r01-redditx-suicide","appId":"1:436153481478:android:cd39924bcf90a0ab9f8687","fileOutput":"android/app/google-services.json"}},"ios":{"default":{"projectId":"r01-redditx-suicide","appId":"1:436153481478:ios:4d04d2e6257b0f0d9f8687","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"macos":{"default":{"projectId":"r01-redditx-suicide","appId":"1:436153481478:ios:4d04d2e6257b0f0d9f8687","uploadDebugSymbols":false,"fileOutput":"macos/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"r01-redditx-suicide","configurations":{"android":"1:436153481478:android:cd39924bcf90a0ab9f8687","ios":"1:436153481478:ios:4d04d2e6257b0f0d9f8687","macos":"1:436153481478:ios:4d04d2e6257b0f0d9f8687"}}}}}}

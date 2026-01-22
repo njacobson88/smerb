@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "436153481478",
+    "project_id": "r01-redditx-suicide",
+    "storage_bucket": "r01-redditx-suicide.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:436153481478:android:cd39924bcf90a0ab9f8687",
+        "android_client_info": {
+          "package_name": "com.dartmouth.smerb"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDH2iBcT444mtjasxdgWMONF14lu9gXVtY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
