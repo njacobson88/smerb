@@ -1,0 +1,25 @@
+<!-- Add these entries to your ios/Runner/Info.plist file -->
+
+<!-- Allow arbitrary web loads for research purposes -->
+<key>NSAppTransportSecurity</key>
+<dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+</dict>
+
+<!-- User Agent String customization -->
+<key>CFBundleDisplayName</key>
+<string>SMERB</string>
+
+<!-- Prevent the app from being backed up (research data privacy) -->
+<key>UIFileSharingEnabled</key>
+<false/>
+
+<!-- Background modes if needed for data sync (add later) -->
+<!--
+<key>UIBackgroundModes</key>
+<array>
+    <string>fetch</string>
+    <string>processing</string>
+</array>
+-->

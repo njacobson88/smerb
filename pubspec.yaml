@@ -1,0 +1,52 @@
+name: smerb_app
+description: Social Media Exposure Research Browser - Mental health research data collection app
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # WebView - Using flutter_inappwebview for better OAuth support
+  flutter_inappwebview: ^6.0.0
+
+  # State Management
+  flutter_riverpod: ^2.4.0
+
+  # Local Database
+  drift: ^2.14.0
+  sqlite3_flutter_libs: ^0.5.0
+  path_provider: ^2.1.0
+  path: ^1.8.3
+
+  # Utilities
+  uuid: ^4.2.0
+  intl: ^0.18.0
+  device_info_plus: ^9.1.0
+  package_info_plus: ^5.0.0
+  image: ^4.1.0  # For JPEG compression
+
+  # UI
+  cupertino_icons: ^1.0.6
+
+  # JSON
+  json_annotation: ^4.8.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+  # Code generation
+  build_runner: ^2.4.0
+  drift_dev: ^2.14.0
+  json_serializable: ^6.7.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/js/
