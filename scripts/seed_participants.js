@@ -9,7 +9,7 @@
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { execSync } from 'child_process';
-import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 
 const PROJECT_ID = 'r01-redditx-suicide';
 const COLLECTION = 'valid_participants';
@@ -48,9 +48,9 @@ async function initializeFirebase() {
 
   if (serviceAccountPath && existsSync(serviceAccountPath)) {
     console.log('Using service account from GOOGLE_APPLICATION_CREDENTIALS');
-    const serviceAccount = await import(serviceAccountPath, { assert: { type: 'json' } });
+    const serviceAccount = JSON.parse(readFileSync(serviceAccountPath, 'utf8'));
     initializeApp({
-      credential: cert(serviceAccount.default),
+      credential: cert(serviceAccount),
       projectId: PROJECT_ID,
     });
   } else {
