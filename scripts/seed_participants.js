@@ -1,14 +1,14 @@
 /**
  * Seed script to populate Firestore with 10,000 valid participant IDs.
+ * IDs are randomly generated 9-digit numbers (no duplicates).
  *
  * Usage:
  *   1. Make sure you're logged in: firebase login
- *   2. Run: npm run seed
+ *   2. Run: GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json npm run seed
  */
 
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 
 const PROJECT_ID = 'r01-redditx-suicide';
@@ -17,33 +17,38 @@ const TOTAL_IDS = 10000;
 const BATCH_SIZE = 500; // Firestore batch limit
 
 /**
- * Get Firebase access token using firebase CLI
+ * Generate a random 9-digit number as a string with leading zeros if needed
  */
-function getFirebaseToken() {
-  try {
-    // Use firebase CLI to get access token
-    const result = execSync('firebase --project r01-redditx-suicide login:ci --no-localhost 2>/dev/null || firebase auth:export --project r01-redditx-suicide 2>&1 | head -1', {
-      encoding: 'utf8'
-    });
-    return result.trim();
-  } catch (e) {
-    return null;
-  }
-}
-
-/**
- * Generate a 9-digit participant ID with leading zeros
- */
-function generateParticipantId(num) {
+function generateRandomParticipantId() {
+  // Generate random number between 0 and 999999999
+  const num = Math.floor(Math.random() * 1000000000);
   return String(num).padStart(9, '0');
 }
 
 /**
+ * Generate a set of unique random 9-digit participant IDs
+ */
+function generateUniqueParticipantIds(count) {
+  const ids = new Set();
+
+  console.log(`Generating ${count} unique random 9-digit IDs...`);
+
+  while (ids.size < count) {
+    ids.add(generateRandomParticipantId());
+
+    // Progress update every 1000
+    if (ids.size % 1000 === 0) {
+      console.log(`Generated ${ids.size}/${count} unique IDs...`);
+    }
+  }
+
+  return Array.from(ids);
+}
+
+/**
  * Initialize Firebase Admin using service account from environment
- * or fallback to application default credentials
  */
 async function initializeFirebase() {
-  // Check for service account key file
   const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
   if (serviceAccountPath && existsSync(serviceAccountPath)) {
@@ -54,38 +59,46 @@ async function initializeFirebase() {
       projectId: PROJECT_ID,
     });
   } else {
-    // Try using the gcloud credentials file location
-    const homeDir = process.env.HOME;
-    const gcloudCredPath = `${homeDir}/.config/gcloud/application_default_credentials.json`;
+    console.error(`
+No credentials found. Please set GOOGLE_APPLICATION_CREDENTIALS:
 
-    if (existsSync(gcloudCredPath)) {
-      console.log('Using gcloud application default credentials');
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = gcloudCredPath;
-      const { applicationDefault } = await import('firebase-admin/app');
-      initializeApp({
-        credential: applicationDefault(),
-        projectId: PROJECT_ID,
-      });
-    } else {
-      console.error(`
-No credentials found. Please do one of the following:
-
-Option 1: Download service account key
-  1. Go to Firebase Console > Project Settings > Service Accounts
-  2. Click "Generate new private key"
-  3. Save the JSON file and run:
-     GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json npm run seed
-
-Option 2: Install gcloud CLI and authenticate
-  1. Install: https://cloud.google.com/sdk/docs/install
-  2. Run: gcloud auth application-default login
-  3. Then run: npm run seed
+  GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json npm run seed
 `);
-      process.exit(1);
-    }
+    process.exit(1);
   }
 
   return getFirestore();
+}
+
+/**
+ * Delete all existing documents in the collection
+ */
+async function clearCollection(db) {
+  console.log(`Clearing existing ${COLLECTION} collection...`);
+
+  const collectionRef = db.collection(COLLECTION);
+  const snapshot = await collectionRef.limit(500).get();
+
+  if (snapshot.empty) {
+    console.log('Collection is empty, nothing to clear.');
+    return;
+  }
+
+  let totalDeleted = 0;
+  let docs = snapshot.docs;
+
+  while (docs.length > 0) {
+    const batch = db.batch();
+    docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+    totalDeleted += docs.length;
+    console.log(`Deleted ${totalDeleted} documents...`);
+
+    const nextSnapshot = await collectionRef.limit(500).get();
+    docs = nextSnapshot.docs;
+  }
+
+  console.log(`Cleared ${totalDeleted} existing documents.`);
 }
 
 /**
@@ -94,16 +107,21 @@ Option 2: Install gcloud CLI and authenticate
 async function seedParticipants() {
   const db = await initializeFirebase();
 
-  console.log(`Starting to seed ${TOTAL_IDS} participant IDs...`);
+  // Clear existing data first
+  await clearCollection(db);
+
+  // Generate unique random IDs
+  const participantIds = generateUniqueParticipantIds(TOTAL_IDS);
+
+  console.log(`\nStarting to seed ${TOTAL_IDS} participant IDs...`);
 
   let totalWritten = 0;
 
-  for (let batchStart = 1; batchStart <= TOTAL_IDS; batchStart += BATCH_SIZE) {
+  for (let i = 0; i < participantIds.length; i += BATCH_SIZE) {
     const batch = db.batch();
-    const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, TOTAL_IDS);
+    const batchIds = participantIds.slice(i, i + BATCH_SIZE);
 
-    for (let i = batchStart; i <= batchEnd; i++) {
-      const participantId = generateParticipantId(i);
+    for (const participantId of batchIds) {
       const docRef = db.collection(COLLECTION).doc(participantId);
 
       batch.set(docRef, {
@@ -117,13 +135,16 @@ async function seedParticipants() {
     }
 
     await batch.commit();
-    totalWritten += (batchEnd - batchStart + 1);
+    totalWritten += batchIds.length;
     console.log(`Progress: ${totalWritten}/${TOTAL_IDS} (${((totalWritten/TOTAL_IDS)*100).toFixed(1)}%)`);
   }
 
+  // Show some sample IDs
+  const sampleIds = participantIds.slice(0, 5);
+
   console.log(`\nSuccessfully seeded ${totalWritten} participant IDs!`);
   console.log(`Collection: ${COLLECTION}`);
-  console.log(`ID range: ${generateParticipantId(1)} - ${generateParticipantId(TOTAL_IDS)}`);
+  console.log(`Sample IDs: ${sampleIds.join(', ')}...`);
 }
 
 // Run the seed
