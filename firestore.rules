@@ -19,6 +19,12 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Valid participants collection - master list of valid IDs
+    match /valid_participants/{participantId} {
+      // Allow read to validate IDs, allow write to mark as in-use
+      allow read, write: if true;
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

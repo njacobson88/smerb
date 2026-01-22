@@ -20,19 +20,64 @@ class EnrollmentScreen extends StatefulWidget {
 class _EnrollmentScreenState extends State<EnrollmentScreen> {
   final _formKey = GlobalKey<FormState>();
   final _participantIdController = TextEditingController();
+  final _confirmIdController = TextEditingController();
   final _participantService = ParticipantService();
 
   bool _isLoading = false;
   String? _errorMessage;
 
+  // Retry and rate limiting
+  static const int _maxRetries = 5;
+  int _failedAttempts = 0;
+  DateTime? _lastAttemptTime;
+  static const Duration _rateLimitDuration = Duration(minutes: 1);
+
   @override
   void dispose() {
     _participantIdController.dispose();
+    _confirmIdController.dispose();
     super.dispose();
   }
 
+  bool get _isRateLimited {
+    if (_failedAttempts < _maxRetries) return false;
+    if (_lastAttemptTime == null) return false;
+
+    final elapsed = DateTime.now().difference(_lastAttemptTime!);
+    return elapsed < _rateLimitDuration;
+  }
+
+  Duration get _remainingRateLimitTime {
+    if (_lastAttemptTime == null) return Duration.zero;
+    final elapsed = DateTime.now().difference(_lastAttemptTime!);
+    final remaining = _rateLimitDuration - elapsed;
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
   Future<void> _enroll() async {
+    // Check rate limiting
+    if (_isRateLimited) {
+      final remaining = _remainingRateLimitTime;
+      setState(() {
+        _errorMessage = 'Too many attempts. Please wait ${remaining.inSeconds} seconds before trying again.';
+      });
+      return;
+    }
+
     if (!_formKey.currentState!.validate()) return;
+
+    // Check if IDs match
+    final participantId = _participantIdController.text.trim();
+    final confirmId = _confirmIdController.text.trim();
+
+    if (participantId != confirmId) {
+      setState(() {
+        _errorMessage = 'Participant IDs do not match. Please re-enter.';
+        _failedAttempts++;
+        _lastAttemptTime = DateTime.now();
+      });
+      return;
+    }
 
     setState(() {
       _isLoading = true;
@@ -40,10 +85,38 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     });
 
     try {
-      final participantId = _participantIdController.text.trim().toUpperCase();
+      // Validate against Firebase
+      final validationResult = await _participantService.validateParticipantId(participantId);
+
+      if (!validationResult.isValid) {
+        setState(() {
+          _errorMessage = validationResult.errorMessage;
+          _isLoading = false;
+          _failedAttempts++;
+          _lastAttemptTime = DateTime.now();
+        });
+        return;
+      }
 
       // Generate a unique visitor ID for this device
       final visitorId = const Uuid().v4();
+
+      // Mark the participant ID as in-use in Firebase
+      final marked = await _participantService.markParticipantIdAsInUse(
+        participantId: participantId,
+        visitorId: visitorId,
+        deviceInfo: {'platform': 'ios', 'enrolledAt': DateTime.now().toIso8601String()},
+      );
+
+      if (!marked) {
+        setState(() {
+          _errorMessage = 'Failed to register. Please try again.';
+          _isLoading = false;
+          _failedAttempts++;
+          _lastAttemptTime = DateTime.now();
+        });
+        return;
+      }
 
       // Enroll the participant locally
       final participant = await _participantService.enroll(
@@ -51,7 +124,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         visitorId: visitorId,
       );
 
-      // Sync enrollment to Firebase (if uploadService provided)
+      // Sync enrollment to Firebase participants collection (if uploadService provided)
       if (widget.uploadService != null) {
         try {
           await widget.uploadService!.registerParticipant(
@@ -71,12 +144,17 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       setState(() {
         _errorMessage = 'Enrollment failed: $e';
         _isLoading = false;
+        _failedAttempts++;
+        _lastAttemptTime = DateTime.now();
       });
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final retriesRemaining = _maxRetries - _failedAttempts;
+    final showRetriesWarning = _failedAttempts > 0 && retriesRemaining > 0;
+
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -89,7 +167,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 const SizedBox(height: 48),
 
                 // Logo/Title
-                Icon(
+                const Icon(
                   Icons.science_outlined,
                   size: 80,
                   color: Colors.deepOrange,
@@ -124,7 +202,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                       children: [
                         Row(
                           children: [
-                            Icon(Icons.info_outline, color: Colors.blue),
+                            const Icon(Icons.info_outline, color: Colors.blue),
                             const SizedBox(width: 8),
                             Text(
                               'Study Information',
@@ -155,7 +233,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'This ID was provided to you by the research team.',
+                  'This 9-digit ID was provided to you by the research team.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Colors.grey[600],
                   ),
@@ -165,24 +243,82 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 TextFormField(
                   controller: _participantIdController,
                   decoration: InputDecoration(
-                    hintText: 'e.g., SMERB-001',
+                    labelText: 'Participant ID',
+                    hintText: 'e.g., 000000001',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                     ),
                     prefixIcon: const Icon(Icons.badge_outlined),
                   ),
-                  textCapitalization: TextCapitalization.characters,
+                  keyboardType: TextInputType.number,
+                  maxLength: 9,
                   validator: (value) {
                     if (value == null || value.trim().isEmpty) {
                       return 'Please enter your Participant ID';
                     }
-                    if (value.trim().length < 3) {
-                      return 'Participant ID must be at least 3 characters';
+                    if (value.trim().length != 9) {
+                      return 'Participant ID must be exactly 9 digits';
+                    }
+                    if (!RegExp(r'^\d{9}$').hasMatch(value.trim())) {
+                      return 'Participant ID must contain only numbers';
                     }
                     return null;
                   },
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 16),
+
+                // Confirm Participant ID Input
+                TextFormField(
+                  controller: _confirmIdController,
+                  decoration: InputDecoration(
+                    labelText: 'Confirm Participant ID',
+                    hintText: 'Re-enter your ID',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    prefixIcon: const Icon(Icons.badge_outlined),
+                  ),
+                  keyboardType: TextInputType.number,
+                  maxLength: 9,
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'Please confirm your Participant ID';
+                    }
+                    if (value.trim().length != 9) {
+                      return 'Participant ID must be exactly 9 digits';
+                    }
+                    if (!RegExp(r'^\d{9}$').hasMatch(value.trim())) {
+                      return 'Participant ID must contain only numbers';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+
+                // Retries warning
+                if (showRetriesWarning) ...[
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange[50],
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange[200]!),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.warning_amber, color: Colors.orange[700]),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '$retriesRemaining attempt${retriesRemaining == 1 ? '' : 's'} remaining',
+                            style: TextStyle(color: Colors.orange[700]),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
 
                 // Error message
                 if (_errorMessage != null) ...[
@@ -195,7 +331,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                     ),
                     child: Row(
                       children: [
-                        Icon(Icons.error_outline, color: Colors.red),
+                        Icon(Icons.error_outline, color: Colors.red[700]),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -211,7 +347,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
                 // Enroll Button
                 ElevatedButton(
-                  onPressed: _isLoading ? null : _enroll,
+                  onPressed: (_isLoading || _isRateLimited) ? null : _enroll,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.deepOrange,
                     foregroundColor: Colors.white,
@@ -229,13 +365,21 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                             color: Colors.white,
                           ),
                         )
-                      : const Text(
-                          'Enroll in Study',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                      : _isRateLimited
+                          ? Text(
+                              'Please wait ${_remainingRateLimitTime.inSeconds}s',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            )
+                          : const Text(
+                              'Enroll in Study',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                 ),
                 const SizedBox(height: 24),
 

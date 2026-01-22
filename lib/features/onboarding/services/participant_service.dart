@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Model for participant data
@@ -76,11 +77,42 @@ class Participant {
   );
 }
 
+/// Result of participant ID validation
+class ValidationResult {
+  final bool isValid;
+  final String? errorMessage;
+  final bool isAlreadyInUse;
+
+  ValidationResult({
+    required this.isValid,
+    this.errorMessage,
+    this.isAlreadyInUse = false,
+  });
+
+  factory ValidationResult.valid() => ValidationResult(isValid: true);
+
+  factory ValidationResult.invalid(String message) => ValidationResult(
+    isValid: false,
+    errorMessage: message,
+  );
+
+  factory ValidationResult.inUse() => ValidationResult(
+    isValid: false,
+    errorMessage: 'This participant ID is already enrolled on another device',
+    isAlreadyInUse: true,
+  );
+}
+
 /// Service for managing participant data
 class ParticipantService {
   static const String _participantKey = 'smerb_participant';
+  static const String _validParticipantsCollection = 'valid_participants';
 
   SharedPreferences? _prefs;
+  final FirebaseFirestore _firestore;
+
+  ParticipantService({FirebaseFirestore? firestore})
+      : _firestore = firestore ?? FirebaseFirestore.instance;
 
   Future<SharedPreferences> get _preferences async {
     _prefs ??= await SharedPreferences.getInstance();
@@ -91,6 +123,68 @@ class ParticipantService {
   Future<bool> isEnrolled() async {
     final prefs = await _preferences;
     return prefs.containsKey(_participantKey);
+  }
+
+  /// Validate a participant ID against Firebase
+  /// Returns ValidationResult indicating if the ID is valid and available
+  Future<ValidationResult> validateParticipantId(String participantId) async {
+    // Normalize the ID (trim whitespace, ensure proper format)
+    final normalizedId = participantId.trim();
+
+    // Basic format validation: must be exactly 9 digits
+    if (normalizedId.length != 9) {
+      return ValidationResult.invalid('Participant ID must be exactly 9 digits');
+    }
+    if (!RegExp(r'^\d{9}$').hasMatch(normalizedId)) {
+      return ValidationResult.invalid('Participant ID must contain only numbers');
+    }
+
+    try {
+      // Check if the ID exists in the valid_participants collection
+      final doc = await _firestore
+          .collection(_validParticipantsCollection)
+          .doc(normalizedId)
+          .get();
+
+      if (!doc.exists) {
+        return ValidationResult.invalid('Invalid participant ID. Please check your ID and try again.');
+      }
+
+      // Check if already in use
+      final data = doc.data();
+      if (data != null && data['inUse'] == true) {
+        return ValidationResult.inUse();
+      }
+
+      return ValidationResult.valid();
+    } catch (e) {
+      print('[ParticipantService] Error validating participant ID: $e');
+      return ValidationResult.invalid('Unable to verify participant ID. Please check your internet connection.');
+    }
+  }
+
+  /// Mark a participant ID as in-use in Firebase
+  Future<bool> markParticipantIdAsInUse({
+    required String participantId,
+    required String visitorId,
+    Map<String, dynamic>? deviceInfo,
+  }) async {
+    try {
+      await _firestore
+          .collection(_validParticipantsCollection)
+          .doc(participantId)
+          .update({
+        'inUse': true,
+        'enrolledAt': FieldValue.serverTimestamp(),
+        'enrolledByVisitorId': visitorId,
+        'enrolledByDeviceInfo': deviceInfo,
+      });
+      print('[ParticipantService] Marked participant ID as in-use: $participantId');
+      return true;
+    } catch (e) {
+      print('[ParticipantService] Error marking participant ID as in-use: $e');
+      return false;
+    }
   }
 
   /// Get the current participant

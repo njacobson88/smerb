@@ -1,0 +1,12 @@
+{
+  "name": "smerb-scripts",
+  "version": "1.0.0",
+  "description": "Admin scripts for SMERB",
+  "type": "module",
+  "scripts": {
+    "seed": "node seed_participants.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}
