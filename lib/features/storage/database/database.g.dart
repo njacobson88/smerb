@@ -2336,6 +2336,429 @@ class HtmlStatusLogsCompanion extends UpdateCompanion<HtmlStatusLog> {
   }
 }
 
+class $EmaResponsesTable extends EmaResponses
+    with TableInfo<$EmaResponsesTable, EmaResponse> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $EmaResponsesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+      'id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _participantIdMeta =
+      const VerificationMeta('participantId');
+  @override
+  late final GeneratedColumn<String> participantId = GeneratedColumn<String>(
+      'participant_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _responsesMeta =
+      const VerificationMeta('responses');
+  @override
+  late final GeneratedColumn<String> responses = GeneratedColumn<String>(
+      'responses', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _startedAtMeta =
+      const VerificationMeta('startedAt');
+  @override
+  late final GeneratedColumn<DateTime> startedAt = GeneratedColumn<DateTime>(
+      'started_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _completedAtMeta =
+      const VerificationMeta('completedAt');
+  @override
+  late final GeneratedColumn<DateTime> completedAt = GeneratedColumn<DateTime>(
+      'completed_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _selfInitiatedMeta =
+      const VerificationMeta('selfInitiated');
+  @override
+  late final GeneratedColumn<bool> selfInitiated = GeneratedColumn<bool>(
+      'self_initiated', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'CHECK ("self_initiated" IN (0, 1))'),
+      defaultValue: const Constant(true));
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+      'synced', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("synced" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        participantId,
+        sessionId,
+        responses,
+        startedAt,
+        completedAt,
+        selfInitiated,
+        synced
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'ema_responses';
+  @override
+  VerificationContext validateIntegrity(Insertable<EmaResponse> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('participant_id')) {
+      context.handle(
+          _participantIdMeta,
+          participantId.isAcceptableOrUnknown(
+              data['participant_id']!, _participantIdMeta));
+    } else if (isInserting) {
+      context.missing(_participantIdMeta);
+    }
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('responses')) {
+      context.handle(_responsesMeta,
+          responses.isAcceptableOrUnknown(data['responses']!, _responsesMeta));
+    } else if (isInserting) {
+      context.missing(_responsesMeta);
+    }
+    if (data.containsKey('started_at')) {
+      context.handle(_startedAtMeta,
+          startedAt.isAcceptableOrUnknown(data['started_at']!, _startedAtMeta));
+    } else if (isInserting) {
+      context.missing(_startedAtMeta);
+    }
+    if (data.containsKey('completed_at')) {
+      context.handle(
+          _completedAtMeta,
+          completedAt.isAcceptableOrUnknown(
+              data['completed_at']!, _completedAtMeta));
+    } else if (isInserting) {
+      context.missing(_completedAtMeta);
+    }
+    if (data.containsKey('self_initiated')) {
+      context.handle(
+          _selfInitiatedMeta,
+          selfInitiated.isAcceptableOrUnknown(
+              data['self_initiated']!, _selfInitiatedMeta));
+    }
+    if (data.containsKey('synced')) {
+      context.handle(_syncedMeta,
+          synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  EmaResponse map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return EmaResponse(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
+      participantId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}participant_id'])!,
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      responses: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}responses'])!,
+      startedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}started_at'])!,
+      completedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}completed_at'])!,
+      selfInitiated: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}self_initiated'])!,
+      synced: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}synced'])!,
+    );
+  }
+
+  @override
+  $EmaResponsesTable createAlias(String alias) {
+    return $EmaResponsesTable(attachedDatabase, alias);
+  }
+}
+
+class EmaResponse extends DataClass implements Insertable<EmaResponse> {
+  final String id;
+  final String participantId;
+  final String sessionId;
+  final String responses;
+  final DateTime startedAt;
+  final DateTime completedAt;
+  final bool selfInitiated;
+  final bool synced;
+  const EmaResponse(
+      {required this.id,
+      required this.participantId,
+      required this.sessionId,
+      required this.responses,
+      required this.startedAt,
+      required this.completedAt,
+      required this.selfInitiated,
+      required this.synced});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['participant_id'] = Variable<String>(participantId);
+    map['session_id'] = Variable<String>(sessionId);
+    map['responses'] = Variable<String>(responses);
+    map['started_at'] = Variable<DateTime>(startedAt);
+    map['completed_at'] = Variable<DateTime>(completedAt);
+    map['self_initiated'] = Variable<bool>(selfInitiated);
+    map['synced'] = Variable<bool>(synced);
+    return map;
+  }
+
+  EmaResponsesCompanion toCompanion(bool nullToAbsent) {
+    return EmaResponsesCompanion(
+      id: Value(id),
+      participantId: Value(participantId),
+      sessionId: Value(sessionId),
+      responses: Value(responses),
+      startedAt: Value(startedAt),
+      completedAt: Value(completedAt),
+      selfInitiated: Value(selfInitiated),
+      synced: Value(synced),
+    );
+  }
+
+  factory EmaResponse.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return EmaResponse(
+      id: serializer.fromJson<String>(json['id']),
+      participantId: serializer.fromJson<String>(json['participantId']),
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      responses: serializer.fromJson<String>(json['responses']),
+      startedAt: serializer.fromJson<DateTime>(json['startedAt']),
+      completedAt: serializer.fromJson<DateTime>(json['completedAt']),
+      selfInitiated: serializer.fromJson<bool>(json['selfInitiated']),
+      synced: serializer.fromJson<bool>(json['synced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'participantId': serializer.toJson<String>(participantId),
+      'sessionId': serializer.toJson<String>(sessionId),
+      'responses': serializer.toJson<String>(responses),
+      'startedAt': serializer.toJson<DateTime>(startedAt),
+      'completedAt': serializer.toJson<DateTime>(completedAt),
+      'selfInitiated': serializer.toJson<bool>(selfInitiated),
+      'synced': serializer.toJson<bool>(synced),
+    };
+  }
+
+  EmaResponse copyWith(
+          {String? id,
+          String? participantId,
+          String? sessionId,
+          String? responses,
+          DateTime? startedAt,
+          DateTime? completedAt,
+          bool? selfInitiated,
+          bool? synced}) =>
+      EmaResponse(
+        id: id ?? this.id,
+        participantId: participantId ?? this.participantId,
+        sessionId: sessionId ?? this.sessionId,
+        responses: responses ?? this.responses,
+        startedAt: startedAt ?? this.startedAt,
+        completedAt: completedAt ?? this.completedAt,
+        selfInitiated: selfInitiated ?? this.selfInitiated,
+        synced: synced ?? this.synced,
+      );
+  @override
+  String toString() {
+    return (StringBuffer('EmaResponse(')
+          ..write('id: $id, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('responses: $responses, ')
+          ..write('startedAt: $startedAt, ')
+          ..write('completedAt: $completedAt, ')
+          ..write('selfInitiated: $selfInitiated, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, participantId, sessionId, responses,
+      startedAt, completedAt, selfInitiated, synced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is EmaResponse &&
+          other.id == this.id &&
+          other.participantId == this.participantId &&
+          other.sessionId == this.sessionId &&
+          other.responses == this.responses &&
+          other.startedAt == this.startedAt &&
+          other.completedAt == this.completedAt &&
+          other.selfInitiated == this.selfInitiated &&
+          other.synced == this.synced);
+}
+
+class EmaResponsesCompanion extends UpdateCompanion<EmaResponse> {
+  final Value<String> id;
+  final Value<String> participantId;
+  final Value<String> sessionId;
+  final Value<String> responses;
+  final Value<DateTime> startedAt;
+  final Value<DateTime> completedAt;
+  final Value<bool> selfInitiated;
+  final Value<bool> synced;
+  final Value<int> rowid;
+  const EmaResponsesCompanion({
+    this.id = const Value.absent(),
+    this.participantId = const Value.absent(),
+    this.sessionId = const Value.absent(),
+    this.responses = const Value.absent(),
+    this.startedAt = const Value.absent(),
+    this.completedAt = const Value.absent(),
+    this.selfInitiated = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  EmaResponsesCompanion.insert({
+    required String id,
+    required String participantId,
+    required String sessionId,
+    required String responses,
+    required DateTime startedAt,
+    required DateTime completedAt,
+    this.selfInitiated = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        participantId = Value(participantId),
+        sessionId = Value(sessionId),
+        responses = Value(responses),
+        startedAt = Value(startedAt),
+        completedAt = Value(completedAt);
+  static Insertable<EmaResponse> custom({
+    Expression<String>? id,
+    Expression<String>? participantId,
+    Expression<String>? sessionId,
+    Expression<String>? responses,
+    Expression<DateTime>? startedAt,
+    Expression<DateTime>? completedAt,
+    Expression<bool>? selfInitiated,
+    Expression<bool>? synced,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (participantId != null) 'participant_id': participantId,
+      if (sessionId != null) 'session_id': sessionId,
+      if (responses != null) 'responses': responses,
+      if (startedAt != null) 'started_at': startedAt,
+      if (completedAt != null) 'completed_at': completedAt,
+      if (selfInitiated != null) 'self_initiated': selfInitiated,
+      if (synced != null) 'synced': synced,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  EmaResponsesCompanion copyWith(
+      {Value<String>? id,
+      Value<String>? participantId,
+      Value<String>? sessionId,
+      Value<String>? responses,
+      Value<DateTime>? startedAt,
+      Value<DateTime>? completedAt,
+      Value<bool>? selfInitiated,
+      Value<bool>? synced,
+      Value<int>? rowid}) {
+    return EmaResponsesCompanion(
+      id: id ?? this.id,
+      participantId: participantId ?? this.participantId,
+      sessionId: sessionId ?? this.sessionId,
+      responses: responses ?? this.responses,
+      startedAt: startedAt ?? this.startedAt,
+      completedAt: completedAt ?? this.completedAt,
+      selfInitiated: selfInitiated ?? this.selfInitiated,
+      synced: synced ?? this.synced,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (participantId.present) {
+      map['participant_id'] = Variable<String>(participantId.value);
+    }
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (responses.present) {
+      map['responses'] = Variable<String>(responses.value);
+    }
+    if (startedAt.present) {
+      map['started_at'] = Variable<DateTime>(startedAt.value);
+    }
+    if (completedAt.present) {
+      map['completed_at'] = Variable<DateTime>(completedAt.value);
+    }
+    if (selfInitiated.present) {
+      map['self_initiated'] = Variable<bool>(selfInitiated.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('EmaResponsesCompanion(')
+          ..write('id: $id, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('responses: $responses, ')
+          ..write('startedAt: $startedAt, ')
+          ..write('completedAt: $completedAt, ')
+          ..write('selfInitiated: $selfInitiated, ')
+          ..write('synced: $synced, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   late final $EventsTable events = $EventsTable(this);
@@ -2343,10 +2766,17 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $OcrResultsTable ocrResults = $OcrResultsTable(this);
   late final $HtmlCapturesTable htmlCaptures = $HtmlCapturesTable(this);
   late final $HtmlStatusLogsTable htmlStatusLogs = $HtmlStatusLogsTable(this);
+  late final $EmaResponsesTable emaResponses = $EmaResponsesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
   @override
-  List<DatabaseSchemaEntity> get allSchemaEntities =>
-      [events, sessions, ocrResults, htmlCaptures, htmlStatusLogs];
+  List<DatabaseSchemaEntity> get allSchemaEntities => [
+        events,
+        sessions,
+        ocrResults,
+        htmlCaptures,
+        htmlStatusLogs,
+        emaResponses
+      ];
 }

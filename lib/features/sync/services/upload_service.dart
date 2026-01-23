@@ -13,6 +13,7 @@ class UploadService {
   bool _isSyncing = false;
   bool _isSyncingOcr = false;
   bool _isSyncingHtml = false;
+  bool _isSyncingEma = false;
 
   // Sync progress tracking
   int _eventsSynced = 0;
@@ -20,6 +21,7 @@ class UploadService {
   int _screenshotsUploaded = 0;
   int _htmlCapturesSynced = 0;
   int _htmlStatusLogsSynced = 0;
+  int _emaResponsesSynced = 0;
 
   UploadService({
     required this.database,
@@ -452,6 +454,69 @@ class UploadService {
 
   /// Sync all data (events + OCR results + HTML) efficiently
   /// Returns a map with counts of synced items
+  /// Sync EMA check-in responses to Firebase
+  Future<int> syncEmaResponses({int batchSize = 50}) async {
+    if (_isSyncingEma) {
+      print('[UploadService] EMA sync already in progress, skipping');
+      return 0;
+    }
+
+    _isSyncingEma = true;
+    int totalSynced = 0;
+
+    try {
+      final unsyncedResponses = await database.getUnsyncedEmaResponses(limit: batchSize);
+      if (unsyncedResponses.isEmpty) {
+        return 0;
+      }
+
+      print('[UploadService] Processing batch of ${unsyncedResponses.length} EMA responses');
+
+      final syncedIds = <String>[];
+      for (final response in unsyncedResponses) {
+        try {
+          await _uploadEmaResponse(response);
+          syncedIds.add(response.id);
+        } catch (e) {
+          print('[UploadService] Failed to sync EMA response ${response.id}: $e');
+        }
+      }
+
+      if (syncedIds.isNotEmpty) {
+        await database.markEmaResponsesAsSynced(syncedIds);
+        totalSynced = syncedIds.length;
+        _emaResponsesSynced += totalSynced;
+        print('[UploadService] EMA sync complete. Total: $totalSynced');
+      }
+    } finally {
+      _isSyncingEma = false;
+    }
+
+    return totalSynced;
+  }
+
+  Future<void> _uploadEmaResponse(EmaResponse response) async {
+    final docRef = _firestore
+        .collection('participants')
+        .doc(response.participantId)
+        .collection('ema_responses')
+        .doc(response.id);
+
+    final data = <String, dynamic>{
+      'id': response.id,
+      'participantId': response.participantId,
+      'sessionId': response.sessionId,
+      'responses': response.responses, // Already JSON string
+      'startedAt': Timestamp.fromDate(response.startedAt),
+      'completedAt': Timestamp.fromDate(response.completedAt),
+      'selfInitiated': response.selfInitiated,
+      'syncedAt': FieldValue.serverTimestamp(),
+    };
+
+    await docRef.set(data);
+    print('[UploadService] Uploaded EMA response: ${response.id}');
+  }
+
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
     // Reset progress counters
     _eventsSynced = 0;
@@ -459,6 +524,7 @@ class UploadService {
     _screenshotsUploaded = 0;
     _htmlCapturesSynced = 0;
     _htmlStatusLogsSynced = 0;
+    _emaResponsesSynced = 0;
 
     // Sync events first (includes OCR data for screenshots)
     final eventsSynced = await syncEvents(batchSize: eventBatchSize);
@@ -472,12 +538,16 @@ class UploadService {
     // Sync HTML status logs (update events with unchanged status)
     final htmlStatusLogsSynced = await syncHtmlStatusLogs(batchSize: eventBatchSize);
 
+    // Sync EMA check-in responses
+    final emaSynced = await syncEmaResponses(batchSize: eventBatchSize);
+
     return {
       'events': eventsSynced,
       'ocrResults': ocrSynced,
       'screenshots': _screenshotsUploaded,
       'htmlCaptures': htmlCapturesSynced,
       'htmlStatusLogs': htmlStatusLogsSynced,
+      'emaResponses': emaSynced,
     };
   }
 
@@ -488,6 +558,7 @@ class UploadService {
     final totalOcr = await database.getOcrResultCount();
     final unsyncedOcr = await database.getUnsyncedOcrResults();
     final pendingHtml = await database.getPendingHtmlSyncCount();
+    final unsyncedEma = await database.getUnsyncedEmaResponses();
 
     return {
       'totalEvents': total,
@@ -496,6 +567,7 @@ class UploadService {
       'totalOcr': totalOcr,
       'pendingOcr': unsyncedOcr.length,
       'pendingHtml': pendingHtml,
+      'pendingEma': unsyncedEma.length,
     };
   }
 

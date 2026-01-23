@@ -7,6 +7,7 @@ import '../../../features/storage/database/database.dart';
 import '../../../features/sync/services/upload_service.dart';
 import '../../../features/onboarding/services/participant_service.dart';
 import '../../../features/debug/screens/debug_screen.dart';
+import '../../../features/checkin/screens/checkin_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   final CaptureService captureService;
@@ -184,6 +185,23 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _reload() {
     _controller?.reload();
+  }
+
+  void _openCheckin() async {
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => CheckinScreen(
+          database: widget.database,
+          participantId: widget.captureService.participantId,
+          sessionId: widget.captureService.currentSessionId ?? '',
+          selfInitiated: true,
+        ),
+      ),
+    );
+    if (result == true) {
+      print('[Browser] Check-in completed successfully');
+    }
   }
 
   void _goBack() async {
@@ -435,6 +453,32 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     icon: const Icon(Icons.arrow_forward),
                     onPressed: _goForward,
                     tooltip: 'Forward',
+                  ),
+                  // Check-in button
+                  GestureDetector(
+                    onTap: _openCheckin,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.green[600],
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check_circle_outline, color: Colors.white, size: 18),
+                          SizedBox(width: 4),
+                          Text(
+                            'Check-in',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                   Container(
                     decoration: BoxDecoration(

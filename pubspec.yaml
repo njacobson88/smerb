@@ -39,6 +39,19 @@ dependencies:
   # Local Storage
   shared_preferences: ^2.2.0
 
+  # Notifications & Scheduling
+  flutter_local_notifications: ^18.0.0
+  timezone: ^0.9.4
+
+  # URL Launcher (for crisis resources)
+  url_launcher: ^6.2.0
+
+  # Survey UI - card swiping
+  card_swiper: ^3.0.1
+
+  # HTTP for Cloud Function calls
+  http: ^1.2.0
+
   # OCR - On-device text recognition
 
   # Firebase
@@ -61,3 +74,4 @@ flutter:
 
   assets:
     - assets/js/
+    - assets/ema_questions.json

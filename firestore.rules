@@ -12,6 +12,16 @@ service cloud.firestore {
       match /events/{eventId} {
         allow read, write: if true;
       }
+
+      // EMA responses subcollection
+      match /ema_responses/{responseId} {
+        allow read, write: if true;
+      }
+
+      // Safety alerts subcollection (triggers Twilio paging)
+      match /safety_alerts/{alertId} {
+        allow read, write: if true;
+      }
     }
 
     // Sessions collection (optional top-level access)

@@ -74,6 +74,21 @@ class HtmlStatusLogs extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// EMA Responses table - stores check-in survey responses
+class EmaResponses extends Table {
+  TextColumn get id => text()();
+  TextColumn get participantId => text()();
+  TextColumn get sessionId => text()();
+  TextColumn get responses => text()(); // JSON string of all question responses
+  DateTimeColumn get startedAt => dateTime()();
+  DateTimeColumn get completedAt => dateTime()();
+  BoolColumn get selfInitiated => boolean().withDefault(const Constant(true))();
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 /// OCR Results table - stores extracted text from screenshots
 class OcrResults extends Table {
   TextColumn get id => text()();
@@ -95,12 +110,12 @@ class OcrResults extends Table {
 // DATABASE
 // ============================================================================
 
-@DriftDatabase(tables: [Events, Sessions, OcrResults, HtmlCaptures, HtmlStatusLogs])
+@DriftDatabase(tables: [Events, Sessions, OcrResults, HtmlCaptures, HtmlStatusLogs, EmaResponses])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -112,6 +127,9 @@ class AppDatabase extends _$AppDatabase {
       if (from < 3) {
         await m.createTable(htmlCaptures);
         await m.createTable(htmlStatusLogs);
+      }
+      if (from < 4) {
+        await m.createTable(emaResponses);
       }
     },
   );
@@ -345,6 +363,46 @@ class AppDatabase extends _$AppDatabase {
     final unsyncedCaptures = await getUnsyncedHtmlCaptures();
     final unsyncedLogs = await getUnsyncedHtmlStatusLogs();
     return unsyncedCaptures.length + unsyncedLogs.length;
+  }
+
+  // ==========================================================================
+  // EMA RESPONSE QUERIES
+  // ==========================================================================
+
+  /// Insert a new EMA response
+  Future<int> insertEmaResponse(EmaResponsesCompanion response) {
+    return into(emaResponses).insert(response);
+  }
+
+  /// Get unsynced EMA responses
+  Future<List<EmaResponse>> getUnsyncedEmaResponses({int? limit}) {
+    final query = select(emaResponses)..where((e) => e.synced.equals(false));
+    if (limit != null) {
+      query.limit(limit);
+    }
+    return query.get();
+  }
+
+  /// Mark EMA responses as synced
+  Future<int> markEmaResponsesAsSynced(List<String> responseIds) {
+    return (update(emaResponses)..where((e) => e.id.isIn(responseIds)))
+        .write(const EmaResponsesCompanion(synced: Value(true)));
+  }
+
+  /// Get all EMA responses for a participant
+  Future<List<EmaResponse>> getEmaResponsesForParticipant(String participantId) {
+    return (select(emaResponses)
+          ..where((e) => e.participantId.equals(participantId))
+          ..orderBy([(e) => OrderingTerm.desc(e.completedAt)]))
+        .get();
+  }
+
+  /// Get EMA response count
+  Future<int> getEmaResponseCount() async {
+    final count = countAll();
+    final query = selectOnly(emaResponses)..addColumns([count]);
+    final result = await query.getSingle();
+    return result.read(count) ?? 0;
   }
 
   /// Get screenshot events pending OCR processing

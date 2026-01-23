@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "title": "Check-in",
+  "sections": [
+    {
+      "name": "context_mood",
+      "title": "Context and Mood",
+      "questions": [
+        {
+          "id": "social_media_use",
+          "text": "In the last 4 hours, have you used social media (e.g., X/Twitter, Reddit)?",
+          "type": "yes_no",
+          "required": true,
+          "skip_logic": {
+            "show_if_yes": ["social_media_feeling"]
+          }
+        },
+        {
+          "id": "social_media_feeling",
+          "text": "How did you feel after using social media?",
+          "type": "likert",
+          "required": true,
+          "hidden": true,
+          "options": [
+            {"value": 1, "label": "Much worse"},
+            {"value": 2, "label": "Somewhat worse"},
+            {"value": 3, "label": "About the same"},
+            {"value": 4, "label": "Somewhat better"},
+            {"value": 5, "label": "Much better"}
+          ]
+        },
+        {
+          "id": "sad_depressed",
+          "text": "Right now, how sad or depressed are you feeling?",
+          "type": "slider",
+          "required": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "Not at all",
+          "max_label": "Extremely"
+        },
+        {
+          "id": "anxious_worried",
+          "text": "Right now, how anxious or worried are you feeling?",
+          "type": "slider",
+          "required": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "Not at all",
+          "max_label": "Extremely"
+        },
+        {
+          "id": "hopeless",
+          "text": "Right now, how hopeless are you feeling?",
+          "type": "slider",
+          "required": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "Not at all",
+          "max_label": "Extremely"
+        }
+      ]
+    },
+    {
+      "name": "suicidal_thoughts",
+      "title": "Suicidal Thoughts and Behaviors",
+      "questions": [
+        {
+          "id": "desire_intensity",
+          "text": "How intense is your desire to kill yourself right now?",
+          "type": "slider",
+          "required": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "None",
+          "max_label": "Extreme",
+          "safety_trigger": {"threshold": 30}
+        },
+        {
+          "id": "intention_strength",
+          "text": "How strong is your intention to kill yourself right now?",
+          "type": "slider",
+          "required": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "None",
+          "max_label": "Extreme",
+          "safety_trigger": {"threshold": 30}
+        },
+        {
+          "id": "ability_safe",
+          "text": "How able are you to keep yourself safe right now?",
+          "type": "slider",
+          "required": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "Not at all",
+          "max_label": "Completely"
+        },
+        {
+          "id": "thoughts_past_4hrs",
+          "text": "At any point in the last 4 hours, did you have any thoughts of killing yourself?",
+          "type": "yes_no",
+          "required": true,
+          "skip_logic": {
+            "show_if_yes": ["thoughts_duration", "thoughts_intent"]
+          }
+        },
+        {
+          "id": "thoughts_duration",
+          "text": "How long did these thoughts last?",
+          "type": "likert",
+          "required": true,
+          "hidden": true,
+          "options": [
+            {"value": 1, "label": "Less than a minute"},
+            {"value": 2, "label": "1-5 minutes"},
+            {"value": 3, "label": "6-10 minutes"},
+            {"value": 4, "label": "11-30 minutes"},
+            {"value": 5, "label": "31-60 minutes"},
+            {"value": 6, "label": "More than 60 minutes"}
+          ]
+        },
+        {
+          "id": "thoughts_intent",
+          "text": "How strong was your intent to act on these thoughts?",
+          "type": "slider",
+          "required": true,
+          "hidden": true,
+          "min": 0,
+          "max": 100,
+          "min_label": "None",
+          "max_label": "Extreme"
+        }
+      ]
+    }
+  ],
+  "safety_alert": {
+    "trigger_questions": ["desire_intensity", "intention_strength"],
+    "threshold": 30,
+    "question_text": "It seems like you are in a lot of distress right now. Are you in immediate danger of harming yourself?",
+    "crisis_resources": [
+      {"name": "988 Suicide & Crisis Lifeline", "action": "call", "value": "988"},
+      {"name": "Crisis Text Line", "action": "text", "value": "741741", "message": "HELLO"}
+    ]
+  },
+  "schedule": {
+    "windows_per_day": 3,
+    "window_duration_minutes": 60,
+    "between_windows_minutes": 240,
+    "default_first_window": "09:00",
+    "always_available": true
+  }
+}
