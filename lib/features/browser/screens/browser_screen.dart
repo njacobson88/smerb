@@ -237,23 +237,22 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Image.asset(
-          'assets/socialscope_banner.png',
-          fit: BoxFit.contain,
-          height: 32,
-        ),
-        centerTitle: false,
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF39A0EC), Color(0xFF587AE0), Color(0xFF7050E0)],
-              stops: [0.0, 0.5, 1.0],
-              begin: Alignment.centerLeft,
-              end: Alignment.centerRight,
-            ),
+        titleSpacing: 0,
+        flexibleSpace: SafeArea(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Image.asset(
+                'assets/socialscope_banner.png',
+                fit: BoxFit.fitHeight,
+              ),
+              const Expanded(
+                child: ColoredBox(color: Color(0xFF7050E0)),
+              ),
+            ],
           ),
         ),
-        backgroundColor: Colors.transparent,
+        backgroundColor: const Color(0xFF39A0EC),
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
