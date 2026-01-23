@@ -48,3 +48,14 @@ app.*.map.json
 Keys/
 *.json.key
 *-firebase-adminsdk-*.json
+
+# CocoaPods
+ios/Pods/
+macos/Pods/
+
+# Node modules
+node_modules/
+
+# Large binary files in deprecated folder
+old_potentially_deprecated/ios_pods/
+old_potentially_deprecated/tessdata/**/*.traineddata

@@ -121,10 +121,7 @@ class BackgroundSyncService {
       if (pendingCount > 0) {
         print('[BackgroundSync] Processing $pendingCount pending OCR items');
 
-        // Process in small batches to avoid blocking
-        // Using compute() to run OCR on a separate isolate would be ideal,
-        // but flutter_tesseract_ocr may not support isolates.
-        // Instead, we process in small batches with yields.
+        // Process in small batches to avoid blocking the main isolate.
         final processed = await ocrService.processPendingScreenshots(batchSize: 5);
 
         print('[BackgroundSync] Processed $processed OCR items');

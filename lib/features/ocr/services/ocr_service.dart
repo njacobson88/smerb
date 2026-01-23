@@ -1,12 +1,15 @@
 import 'dart:io';
 import 'dart:convert';
-import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
+import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import '../../storage/database/database.dart';
 import 'package:drift/drift.dart';
 
 /// Service for on-device OCR text extraction from screenshots
+/// Uses Apple Vision framework via method channel (iOS & macOS)
 class OcrService {
+  static const _channel = MethodChannel('com.smerb/ocr');
+
   final AppDatabase database;
 
   bool _isProcessing = false;
@@ -36,20 +39,15 @@ class OcrService {
 
       final stopwatch = Stopwatch()..start();
 
-      // Use Tesseract OCR with English language
-      final text = await FlutterTesseractOcr.extractText(
-        imagePath,
-        language: 'eng',
-        args: {
-          'psm': '3', // Fully automatic page segmentation
-          'oem': '1', // LSTM only
-        },
-      );
+      // Use Apple Vision framework via method channel
+      final text = await _channel.invokeMethod<String>('extractText', {
+        'imagePath': imagePath,
+      });
 
       stopwatch.stop();
-      print('[OcrService] Extracted ${text.length} chars in ${stopwatch.elapsedMilliseconds}ms');
+      print('[OcrService] Extracted ${text?.length ?? 0} chars in ${stopwatch.elapsedMilliseconds}ms');
 
-      return text.trim();
+      return text?.trim();
     } catch (e) {
       print('[OcrService] OCR extraction failed: $e');
       return null;

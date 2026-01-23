@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>OCR Test - Tesseract.js</title>
+  <script src="https://unpkg.com/tesseract.js@v4.0.2/dist/tesseract.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    h1 { color: #333; }
+    .container {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+    input[type="file"] {
+      margin: 10px 0;
+    }
+    button {
+      background: #ff5722;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover { background: #e64a19; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #preview {
+      max-width: 100%;
+      max-height: 400px;
+      margin: 10px 0;
+      border: 1px solid #ddd;
+      display: none;
+    }
+    #result {
+      background: #1e1e1e;
+      color: #4ec9b0;
+      padding: 15px;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      white-space: pre-wrap;
+      min-height: 100px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    #status {
+      color: #666;
+      font-style: italic;
+      margin: 10px 0;
+    }
+    #stats {
+      background: #e3f2fd;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .progress {
+      width: 100%;
+      height: 20px;
+      background: #e0e0e0;
+      border-radius: 10px;
+      overflow: hidden;
+      margin: 10px 0;
+      display: none;
+    }
+    .progress-bar {
+      height: 100%;
+      background: #ff5722;
+      width: 0%;
+      transition: width 0.3s;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔍 OCR Test - Tesseract.js</h1>
+
+  <div class="container">
+    <h3>1. Select an image</h3>
+    <input type="file" id="imageInput" accept="image/*">
+    <img id="preview" alt="Preview">
+  </div>
+
+  <div class="container">
+    <h3>2. Run OCR</h3>
+    <button id="runOcr" disabled>Extract Text</button>
+    <div class="progress" id="progressContainer">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="container">
+    <h3>3. Results</h3>
+    <div id="result">Select an image and click "Extract Text" to see OCR results here.</div>
+    <div id="stats" style="display:none;"></div>
+  </div>
+
+  <script>
+    const imageInput = document.getElementById('imageInput');
+    const preview = document.getElementById('preview');
+    const runOcrBtn = document.getElementById('runOcr');
+    const status = document.getElementById('status');
+    const result = document.getElementById('result');
+    const stats = document.getElementById('stats');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+
+    let selectedImage = null;
+
+    imageInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        selectedImage = URL.createObjectURL(file);
+        preview.src = selectedImage;
+        preview.style.display = 'block';
+        runOcrBtn.disabled = false;
+        result.textContent = 'Ready to extract text. Click "Extract Text" to begin.';
+        stats.style.display = 'none';
+      }
+    });
+
+    runOcrBtn.addEventListener('click', async () => {
+      if (!selectedImage) return;
+
+      runOcrBtn.disabled = true;
+      progressContainer.style.display = 'block';
+      progressBar.style.width = '0%';
+      status.textContent = 'Initializing Tesseract.js...';
+      result.textContent = 'Processing...';
+      stats.style.display = 'none';
+
+      const startTime = performance.now();
+
+      try {
+        const worker = await Tesseract.createWorker({
+          logger: m => {
+            if (m.status === 'recognizing text') {
+              progressBar.style.width = Math.round(m.progress * 100) + '%';
+            }
+            status.textContent = m.status + (m.progress ? ` (${Math.round(m.progress * 100)}%)` : '');
+          }
+        });
+
+        await worker.loadLanguage('eng');
+        await worker.initialize('eng');
+
+        const { data } = await worker.recognize(selectedImage);
+
+        await worker.terminate();
+
+        const endTime = performance.now();
+        const processingTime = Math.round(endTime - startTime);
+        const wordCount = data.text.trim().split(/\s+/).filter(w => w.length > 0).length;
+
+        result.textContent = data.text || '(No text detected)';
+
+        stats.innerHTML = `
+          <strong>Stats:</strong><br>
+          Words detected: <strong>${wordCount}</strong><br>
+          Processing time: <strong>${processingTime}ms</strong><br>
+          Confidence: <strong>${Math.round(data.confidence)}%</strong>
+        `;
+        stats.style.display = 'block';
+        status.textContent = 'Done!';
+        progressBar.style.width = '100%';
+
+      } catch (error) {
+        result.textContent = 'Error: ' + error.message;
+        status.textContent = 'Failed';
+        console.error(error);
+      }
+
+      runOcrBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>

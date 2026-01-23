@@ -42,6 +42,11 @@ android {
     }
 }
 
+dependencies {
+    // ML Kit Text Recognition for on-device OCR
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+}
+
 flutter {
     source = "../.."
 }
