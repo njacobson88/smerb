@@ -206,8 +206,6 @@ class _DebugScreenState extends State<DebugScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Debug Console'),
-        backgroundColor: Colors.deepOrange,
-        foregroundColor: Colors.white,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),

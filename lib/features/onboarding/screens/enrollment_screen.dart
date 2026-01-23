@@ -174,24 +174,24 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
                 // Logo/Title
                 const Icon(
-                  Icons.science_outlined,
+                  Icons.analytics_outlined,
                   size: 80,
-                  color: Colors.deepOrange,
+                  color: Color(0xFF4A6CF7),
                 ),
                 const SizedBox(height: 24),
 
                 Text(
-                  'SMERB',
+                  'SocialScope',
                   style: Theme.of(context).textTheme.headlineLarge?.copyWith(
                     fontWeight: FontWeight.bold,
-                    color: Colors.deepOrange,
+                    color: const Color(0xFF1A1A2E),
                   ),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 8),
 
                 Text(
-                  'Social Media Exposure Research Browser',
+                  'Social Media Research Platform',
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: Colors.grey[600],
                   ),
@@ -331,11 +331,11 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 ElevatedButton(
                   onPressed: (_isLoading || _isRateLimited) ? null : _enroll,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.deepOrange,
+                    backgroundColor: const Color(0xFF4A6CF7),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
                   child: _isLoading

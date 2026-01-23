@@ -1,5 +1,5 @@
 name: smerb_app
-description: Social Media Exposure Research Browser - Mental health research data collection app
+description: SocialScope - Social media research data collection app
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -75,3 +75,4 @@ flutter:
   assets:
     - assets/js/
     - assets/ema_questions.json
+    - assets/socialscope_banner.png

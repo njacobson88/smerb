@@ -234,9 +234,22 @@ class _CheckinScreenState extends State<CheckinScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_config!.title),
-        backgroundColor: Colors.deepOrange,
+        title: Text(
+          _config!.title,
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+        ),
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF39A0EC), Color(0xFF587AE0), Color(0xFF7050E0)],
+              stops: [0.0, 0.5, 1.0],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+          ),
+        ),
         foregroundColor: Colors.white,
+        elevation: 2,
         leading: IconButton(
           icon: const Icon(Icons.close),
           onPressed: _showExitConfirmation,
@@ -255,7 +268,7 @@ class _CheckinScreenState extends State<CheckinScreen>
                   ? 0
                   : (_currentIndex + 1) / _visibleQuestions.length,
               backgroundColor: Colors.grey[200],
-              color: Colors.deepOrange,
+              color: const Color(0xFF4A6CF7),
               minHeight: 4,
             ),
             // Progress text
@@ -334,7 +347,7 @@ class _CheckinScreenState extends State<CheckinScreen>
         elevation: 4,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20),
-          side: BorderSide(color: Colors.deepOrange.withOpacity(0.3), width: 2),
+          side: BorderSide(color: const Color(0xFF4A6CF7).withOpacity(0.3), width: 2),
         ),
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -410,10 +423,10 @@ class _CheckinScreenState extends State<CheckinScreen>
         width: 120,
         height: 60,
         decoration: BoxDecoration(
-          color: selected ? Colors.deepOrange : Colors.grey[100],
+          color: selected ? const Color(0xFF4A6CF7) : Colors.grey[100],
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: selected ? Colors.deepOrange : Colors.grey[300]!,
+            color: selected ? const Color(0xFF4A6CF7) : Colors.grey[300]!,
             width: 2,
           ),
         ),
@@ -440,10 +453,10 @@ class _CheckinScreenState extends State<CheckinScreen>
         SliderTheme(
           data: SliderTheme.of(context).copyWith(
             activeTrackColor:
-                hasInteracted ? Colors.deepOrange : Colors.grey[300],
+                hasInteracted ? const Color(0xFF4A6CF7) : Colors.grey[300],
             inactiveTrackColor: Colors.grey[300],
-            thumbColor: hasInteracted ? Colors.deepOrange : Colors.grey[400],
-            overlayColor: Colors.deepOrange.withOpacity(0.2),
+            thumbColor: hasInteracted ? const Color(0xFF4A6CF7) : Colors.grey[400],
+            overlayColor: const Color(0xFF4A6CF7).withOpacity(0.2),
             trackHeight: 6,
           ),
           child: Slider(
@@ -479,7 +492,7 @@ class _CheckinScreenState extends State<CheckinScreen>
               Text(
                 response!.round().toString(),
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      color: Colors.deepOrange,
+                      color: const Color(0xFF4A6CF7),
                       fontWeight: FontWeight.bold,
                     ),
               ),
@@ -521,11 +534,11 @@ class _CheckinScreenState extends State<CheckinScreen>
                       horizontal: 16, vertical: 14),
                   decoration: BoxDecoration(
                     color: selected
-                        ? Colors.deepOrange.withOpacity(0.1)
+                        ? const Color(0xFF4A6CF7).withOpacity(0.1)
                         : Colors.grey[50],
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                      color: selected ? Colors.deepOrange : Colors.grey[300]!,
+                      color: selected ? const Color(0xFF4A6CF7) : Colors.grey[300]!,
                       width: selected ? 2 : 1,
                     ),
                   ),
@@ -535,7 +548,7 @@ class _CheckinScreenState extends State<CheckinScreen>
                       fontSize: 16,
                       fontWeight:
                           selected ? FontWeight.w600 : FontWeight.normal,
-                      color: selected ? Colors.deepOrange : Colors.black87,
+                      color: selected ? const Color(0xFF4A6CF7) : Colors.black87,
                     ),
                   ),
                 ),
@@ -668,9 +681,22 @@ class _CheckinScreenState extends State<CheckinScreen>
   Widget _buildPostResourcesScreen() {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Check-in Complete'),
-        backgroundColor: Colors.deepOrange,
+        title: const Text(
+          'Check-in Complete',
+          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+        ),
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF39A0EC), Color(0xFF587AE0), Color(0xFF7050E0)],
+              stops: [0.0, 0.5, 1.0],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+          ),
+        ),
         foregroundColor: Colors.white,
+        elevation: 2,
         automaticallyImplyLeading: false,
       ),
       body: SafeArea(
@@ -738,7 +764,7 @@ class _CheckinScreenState extends State<CheckinScreen>
                     Navigator.of(context).pop(true);
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.deepOrange,
+                    backgroundColor: const Color(0xFF4A6CF7),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                   ),

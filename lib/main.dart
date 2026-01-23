@@ -26,11 +26,31 @@ class SmerbApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SMERB',
+      title: 'SocialScope',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        primarySwatch: Colors.deepOrange,
         useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF4A6CF7),
+          primary: const Color(0xFF4A6CF7),
+          secondary: const Color(0xFF7B61FF),
+          brightness: Brightness.light,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Color(0xFF1A1A2E),
+          elevation: 0.5,
+          surfaceTintColor: Colors.transparent,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF4A6CF7),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
       ),
       home: const AppInitializer(),
     );
@@ -174,7 +194,7 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
             children: [
               CircularProgressIndicator(),
               SizedBox(height: 16),
-              Text('Initializing SMERB...'),
+              Text('Initializing SocialScope...'),
             ],
           ),
         ),

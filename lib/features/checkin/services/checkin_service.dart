@@ -79,8 +79,21 @@ class CheckinService {
       windowsPerDay = schedule['windows_per_day'] ?? 3;
       windowDurationMinutes = schedule['window_duration_minutes'] ?? 60;
       betweenWindowsMinutes = schedule['between_windows_minutes'] ?? 240;
-      defaultFirstWindow = schedule['default_first_window'] ?? '09:00';
+      defaultFirstWindow = schedule['default_first_window'] ?? '12:00';
       alwaysAvailable = schedule['always_available'] ?? true;
+
+      // Load user's wake-up time and compute first window
+      final prefs = await SharedPreferences.getInstance();
+      final wakeStr = prefs.getString('wake_up_time');
+      if (wakeStr != null) {
+        final parts = wakeStr.split(':');
+        final wakeHour = int.parse(parts[0]);
+        final wakeMinute = int.parse(parts[1]);
+        // First check-in window = wake + 4 hours
+        final firstHour = (wakeHour + 4) % 24;
+        defaultFirstWindow =
+            '${firstHour.toString().padLeft(2, '0')}:${wakeMinute.toString().padLeft(2, '0')}';
+      }
     } catch (e) {
       print('[CheckIn] Error loading config, using defaults: $e');
     }
@@ -121,12 +134,16 @@ class CheckinService {
 
     final now = DateTime.now();
     final parts = defaultFirstWindow.split(':');
-    var windowStart = DateTime(
+    final firstStart = DateTime(
       now.year, now.month, now.day,
       int.parse(parts[0]), int.parse(parts[1]),
     );
 
     for (int i = 0; i < windowsPerDay; i++) {
+      // Windows start at firstWindow, firstWindow+4hrs, firstWindow+8hrs
+      final windowStart = firstStart.add(
+        Duration(minutes: betweenWindowsMinutes * i),
+      );
       final windowEnd = windowStart.add(
         Duration(minutes: windowDurationMinutes),
       );
@@ -135,10 +152,6 @@ class CheckinService {
         start: windowStart,
         end: windowEnd,
       ));
-
-      windowStart = windowEnd.add(
-        Duration(minutes: betweenWindowsMinutes),
-      );
     }
   }
 
@@ -182,7 +195,7 @@ class CheckinService {
       if (window.start.isAfter(now) && !window.completed) {
         await _notifications.zonedSchedule(
           window.index,
-          'Time for a SMERB check-in!',
+          'Time for a SocialScope check-in!',
           'Tap to complete your check-in.',
           tz.TZDateTime.from(window.start, tz.local),
           const NotificationDetails(
@@ -200,6 +213,8 @@ class CheckinService {
             ),
           ),
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
           payload: jsonEncode({'window': window.index}),
         );
         print('[CheckIn] Scheduled notification for window ${window.index} '
@@ -229,6 +244,12 @@ class CheckinService {
     _generateWindows();
     await scheduleNotifications();
     _checkWindows();
+  }
+
+  /// Cancel all scheduled notifications
+  Future<void> cancelNotifications() async {
+    await _notifications.cancelAll();
+    print('[CheckIn] All notifications cancelled');
   }
 
   void dispose() {

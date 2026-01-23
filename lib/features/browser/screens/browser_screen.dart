@@ -8,6 +8,8 @@ import '../../../features/sync/services/upload_service.dart';
 import '../../../features/onboarding/services/participant_service.dart';
 import '../../../features/debug/screens/debug_screen.dart';
 import '../../../features/checkin/screens/checkin_screen.dart';
+import '../../../features/checkin/services/checkin_service.dart';
+import '../../../features/settings/screens/settings_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   final CaptureService captureService;
@@ -39,6 +41,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // Screenshot capture service
   ScreenshotService? _screenshotService;
 
+  // Check-in service for settings
+  late final CheckinService _checkinService;
+
   // Login status tracking
   bool _redditLoggedIn = false;
   bool _twitterLoggedIn = false;
@@ -46,6 +51,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   void initState() {
     super.initState();
+    _checkinService = CheckinService(database: widget.database);
+    _checkinService.initialize();
     _initializeCookies();
     _loadLoginStatus();
   }
@@ -53,6 +60,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   void dispose() {
     _screenshotService?.dispose();
+    _checkinService.dispose();
     super.dispose();
   }
 
@@ -187,6 +195,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _controller?.reload();
   }
 
+  void _openSettings() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(checkinService: _checkinService),
+      ),
+    );
+  }
+
   void _openCheckin() async {
     final result = await Navigator.push<bool>(
       context,
@@ -220,17 +237,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('SMERB Browser - ${_currentPlatform.toUpperCase()}'),
-        backgroundColor: Colors.deepOrange,
+        title: Image.asset(
+          'assets/socialscope_banner.png',
+          fit: BoxFit.contain,
+          height: 32,
+        ),
+        centerTitle: false,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF39A0EC), Color(0xFF587AE0), Color(0xFF7050E0)],
+              stops: [0.0, 0.5, 1.0],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+          ),
+        ),
+        backgroundColor: Colors.transparent,
         foregroundColor: Colors.white,
+        elevation: 0,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _reload,
-            tooltip: 'Reload',
+          Container(
+            margin: const EdgeInsets.only(right: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.18),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              _currentPlatform.toUpperCase(),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+              ),
+            ),
           ),
           IconButton(
-            icon: const Icon(Icons.bug_report),
+            icon: const Icon(Icons.bug_report_outlined, size: 20, color: Colors.white70),
             onPressed: () {
               Navigator.push(
                 context,
@@ -253,7 +298,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           if (_isLoading)
             const LinearProgressIndicator(
               backgroundColor: Colors.grey,
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.deepOrange),
+              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4A6CF7)),
             ),
 
           // URL bar
@@ -460,7 +505,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
-                        color: Colors.green[600],
+                        color: const Color(0xFF4A6CF7),
                         borderRadius: BorderRadius.circular(16),
                       ),
                       child: const Row(
@@ -482,32 +527,37 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                   Container(
                     decoration: BoxDecoration(
-                      color: _currentPlatform == 'reddit' ? Colors.deepOrange.withOpacity(0.2) : null,
+                      color: _currentPlatform == 'reddit' ? const Color(0xFF4A6CF7).withOpacity(0.12) : null,
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: IconButton(
                       icon: const Icon(Icons.reddit),
                       onPressed: _navigateToReddit,
                       tooltip: 'Reddit',
-                      color: _currentPlatform == 'reddit' ? Colors.deepOrange : null,
+                      color: _currentPlatform == 'reddit' ? const Color(0xFF4A6CF7) : null,
                     ),
                   ),
                   Container(
                     decoration: BoxDecoration(
-                      color: _currentPlatform == 'twitter' ? Colors.blue.withOpacity(0.2) : null,
+                      color: _currentPlatform == 'twitter' ? const Color(0xFF4A6CF7).withOpacity(0.12) : null,
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: IconButton(
                       icon: const Text('𝕏', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                       onPressed: _navigateToTwitter,
                       tooltip: 'X (Twitter)',
-                      color: _currentPlatform == 'twitter' ? Colors.blue : null,
+                      color: _currentPlatform == 'twitter' ? const Color(0xFF4A6CF7) : null,
                     ),
                   ),
                   IconButton(
                     icon: const Icon(Icons.refresh),
                     onPressed: _reload,
                     tooltip: 'Reload',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.settings),
+                    onPressed: _openSettings,
+                    tooltip: 'Settings',
                   ),
                 ],
               ),
