@@ -107,11 +107,11 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       // Generate a unique visitor ID for this device
       final visitorId = const Uuid().v4();
 
-      // Mark the participant ID as in-use in Firebase
-      final marked = await _participantService.markParticipantIdAsInUse(
+      // Register this device enrollment in Firebase
+      final marked = await _participantService.registerDeviceEnrollment(
         participantId: normalizedId,
         visitorId: visitorId,
-        deviceInfo: {'platform': 'ios', 'enrolledAt': DateTime.now().toIso8601String()},
+        deviceInfo: {'platform': Theme.of(context).platform.name},
       );
 
       if (!marked) {

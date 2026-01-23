@@ -40,6 +40,40 @@ class Sessions extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// HTML Captures table - stores full page HTML when it changes
+class HtmlCaptures extends Table {
+  TextColumn get id => text()();
+  TextColumn get eventId => text()(); // Links to screenshot event
+  TextColumn get participantId => text()();
+  TextColumn get sessionId => text()();
+  TextColumn get htmlHash => text()(); // SHA-256 hash for change detection
+  TextColumn get filePath => text()(); // Path to saved .html file
+  IntColumn get charCount => integer().withDefault(const Constant(0))();
+  TextColumn get url => text().nullable()();
+  TextColumn get platform => text()();
+  DateTimeColumn get capturedAt => dateTime()();
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// HTML Status Log table - logs whether HTML changed for each capture
+class HtmlStatusLogs extends Table {
+  TextColumn get id => text()();
+  TextColumn get eventId => text()(); // Links to screenshot event
+  TextColumn get participantId => text()();
+  TextColumn get sessionId => text()();
+  BoolColumn get htmlChanged => boolean()(); // true if new HTML was stored
+  TextColumn get htmlCaptureId => text().nullable()(); // References HtmlCapture
+  TextColumn get htmlHash => text()(); // Hash at this point in time
+  DateTimeColumn get capturedAt => dateTime()();
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 /// OCR Results table - stores extracted text from screenshots
 class OcrResults extends Table {
   TextColumn get id => text()();
@@ -61,12 +95,12 @@ class OcrResults extends Table {
 // DATABASE
 // ============================================================================
 
-@DriftDatabase(tables: [Events, Sessions, OcrResults])
+@DriftDatabase(tables: [Events, Sessions, OcrResults, HtmlCaptures, HtmlStatusLogs])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -74,6 +108,10 @@ class AppDatabase extends _$AppDatabase {
     onUpgrade: (Migrator m, int from, int to) async {
       if (from < 2) {
         await m.createTable(ocrResults);
+      }
+      if (from < 3) {
+        await m.createTable(htmlCaptures);
+        await m.createTable(htmlStatusLogs);
       }
     },
   );
@@ -246,6 +284,67 @@ class AppDatabase extends _$AppDatabase {
 
     final processedIds = ocrResultsList.map((o) => o.eventId).toSet();
     return eventIds.where((id) => !processedIds.contains(id)).length;
+  }
+
+  // ==========================================================================
+  // HTML CAPTURE QUERIES
+  // ==========================================================================
+
+  /// Insert a new HTML capture
+  Future<int> insertHtmlCapture(HtmlCapturesCompanion capture) {
+    return into(htmlCaptures).insert(capture);
+  }
+
+  /// Get HTML capture for an event
+  Future<HtmlCapture?> getHtmlCaptureForEvent(String eventId) {
+    return (select(htmlCaptures)..where((h) => h.eventId.equals(eventId)))
+        .getSingleOrNull();
+  }
+
+  /// Get unsynced HTML captures
+  Future<List<HtmlCapture>> getUnsyncedHtmlCaptures({int? limit}) {
+    final query = select(htmlCaptures)..where((h) => h.synced.equals(false));
+    if (limit != null) {
+      query.limit(limit);
+    }
+    return query.get();
+  }
+
+  /// Mark HTML captures as synced
+  Future<int> markHtmlCapturesAsSynced(List<String> captureIds) {
+    return (update(htmlCaptures)..where((h) => h.id.isIn(captureIds)))
+        .write(const HtmlCapturesCompanion(synced: Value(true)));
+  }
+
+  // ==========================================================================
+  // HTML STATUS LOG QUERIES
+  // ==========================================================================
+
+  /// Insert a new HTML status log entry
+  Future<int> insertHtmlStatusLog(HtmlStatusLogsCompanion log) {
+    return into(htmlStatusLogs).insert(log);
+  }
+
+  /// Get unsynced HTML status logs
+  Future<List<HtmlStatusLog>> getUnsyncedHtmlStatusLogs({int? limit}) {
+    final query = select(htmlStatusLogs)..where((h) => h.synced.equals(false));
+    if (limit != null) {
+      query.limit(limit);
+    }
+    return query.get();
+  }
+
+  /// Mark HTML status logs as synced
+  Future<int> markHtmlStatusLogsSynced(List<String> logIds) {
+    return (update(htmlStatusLogs)..where((h) => h.id.isIn(logIds)))
+        .write(const HtmlStatusLogsCompanion(synced: Value(true)));
+  }
+
+  /// Get pending HTML status log count
+  Future<int> getPendingHtmlSyncCount() async {
+    final unsyncedCaptures = await getUnsyncedHtmlCaptures();
+    final unsyncedLogs = await getUnsyncedHtmlStatusLogs();
+    return unsyncedCaptures.length + unsyncedLogs.length;
   }
 
   /// Get screenshot events pending OCR processing

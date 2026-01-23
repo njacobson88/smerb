@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path_provider/path_provider.dart';
@@ -21,6 +23,10 @@ class ScreenshotService {
   InAppWebViewController? _controller;
   bool _isCapturing = false;
   String _currentPlatform = 'unknown';
+
+  // HTML change tracking
+  String? _lastHtmlHash;
+  String? _lastHtmlCaptureId;
 
   ScreenshotService({
     required this.database,
@@ -52,6 +58,8 @@ class ScreenshotService {
     _captureTimer = null;
     _controller = null;
     _lastScreenshot = null;
+    _lastHtmlHash = null;
+    _lastHtmlCaptureId = null;
     print('[ScreenshotService] Stopped screenshot capture');
   }
 
@@ -142,8 +150,9 @@ class ScreenshotService {
       final compressionRatio = ((1 - (compressedBytes.length / screenshot.length)) * 100).toStringAsFixed(1);
 
       // Record in database
+      final eventId = const Uuid().v4();
       final event = EventsCompanion(
-        id: drift.Value(const Uuid().v4()),
+        id: drift.Value(eventId),
         sessionId: drift.Value(sessionId),
         participantId: drift.Value(participantId),
         eventType: const drift.Value('screenshot'),
@@ -156,6 +165,13 @@ class ScreenshotService {
       await database.insertEvent(event);
 
       print('[ScreenshotService] Saved screenshot: $filename (${compressedBytes.length} bytes, $compressionRatio% compression)');
+
+      // Capture HTML from the page
+      await _captureHtml(
+        eventId: eventId,
+        url: url?.toString(),
+        capturedAt: DateTime.now().toUtc(),
+      );
     } catch (e) {
       print('[ScreenshotService] Error saving screenshot: $e');
     }
@@ -179,6 +195,97 @@ class ScreenshotService {
     } catch (e) {
       print('[ScreenshotService] Error compressing to JPEG: $e');
       return pngBytes; // Fallback to original PNG
+    }
+  }
+
+  /// Capture HTML from the current page, storing only when it changes
+  Future<void> _captureHtml({
+    required String eventId,
+    required String? url,
+    required DateTime capturedAt,
+  }) async {
+    try {
+      if (_controller == null) return;
+
+      // Extract full page HTML
+      final htmlResult = await _controller!.evaluateJavascript(
+        source: 'document.documentElement.outerHTML',
+      );
+
+      if (htmlResult == null || htmlResult is! String || htmlResult.isEmpty) {
+        return;
+      }
+
+      final html = htmlResult;
+
+      // Compute SHA-256 hash
+      final htmlHash = sha256.convert(utf8.encode(html)).toString();
+
+      if (_lastHtmlHash != null && htmlHash == _lastHtmlHash) {
+        // HTML unchanged - just log the status
+        final statusLog = HtmlStatusLogsCompanion(
+          id: drift.Value(const Uuid().v4()),
+          eventId: drift.Value(eventId),
+          participantId: drift.Value(participantId),
+          sessionId: drift.Value(sessionId),
+          htmlChanged: const drift.Value(false),
+          htmlCaptureId: drift.Value(_lastHtmlCaptureId),
+          htmlHash: drift.Value(htmlHash),
+          capturedAt: drift.Value(capturedAt),
+        );
+
+        await database.insertHtmlStatusLog(statusLog);
+      } else {
+        // HTML changed - save the file and create a capture record
+        final directory = await getApplicationDocumentsDirectory();
+        final htmlDir = Directory('${directory.path}/html/$sessionId');
+        if (!await htmlDir.exists()) {
+          await htmlDir.create(recursive: true);
+        }
+
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final htmlFilePath = '${htmlDir.path}/page_$timestamp.html';
+        final htmlFile = File(htmlFilePath);
+        await htmlFile.writeAsString(html);
+
+        final captureId = const Uuid().v4();
+
+        final capture = HtmlCapturesCompanion(
+          id: drift.Value(captureId),
+          eventId: drift.Value(eventId),
+          participantId: drift.Value(participantId),
+          sessionId: drift.Value(sessionId),
+          htmlHash: drift.Value(htmlHash),
+          filePath: drift.Value(htmlFilePath),
+          charCount: drift.Value(html.length),
+          url: drift.Value(url),
+          platform: drift.Value(_currentPlatform),
+          capturedAt: drift.Value(capturedAt),
+        );
+
+        await database.insertHtmlCapture(capture);
+
+        final statusLog = HtmlStatusLogsCompanion(
+          id: drift.Value(const Uuid().v4()),
+          eventId: drift.Value(eventId),
+          participantId: drift.Value(participantId),
+          sessionId: drift.Value(sessionId),
+          htmlChanged: const drift.Value(true),
+          htmlCaptureId: drift.Value(captureId),
+          htmlHash: drift.Value(htmlHash),
+          capturedAt: drift.Value(capturedAt),
+        );
+
+        await database.insertHtmlStatusLog(statusLog);
+
+        _lastHtmlCaptureId = captureId;
+
+        print('[ScreenshotService] Saved HTML: ${html.length} chars, hash: ${htmlHash.substring(0, 8)}...');
+      }
+
+      _lastHtmlHash = htmlHash;
+    } catch (e) {
+      print('[ScreenshotService] Error capturing HTML: $e');
     }
   }
 

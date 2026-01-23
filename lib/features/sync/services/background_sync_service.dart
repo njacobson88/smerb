@@ -98,6 +98,7 @@ class BackgroundSyncService {
         eventsSynced: syncStatus['syncedEvents'] ?? 0,
         pendingEvents: syncStatus['pendingEvents'] ?? 0,
         pendingOcr: ocrStatus['pending'] ?? 0,
+        pendingHtml: syncStatus['pendingHtml'] ?? 0,
       ));
 
     } catch (e) {
@@ -139,22 +140,26 @@ class BackgroundSyncService {
       // Get pending counts first
       final unsyncedEvents = await database.getUnsyncedEvents(limit: 1);
       final unsyncedOcr = await database.getUnsyncedOcrResults(limit: 1);
+      final pendingHtml = await database.getPendingHtmlSyncCount();
 
-      if (unsyncedEvents.isEmpty && unsyncedOcr.isEmpty) {
+      if (unsyncedEvents.isEmpty && unsyncedOcr.isEmpty && pendingHtml == 0) {
         print('[BackgroundSync] Nothing to sync');
         return;
       }
 
       print('[BackgroundSync] Syncing to Firebase...');
 
-      // Sync events and OCR results
+      // Sync events, OCR results, and HTML captures/logs
       // Using smaller batch sizes for smoother background operation
       final results = await uploadService.syncAll(
         eventBatchSize: 25,
         ocrBatchSize: 25,
       );
 
-      print('[BackgroundSync] Synced ${results['events']} events, ${results['ocrResults']} OCR results');
+      print('[BackgroundSync] Synced ${results['events']} events, '
+          '${results['ocrResults']} OCR, '
+          '${results['htmlCaptures']} HTML captures, '
+          '${results['htmlStatusLogs']} HTML status logs');
 
     } catch (e) {
       print('[BackgroundSync] Firebase sync error: $e');
@@ -186,6 +191,7 @@ class SyncStatus {
   final int eventsSynced;
   final int pendingEvents;
   final int pendingOcr;
+  final int pendingHtml;
   final String? errorMessage;
   final DateTime timestamp;
 
@@ -194,6 +200,7 @@ class SyncStatus {
     this.eventsSynced = 0,
     this.pendingEvents = 0,
     this.pendingOcr = 0,
+    this.pendingHtml = 0,
     this.errorMessage,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
@@ -206,12 +213,14 @@ class SyncStatus {
     int eventsSynced = 0,
     int pendingEvents = 0,
     int pendingOcr = 0,
+    int pendingHtml = 0,
   }) =>
       SyncStatus._(
         state: SyncState.completed,
         eventsSynced: eventsSynced,
         pendingEvents: pendingEvents,
         pendingOcr: pendingOcr,
+        pendingHtml: pendingHtml,
       );
 
   factory SyncStatus.error(String message) => SyncStatus._(
@@ -223,7 +232,7 @@ class SyncStatus {
   bool get isSyncing => state == SyncState.syncing;
   bool get isCompleted => state == SyncState.completed;
   bool get hasError => state == SyncState.error;
-  bool get hasPending => pendingEvents > 0 || pendingOcr > 0;
+  bool get hasPending => pendingEvents > 0 || pendingOcr > 0 || pendingHtml > 0;
 }
 
 enum SyncState {

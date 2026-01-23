@@ -12,11 +12,14 @@ class UploadService {
 
   bool _isSyncing = false;
   bool _isSyncingOcr = false;
+  bool _isSyncingHtml = false;
 
   // Sync progress tracking
   int _eventsSynced = 0;
   int _ocrResultsSynced = 0;
   int _screenshotsUploaded = 0;
+  int _htmlCapturesSynced = 0;
+  int _htmlStatusLogsSynced = 0;
 
   UploadService({
     required this.database,
@@ -30,6 +33,8 @@ class UploadService {
     'eventsSynced': _eventsSynced,
     'ocrResultsSynced': _ocrResultsSynced,
     'screenshotsUploaded': _screenshotsUploaded,
+    'htmlCapturesSynced': _htmlCapturesSynced,
+    'htmlStatusLogsSynced': _htmlStatusLogsSynced,
   };
 
   /// Sync all unsynced events to Firebase
@@ -278,13 +283,182 @@ class UploadService {
     print('[UploadService] Updated event with OCR: ${result.eventId}');
   }
 
-  /// Sync all data (events + OCR results) efficiently
+  /// Sync HTML captures to Firebase (uploads HTML files and updates event docs)
+  /// Returns the number of HTML captures synced
+  Future<int> syncHtmlCaptures({int batchSize = 50}) async {
+    if (_isSyncingHtml) {
+      print('[UploadService] HTML sync already in progress, skipping');
+      return 0;
+    }
+
+    _isSyncingHtml = true;
+    int totalSynced = 0;
+
+    try {
+      List<HtmlCapture> unsyncedCaptures;
+
+      do {
+        unsyncedCaptures = await database.getUnsyncedHtmlCaptures(limit: batchSize);
+
+        if (unsyncedCaptures.isEmpty) break;
+
+        print('[UploadService] Processing batch of ${unsyncedCaptures.length} HTML captures');
+
+        final syncedIds = <String>[];
+
+        for (final capture in unsyncedCaptures) {
+          try {
+            await _uploadHtmlCapture(capture);
+            syncedIds.add(capture.id);
+          } catch (e) {
+            print('[UploadService] Failed to sync HTML capture ${capture.id}: $e');
+          }
+        }
+
+        if (syncedIds.isNotEmpty) {
+          await database.markHtmlCapturesAsSynced(syncedIds);
+          totalSynced += syncedIds.length;
+          _htmlCapturesSynced += syncedIds.length;
+          print('[UploadService] Marked ${syncedIds.length} HTML captures as synced');
+        }
+
+      } while (unsyncedCaptures.length == batchSize);
+
+      print('[UploadService] HTML capture sync complete. Total: $totalSynced');
+      return totalSynced;
+
+    } catch (e) {
+      print('[UploadService] HTML capture sync error: $e');
+      rethrow;
+    } finally {
+      _isSyncingHtml = false;
+    }
+  }
+
+  /// Upload a single HTML capture to Firebase Storage and update event document
+  Future<void> _uploadHtmlCapture(HtmlCapture capture) async {
+    final file = File(capture.filePath);
+    if (!await file.exists()) {
+      print('[UploadService] HTML file not found: ${capture.filePath}');
+      throw Exception('HTML file not found: ${capture.filePath}');
+    }
+
+    print('[UploadService] Uploading HTML file: ${capture.filePath} (${capture.charCount} chars)');
+
+    // Upload HTML file to Storage
+    final filename = capture.filePath.split('/').last;
+    final storagePath = 'html/${capture.participantId}/${capture.sessionId}/$filename';
+
+    final ref = _storage.ref().child(storagePath);
+    final metadata = SettableMetadata(
+      contentType: 'text/html',
+      customMetadata: {
+        'eventId': capture.eventId,
+        'sessionId': capture.sessionId,
+        'participantId': capture.participantId,
+        'htmlHash': capture.htmlHash,
+      },
+    );
+
+    final uploadTask = await ref.putFile(file, metadata);
+    final downloadUrl = await uploadTask.ref.getDownloadURL();
+
+    // Update the event document with HTML data using dot notation
+    // to avoid overwriting fields set by status log sync
+    await _firestore
+        .collection('participants')
+        .doc(capture.participantId)
+        .collection('events')
+        .doc(capture.eventId)
+        .update({
+      'html.storageUrl': downloadUrl,
+      'html.charCount': capture.charCount,
+      'html.hash': capture.htmlHash,
+      'html.changed': true,
+      'html.capturedAt': Timestamp.fromDate(capture.capturedAt),
+      'htmlSyncedAt': FieldValue.serverTimestamp(),
+    });
+
+    print('[UploadService] Uploaded HTML capture: $storagePath');
+  }
+
+  /// Sync HTML status logs to Firebase (updates event docs with HTML status)
+  /// Returns the number of status logs synced
+  Future<int> syncHtmlStatusLogs({int batchSize = 50}) async {
+    int totalSynced = 0;
+
+    try {
+      List<HtmlStatusLog> unsyncedLogs;
+
+      do {
+        unsyncedLogs = await database.getUnsyncedHtmlStatusLogs(limit: batchSize);
+
+        if (unsyncedLogs.isEmpty) break;
+
+        print('[UploadService] Processing batch of ${unsyncedLogs.length} HTML status logs');
+
+        final syncedIds = <String>[];
+
+        for (final log in unsyncedLogs) {
+          try {
+            await _uploadHtmlStatusLog(log);
+            syncedIds.add(log.id);
+          } catch (e) {
+            print('[UploadService] Failed to sync HTML status log ${log.id}: $e');
+          }
+        }
+
+        if (syncedIds.isNotEmpty) {
+          await database.markHtmlStatusLogsSynced(syncedIds);
+          totalSynced += syncedIds.length;
+          _htmlStatusLogsSynced += syncedIds.length;
+          print('[UploadService] Marked ${syncedIds.length} HTML status logs as synced');
+        }
+
+      } while (unsyncedLogs.length == batchSize);
+
+      print('[UploadService] HTML status log sync complete. Total: $totalSynced');
+      return totalSynced;
+
+    } catch (e) {
+      print('[UploadService] HTML status log sync error: $e');
+      rethrow;
+    }
+  }
+
+  /// Upload a single HTML status log to Firebase (updates existing event document)
+  /// Uses dot notation to avoid overwriting storageUrl/charCount from capture sync
+  Future<void> _uploadHtmlStatusLog(HtmlStatusLog log) async {
+    final updates = <String, dynamic>{
+      'html.changed': log.htmlChanged,
+      'html.hash': log.htmlHash,
+      'html.capturedAt': Timestamp.fromDate(log.capturedAt),
+      'htmlSyncedAt': FieldValue.serverTimestamp(),
+    };
+
+    if (log.htmlCaptureId != null) {
+      updates['html.htmlCaptureId'] = log.htmlCaptureId;
+    }
+
+    await _firestore
+        .collection('participants')
+        .doc(log.participantId)
+        .collection('events')
+        .doc(log.eventId)
+        .update(updates);
+
+    print('[UploadService] Updated event with HTML status: ${log.eventId} (changed: ${log.htmlChanged})');
+  }
+
+  /// Sync all data (events + OCR results + HTML) efficiently
   /// Returns a map with counts of synced items
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
     // Reset progress counters
     _eventsSynced = 0;
     _ocrResultsSynced = 0;
     _screenshotsUploaded = 0;
+    _htmlCapturesSynced = 0;
+    _htmlStatusLogsSynced = 0;
 
     // Sync events first (includes OCR data for screenshots)
     final eventsSynced = await syncEvents(batchSize: eventBatchSize);
@@ -292,10 +466,18 @@ class UploadService {
     // Sync any remaining OCR results (for events that were synced before OCR was done)
     final ocrSynced = await syncOcrResults(batchSize: ocrBatchSize);
 
+    // Sync HTML captures (upload files + update events)
+    final htmlCapturesSynced = await syncHtmlCaptures(batchSize: eventBatchSize);
+
+    // Sync HTML status logs (update events with unchanged status)
+    final htmlStatusLogsSynced = await syncHtmlStatusLogs(batchSize: eventBatchSize);
+
     return {
       'events': eventsSynced,
       'ocrResults': ocrSynced,
       'screenshots': _screenshotsUploaded,
+      'htmlCaptures': htmlCapturesSynced,
+      'htmlStatusLogs': htmlStatusLogsSynced,
     };
   }
 
@@ -305,6 +487,7 @@ class UploadService {
     final unsynced = await database.getUnsyncedEvents();
     final totalOcr = await database.getOcrResultCount();
     final unsyncedOcr = await database.getUnsyncedOcrResults();
+    final pendingHtml = await database.getPendingHtmlSyncCount();
 
     return {
       'totalEvents': total,
@@ -312,6 +495,7 @@ class UploadService {
       'pendingEvents': unsynced.length,
       'totalOcr': totalOcr,
       'pendingOcr': unsyncedOcr.length,
+      'pendingHtml': pendingHtml,
     };
   }
 

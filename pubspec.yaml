@@ -24,6 +24,7 @@ dependencies:
 
   # Utilities
   uuid: ^4.2.0
+  crypto: ^3.0.0  # SHA-256 hashing for HTML change detection
   intl: ^0.18.0
   device_info_plus: ^9.1.0
   package_info_plus: ^9.0.0

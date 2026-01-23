@@ -8,6 +8,11 @@ service firebase.storage {
       allow read, write: if true;
     }
 
+    // HTML captures folder
+    match /html/{participantId}/{sessionId}/{filename} {
+      allow read, write: if true;
+    }
+
     // Deny all other access by default
     match /{allPaths=**} {
       allow read, write: if false;

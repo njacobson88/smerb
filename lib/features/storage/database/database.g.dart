@@ -1342,15 +1342,1011 @@ class OcrResultsCompanion extends UpdateCompanion<OcrResult> {
   }
 }
 
+class $HtmlCapturesTable extends HtmlCaptures
+    with TableInfo<$HtmlCapturesTable, HtmlCapture> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $HtmlCapturesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+      'id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _eventIdMeta =
+      const VerificationMeta('eventId');
+  @override
+  late final GeneratedColumn<String> eventId = GeneratedColumn<String>(
+      'event_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _participantIdMeta =
+      const VerificationMeta('participantId');
+  @override
+  late final GeneratedColumn<String> participantId = GeneratedColumn<String>(
+      'participant_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _htmlHashMeta =
+      const VerificationMeta('htmlHash');
+  @override
+  late final GeneratedColumn<String> htmlHash = GeneratedColumn<String>(
+      'html_hash', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _filePathMeta =
+      const VerificationMeta('filePath');
+  @override
+  late final GeneratedColumn<String> filePath = GeneratedColumn<String>(
+      'file_path', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _charCountMeta =
+      const VerificationMeta('charCount');
+  @override
+  late final GeneratedColumn<int> charCount = GeneratedColumn<int>(
+      'char_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _urlMeta = const VerificationMeta('url');
+  @override
+  late final GeneratedColumn<String> url = GeneratedColumn<String>(
+      'url', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _platformMeta =
+      const VerificationMeta('platform');
+  @override
+  late final GeneratedColumn<String> platform = GeneratedColumn<String>(
+      'platform', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _capturedAtMeta =
+      const VerificationMeta('capturedAt');
+  @override
+  late final GeneratedColumn<DateTime> capturedAt = GeneratedColumn<DateTime>(
+      'captured_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+      'synced', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("synced" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        eventId,
+        participantId,
+        sessionId,
+        htmlHash,
+        filePath,
+        charCount,
+        url,
+        platform,
+        capturedAt,
+        synced
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'html_captures';
+  @override
+  VerificationContext validateIntegrity(Insertable<HtmlCapture> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('event_id')) {
+      context.handle(_eventIdMeta,
+          eventId.isAcceptableOrUnknown(data['event_id']!, _eventIdMeta));
+    } else if (isInserting) {
+      context.missing(_eventIdMeta);
+    }
+    if (data.containsKey('participant_id')) {
+      context.handle(
+          _participantIdMeta,
+          participantId.isAcceptableOrUnknown(
+              data['participant_id']!, _participantIdMeta));
+    } else if (isInserting) {
+      context.missing(_participantIdMeta);
+    }
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('html_hash')) {
+      context.handle(_htmlHashMeta,
+          htmlHash.isAcceptableOrUnknown(data['html_hash']!, _htmlHashMeta));
+    } else if (isInserting) {
+      context.missing(_htmlHashMeta);
+    }
+    if (data.containsKey('file_path')) {
+      context.handle(_filePathMeta,
+          filePath.isAcceptableOrUnknown(data['file_path']!, _filePathMeta));
+    } else if (isInserting) {
+      context.missing(_filePathMeta);
+    }
+    if (data.containsKey('char_count')) {
+      context.handle(_charCountMeta,
+          charCount.isAcceptableOrUnknown(data['char_count']!, _charCountMeta));
+    }
+    if (data.containsKey('url')) {
+      context.handle(
+          _urlMeta, url.isAcceptableOrUnknown(data['url']!, _urlMeta));
+    }
+    if (data.containsKey('platform')) {
+      context.handle(_platformMeta,
+          platform.isAcceptableOrUnknown(data['platform']!, _platformMeta));
+    } else if (isInserting) {
+      context.missing(_platformMeta);
+    }
+    if (data.containsKey('captured_at')) {
+      context.handle(
+          _capturedAtMeta,
+          capturedAt.isAcceptableOrUnknown(
+              data['captured_at']!, _capturedAtMeta));
+    } else if (isInserting) {
+      context.missing(_capturedAtMeta);
+    }
+    if (data.containsKey('synced')) {
+      context.handle(_syncedMeta,
+          synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  HtmlCapture map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return HtmlCapture(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
+      eventId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}event_id'])!,
+      participantId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}participant_id'])!,
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      htmlHash: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}html_hash'])!,
+      filePath: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}file_path'])!,
+      charCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}char_count'])!,
+      url: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}url']),
+      platform: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}platform'])!,
+      capturedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}captured_at'])!,
+      synced: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}synced'])!,
+    );
+  }
+
+  @override
+  $HtmlCapturesTable createAlias(String alias) {
+    return $HtmlCapturesTable(attachedDatabase, alias);
+  }
+}
+
+class HtmlCapture extends DataClass implements Insertable<HtmlCapture> {
+  final String id;
+  final String eventId;
+  final String participantId;
+  final String sessionId;
+  final String htmlHash;
+  final String filePath;
+  final int charCount;
+  final String? url;
+  final String platform;
+  final DateTime capturedAt;
+  final bool synced;
+  const HtmlCapture(
+      {required this.id,
+      required this.eventId,
+      required this.participantId,
+      required this.sessionId,
+      required this.htmlHash,
+      required this.filePath,
+      required this.charCount,
+      this.url,
+      required this.platform,
+      required this.capturedAt,
+      required this.synced});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['event_id'] = Variable<String>(eventId);
+    map['participant_id'] = Variable<String>(participantId);
+    map['session_id'] = Variable<String>(sessionId);
+    map['html_hash'] = Variable<String>(htmlHash);
+    map['file_path'] = Variable<String>(filePath);
+    map['char_count'] = Variable<int>(charCount);
+    if (!nullToAbsent || url != null) {
+      map['url'] = Variable<String>(url);
+    }
+    map['platform'] = Variable<String>(platform);
+    map['captured_at'] = Variable<DateTime>(capturedAt);
+    map['synced'] = Variable<bool>(synced);
+    return map;
+  }
+
+  HtmlCapturesCompanion toCompanion(bool nullToAbsent) {
+    return HtmlCapturesCompanion(
+      id: Value(id),
+      eventId: Value(eventId),
+      participantId: Value(participantId),
+      sessionId: Value(sessionId),
+      htmlHash: Value(htmlHash),
+      filePath: Value(filePath),
+      charCount: Value(charCount),
+      url: url == null && nullToAbsent ? const Value.absent() : Value(url),
+      platform: Value(platform),
+      capturedAt: Value(capturedAt),
+      synced: Value(synced),
+    );
+  }
+
+  factory HtmlCapture.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return HtmlCapture(
+      id: serializer.fromJson<String>(json['id']),
+      eventId: serializer.fromJson<String>(json['eventId']),
+      participantId: serializer.fromJson<String>(json['participantId']),
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      htmlHash: serializer.fromJson<String>(json['htmlHash']),
+      filePath: serializer.fromJson<String>(json['filePath']),
+      charCount: serializer.fromJson<int>(json['charCount']),
+      url: serializer.fromJson<String?>(json['url']),
+      platform: serializer.fromJson<String>(json['platform']),
+      capturedAt: serializer.fromJson<DateTime>(json['capturedAt']),
+      synced: serializer.fromJson<bool>(json['synced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'eventId': serializer.toJson<String>(eventId),
+      'participantId': serializer.toJson<String>(participantId),
+      'sessionId': serializer.toJson<String>(sessionId),
+      'htmlHash': serializer.toJson<String>(htmlHash),
+      'filePath': serializer.toJson<String>(filePath),
+      'charCount': serializer.toJson<int>(charCount),
+      'url': serializer.toJson<String?>(url),
+      'platform': serializer.toJson<String>(platform),
+      'capturedAt': serializer.toJson<DateTime>(capturedAt),
+      'synced': serializer.toJson<bool>(synced),
+    };
+  }
+
+  HtmlCapture copyWith(
+          {String? id,
+          String? eventId,
+          String? participantId,
+          String? sessionId,
+          String? htmlHash,
+          String? filePath,
+          int? charCount,
+          Value<String?> url = const Value.absent(),
+          String? platform,
+          DateTime? capturedAt,
+          bool? synced}) =>
+      HtmlCapture(
+        id: id ?? this.id,
+        eventId: eventId ?? this.eventId,
+        participantId: participantId ?? this.participantId,
+        sessionId: sessionId ?? this.sessionId,
+        htmlHash: htmlHash ?? this.htmlHash,
+        filePath: filePath ?? this.filePath,
+        charCount: charCount ?? this.charCount,
+        url: url.present ? url.value : this.url,
+        platform: platform ?? this.platform,
+        capturedAt: capturedAt ?? this.capturedAt,
+        synced: synced ?? this.synced,
+      );
+  @override
+  String toString() {
+    return (StringBuffer('HtmlCapture(')
+          ..write('id: $id, ')
+          ..write('eventId: $eventId, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('htmlHash: $htmlHash, ')
+          ..write('filePath: $filePath, ')
+          ..write('charCount: $charCount, ')
+          ..write('url: $url, ')
+          ..write('platform: $platform, ')
+          ..write('capturedAt: $capturedAt, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, eventId, participantId, sessionId,
+      htmlHash, filePath, charCount, url, platform, capturedAt, synced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is HtmlCapture &&
+          other.id == this.id &&
+          other.eventId == this.eventId &&
+          other.participantId == this.participantId &&
+          other.sessionId == this.sessionId &&
+          other.htmlHash == this.htmlHash &&
+          other.filePath == this.filePath &&
+          other.charCount == this.charCount &&
+          other.url == this.url &&
+          other.platform == this.platform &&
+          other.capturedAt == this.capturedAt &&
+          other.synced == this.synced);
+}
+
+class HtmlCapturesCompanion extends UpdateCompanion<HtmlCapture> {
+  final Value<String> id;
+  final Value<String> eventId;
+  final Value<String> participantId;
+  final Value<String> sessionId;
+  final Value<String> htmlHash;
+  final Value<String> filePath;
+  final Value<int> charCount;
+  final Value<String?> url;
+  final Value<String> platform;
+  final Value<DateTime> capturedAt;
+  final Value<bool> synced;
+  final Value<int> rowid;
+  const HtmlCapturesCompanion({
+    this.id = const Value.absent(),
+    this.eventId = const Value.absent(),
+    this.participantId = const Value.absent(),
+    this.sessionId = const Value.absent(),
+    this.htmlHash = const Value.absent(),
+    this.filePath = const Value.absent(),
+    this.charCount = const Value.absent(),
+    this.url = const Value.absent(),
+    this.platform = const Value.absent(),
+    this.capturedAt = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  HtmlCapturesCompanion.insert({
+    required String id,
+    required String eventId,
+    required String participantId,
+    required String sessionId,
+    required String htmlHash,
+    required String filePath,
+    this.charCount = const Value.absent(),
+    this.url = const Value.absent(),
+    required String platform,
+    required DateTime capturedAt,
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        eventId = Value(eventId),
+        participantId = Value(participantId),
+        sessionId = Value(sessionId),
+        htmlHash = Value(htmlHash),
+        filePath = Value(filePath),
+        platform = Value(platform),
+        capturedAt = Value(capturedAt);
+  static Insertable<HtmlCapture> custom({
+    Expression<String>? id,
+    Expression<String>? eventId,
+    Expression<String>? participantId,
+    Expression<String>? sessionId,
+    Expression<String>? htmlHash,
+    Expression<String>? filePath,
+    Expression<int>? charCount,
+    Expression<String>? url,
+    Expression<String>? platform,
+    Expression<DateTime>? capturedAt,
+    Expression<bool>? synced,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (eventId != null) 'event_id': eventId,
+      if (participantId != null) 'participant_id': participantId,
+      if (sessionId != null) 'session_id': sessionId,
+      if (htmlHash != null) 'html_hash': htmlHash,
+      if (filePath != null) 'file_path': filePath,
+      if (charCount != null) 'char_count': charCount,
+      if (url != null) 'url': url,
+      if (platform != null) 'platform': platform,
+      if (capturedAt != null) 'captured_at': capturedAt,
+      if (synced != null) 'synced': synced,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  HtmlCapturesCompanion copyWith(
+      {Value<String>? id,
+      Value<String>? eventId,
+      Value<String>? participantId,
+      Value<String>? sessionId,
+      Value<String>? htmlHash,
+      Value<String>? filePath,
+      Value<int>? charCount,
+      Value<String?>? url,
+      Value<String>? platform,
+      Value<DateTime>? capturedAt,
+      Value<bool>? synced,
+      Value<int>? rowid}) {
+    return HtmlCapturesCompanion(
+      id: id ?? this.id,
+      eventId: eventId ?? this.eventId,
+      participantId: participantId ?? this.participantId,
+      sessionId: sessionId ?? this.sessionId,
+      htmlHash: htmlHash ?? this.htmlHash,
+      filePath: filePath ?? this.filePath,
+      charCount: charCount ?? this.charCount,
+      url: url ?? this.url,
+      platform: platform ?? this.platform,
+      capturedAt: capturedAt ?? this.capturedAt,
+      synced: synced ?? this.synced,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (eventId.present) {
+      map['event_id'] = Variable<String>(eventId.value);
+    }
+    if (participantId.present) {
+      map['participant_id'] = Variable<String>(participantId.value);
+    }
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (htmlHash.present) {
+      map['html_hash'] = Variable<String>(htmlHash.value);
+    }
+    if (filePath.present) {
+      map['file_path'] = Variable<String>(filePath.value);
+    }
+    if (charCount.present) {
+      map['char_count'] = Variable<int>(charCount.value);
+    }
+    if (url.present) {
+      map['url'] = Variable<String>(url.value);
+    }
+    if (platform.present) {
+      map['platform'] = Variable<String>(platform.value);
+    }
+    if (capturedAt.present) {
+      map['captured_at'] = Variable<DateTime>(capturedAt.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('HtmlCapturesCompanion(')
+          ..write('id: $id, ')
+          ..write('eventId: $eventId, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('htmlHash: $htmlHash, ')
+          ..write('filePath: $filePath, ')
+          ..write('charCount: $charCount, ')
+          ..write('url: $url, ')
+          ..write('platform: $platform, ')
+          ..write('capturedAt: $capturedAt, ')
+          ..write('synced: $synced, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $HtmlStatusLogsTable extends HtmlStatusLogs
+    with TableInfo<$HtmlStatusLogsTable, HtmlStatusLog> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $HtmlStatusLogsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+      'id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _eventIdMeta =
+      const VerificationMeta('eventId');
+  @override
+  late final GeneratedColumn<String> eventId = GeneratedColumn<String>(
+      'event_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _participantIdMeta =
+      const VerificationMeta('participantId');
+  @override
+  late final GeneratedColumn<String> participantId = GeneratedColumn<String>(
+      'participant_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _htmlChangedMeta =
+      const VerificationMeta('htmlChanged');
+  @override
+  late final GeneratedColumn<bool> htmlChanged = GeneratedColumn<bool>(
+      'html_changed', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: true,
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'CHECK ("html_changed" IN (0, 1))'));
+  static const VerificationMeta _htmlCaptureIdMeta =
+      const VerificationMeta('htmlCaptureId');
+  @override
+  late final GeneratedColumn<String> htmlCaptureId = GeneratedColumn<String>(
+      'html_capture_id', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _htmlHashMeta =
+      const VerificationMeta('htmlHash');
+  @override
+  late final GeneratedColumn<String> htmlHash = GeneratedColumn<String>(
+      'html_hash', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _capturedAtMeta =
+      const VerificationMeta('capturedAt');
+  @override
+  late final GeneratedColumn<DateTime> capturedAt = GeneratedColumn<DateTime>(
+      'captured_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+      'synced', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("synced" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        eventId,
+        participantId,
+        sessionId,
+        htmlChanged,
+        htmlCaptureId,
+        htmlHash,
+        capturedAt,
+        synced
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'html_status_logs';
+  @override
+  VerificationContext validateIntegrity(Insertable<HtmlStatusLog> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('event_id')) {
+      context.handle(_eventIdMeta,
+          eventId.isAcceptableOrUnknown(data['event_id']!, _eventIdMeta));
+    } else if (isInserting) {
+      context.missing(_eventIdMeta);
+    }
+    if (data.containsKey('participant_id')) {
+      context.handle(
+          _participantIdMeta,
+          participantId.isAcceptableOrUnknown(
+              data['participant_id']!, _participantIdMeta));
+    } else if (isInserting) {
+      context.missing(_participantIdMeta);
+    }
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('html_changed')) {
+      context.handle(
+          _htmlChangedMeta,
+          htmlChanged.isAcceptableOrUnknown(
+              data['html_changed']!, _htmlChangedMeta));
+    } else if (isInserting) {
+      context.missing(_htmlChangedMeta);
+    }
+    if (data.containsKey('html_capture_id')) {
+      context.handle(
+          _htmlCaptureIdMeta,
+          htmlCaptureId.isAcceptableOrUnknown(
+              data['html_capture_id']!, _htmlCaptureIdMeta));
+    }
+    if (data.containsKey('html_hash')) {
+      context.handle(_htmlHashMeta,
+          htmlHash.isAcceptableOrUnknown(data['html_hash']!, _htmlHashMeta));
+    } else if (isInserting) {
+      context.missing(_htmlHashMeta);
+    }
+    if (data.containsKey('captured_at')) {
+      context.handle(
+          _capturedAtMeta,
+          capturedAt.isAcceptableOrUnknown(
+              data['captured_at']!, _capturedAtMeta));
+    } else if (isInserting) {
+      context.missing(_capturedAtMeta);
+    }
+    if (data.containsKey('synced')) {
+      context.handle(_syncedMeta,
+          synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  HtmlStatusLog map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return HtmlStatusLog(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
+      eventId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}event_id'])!,
+      participantId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}participant_id'])!,
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      htmlChanged: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}html_changed'])!,
+      htmlCaptureId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}html_capture_id']),
+      htmlHash: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}html_hash'])!,
+      capturedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}captured_at'])!,
+      synced: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}synced'])!,
+    );
+  }
+
+  @override
+  $HtmlStatusLogsTable createAlias(String alias) {
+    return $HtmlStatusLogsTable(attachedDatabase, alias);
+  }
+}
+
+class HtmlStatusLog extends DataClass implements Insertable<HtmlStatusLog> {
+  final String id;
+  final String eventId;
+  final String participantId;
+  final String sessionId;
+  final bool htmlChanged;
+  final String? htmlCaptureId;
+  final String htmlHash;
+  final DateTime capturedAt;
+  final bool synced;
+  const HtmlStatusLog(
+      {required this.id,
+      required this.eventId,
+      required this.participantId,
+      required this.sessionId,
+      required this.htmlChanged,
+      this.htmlCaptureId,
+      required this.htmlHash,
+      required this.capturedAt,
+      required this.synced});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['event_id'] = Variable<String>(eventId);
+    map['participant_id'] = Variable<String>(participantId);
+    map['session_id'] = Variable<String>(sessionId);
+    map['html_changed'] = Variable<bool>(htmlChanged);
+    if (!nullToAbsent || htmlCaptureId != null) {
+      map['html_capture_id'] = Variable<String>(htmlCaptureId);
+    }
+    map['html_hash'] = Variable<String>(htmlHash);
+    map['captured_at'] = Variable<DateTime>(capturedAt);
+    map['synced'] = Variable<bool>(synced);
+    return map;
+  }
+
+  HtmlStatusLogsCompanion toCompanion(bool nullToAbsent) {
+    return HtmlStatusLogsCompanion(
+      id: Value(id),
+      eventId: Value(eventId),
+      participantId: Value(participantId),
+      sessionId: Value(sessionId),
+      htmlChanged: Value(htmlChanged),
+      htmlCaptureId: htmlCaptureId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(htmlCaptureId),
+      htmlHash: Value(htmlHash),
+      capturedAt: Value(capturedAt),
+      synced: Value(synced),
+    );
+  }
+
+  factory HtmlStatusLog.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return HtmlStatusLog(
+      id: serializer.fromJson<String>(json['id']),
+      eventId: serializer.fromJson<String>(json['eventId']),
+      participantId: serializer.fromJson<String>(json['participantId']),
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      htmlChanged: serializer.fromJson<bool>(json['htmlChanged']),
+      htmlCaptureId: serializer.fromJson<String?>(json['htmlCaptureId']),
+      htmlHash: serializer.fromJson<String>(json['htmlHash']),
+      capturedAt: serializer.fromJson<DateTime>(json['capturedAt']),
+      synced: serializer.fromJson<bool>(json['synced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'eventId': serializer.toJson<String>(eventId),
+      'participantId': serializer.toJson<String>(participantId),
+      'sessionId': serializer.toJson<String>(sessionId),
+      'htmlChanged': serializer.toJson<bool>(htmlChanged),
+      'htmlCaptureId': serializer.toJson<String?>(htmlCaptureId),
+      'htmlHash': serializer.toJson<String>(htmlHash),
+      'capturedAt': serializer.toJson<DateTime>(capturedAt),
+      'synced': serializer.toJson<bool>(synced),
+    };
+  }
+
+  HtmlStatusLog copyWith(
+          {String? id,
+          String? eventId,
+          String? participantId,
+          String? sessionId,
+          bool? htmlChanged,
+          Value<String?> htmlCaptureId = const Value.absent(),
+          String? htmlHash,
+          DateTime? capturedAt,
+          bool? synced}) =>
+      HtmlStatusLog(
+        id: id ?? this.id,
+        eventId: eventId ?? this.eventId,
+        participantId: participantId ?? this.participantId,
+        sessionId: sessionId ?? this.sessionId,
+        htmlChanged: htmlChanged ?? this.htmlChanged,
+        htmlCaptureId:
+            htmlCaptureId.present ? htmlCaptureId.value : this.htmlCaptureId,
+        htmlHash: htmlHash ?? this.htmlHash,
+        capturedAt: capturedAt ?? this.capturedAt,
+        synced: synced ?? this.synced,
+      );
+  @override
+  String toString() {
+    return (StringBuffer('HtmlStatusLog(')
+          ..write('id: $id, ')
+          ..write('eventId: $eventId, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('htmlChanged: $htmlChanged, ')
+          ..write('htmlCaptureId: $htmlCaptureId, ')
+          ..write('htmlHash: $htmlHash, ')
+          ..write('capturedAt: $capturedAt, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, eventId, participantId, sessionId,
+      htmlChanged, htmlCaptureId, htmlHash, capturedAt, synced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is HtmlStatusLog &&
+          other.id == this.id &&
+          other.eventId == this.eventId &&
+          other.participantId == this.participantId &&
+          other.sessionId == this.sessionId &&
+          other.htmlChanged == this.htmlChanged &&
+          other.htmlCaptureId == this.htmlCaptureId &&
+          other.htmlHash == this.htmlHash &&
+          other.capturedAt == this.capturedAt &&
+          other.synced == this.synced);
+}
+
+class HtmlStatusLogsCompanion extends UpdateCompanion<HtmlStatusLog> {
+  final Value<String> id;
+  final Value<String> eventId;
+  final Value<String> participantId;
+  final Value<String> sessionId;
+  final Value<bool> htmlChanged;
+  final Value<String?> htmlCaptureId;
+  final Value<String> htmlHash;
+  final Value<DateTime> capturedAt;
+  final Value<bool> synced;
+  final Value<int> rowid;
+  const HtmlStatusLogsCompanion({
+    this.id = const Value.absent(),
+    this.eventId = const Value.absent(),
+    this.participantId = const Value.absent(),
+    this.sessionId = const Value.absent(),
+    this.htmlChanged = const Value.absent(),
+    this.htmlCaptureId = const Value.absent(),
+    this.htmlHash = const Value.absent(),
+    this.capturedAt = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  HtmlStatusLogsCompanion.insert({
+    required String id,
+    required String eventId,
+    required String participantId,
+    required String sessionId,
+    required bool htmlChanged,
+    this.htmlCaptureId = const Value.absent(),
+    required String htmlHash,
+    required DateTime capturedAt,
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        eventId = Value(eventId),
+        participantId = Value(participantId),
+        sessionId = Value(sessionId),
+        htmlChanged = Value(htmlChanged),
+        htmlHash = Value(htmlHash),
+        capturedAt = Value(capturedAt);
+  static Insertable<HtmlStatusLog> custom({
+    Expression<String>? id,
+    Expression<String>? eventId,
+    Expression<String>? participantId,
+    Expression<String>? sessionId,
+    Expression<bool>? htmlChanged,
+    Expression<String>? htmlCaptureId,
+    Expression<String>? htmlHash,
+    Expression<DateTime>? capturedAt,
+    Expression<bool>? synced,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (eventId != null) 'event_id': eventId,
+      if (participantId != null) 'participant_id': participantId,
+      if (sessionId != null) 'session_id': sessionId,
+      if (htmlChanged != null) 'html_changed': htmlChanged,
+      if (htmlCaptureId != null) 'html_capture_id': htmlCaptureId,
+      if (htmlHash != null) 'html_hash': htmlHash,
+      if (capturedAt != null) 'captured_at': capturedAt,
+      if (synced != null) 'synced': synced,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  HtmlStatusLogsCompanion copyWith(
+      {Value<String>? id,
+      Value<String>? eventId,
+      Value<String>? participantId,
+      Value<String>? sessionId,
+      Value<bool>? htmlChanged,
+      Value<String?>? htmlCaptureId,
+      Value<String>? htmlHash,
+      Value<DateTime>? capturedAt,
+      Value<bool>? synced,
+      Value<int>? rowid}) {
+    return HtmlStatusLogsCompanion(
+      id: id ?? this.id,
+      eventId: eventId ?? this.eventId,
+      participantId: participantId ?? this.participantId,
+      sessionId: sessionId ?? this.sessionId,
+      htmlChanged: htmlChanged ?? this.htmlChanged,
+      htmlCaptureId: htmlCaptureId ?? this.htmlCaptureId,
+      htmlHash: htmlHash ?? this.htmlHash,
+      capturedAt: capturedAt ?? this.capturedAt,
+      synced: synced ?? this.synced,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (eventId.present) {
+      map['event_id'] = Variable<String>(eventId.value);
+    }
+    if (participantId.present) {
+      map['participant_id'] = Variable<String>(participantId.value);
+    }
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (htmlChanged.present) {
+      map['html_changed'] = Variable<bool>(htmlChanged.value);
+    }
+    if (htmlCaptureId.present) {
+      map['html_capture_id'] = Variable<String>(htmlCaptureId.value);
+    }
+    if (htmlHash.present) {
+      map['html_hash'] = Variable<String>(htmlHash.value);
+    }
+    if (capturedAt.present) {
+      map['captured_at'] = Variable<DateTime>(capturedAt.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('HtmlStatusLogsCompanion(')
+          ..write('id: $id, ')
+          ..write('eventId: $eventId, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('htmlChanged: $htmlChanged, ')
+          ..write('htmlCaptureId: $htmlCaptureId, ')
+          ..write('htmlHash: $htmlHash, ')
+          ..write('capturedAt: $capturedAt, ')
+          ..write('synced: $synced, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   late final $EventsTable events = $EventsTable(this);
   late final $SessionsTable sessions = $SessionsTable(this);
   late final $OcrResultsTable ocrResults = $OcrResultsTable(this);
+  late final $HtmlCapturesTable htmlCaptures = $HtmlCapturesTable(this);
+  late final $HtmlStatusLogsTable htmlStatusLogs = $HtmlStatusLogsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
   @override
   List<DatabaseSchemaEntity> get allSchemaEntities =>
-      [events, sessions, ocrResults];
+      [events, sessions, ocrResults, htmlCaptures, htmlStatusLogs];
 }

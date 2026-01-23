@@ -81,12 +81,10 @@ class Participant {
 class ValidationResult {
   final bool isValid;
   final String? errorMessage;
-  final bool isAlreadyInUse;
 
   ValidationResult({
     required this.isValid,
     this.errorMessage,
-    this.isAlreadyInUse = false,
   });
 
   factory ValidationResult.valid() => ValidationResult(isValid: true);
@@ -94,12 +92,6 @@ class ValidationResult {
   factory ValidationResult.invalid(String message) => ValidationResult(
     isValid: false,
     errorMessage: message,
-  );
-
-  factory ValidationResult.inUse() => ValidationResult(
-    isValid: false,
-    errorMessage: 'This participant ID is already enrolled on another device',
-    isAlreadyInUse: true,
   );
 }
 
@@ -178,12 +170,6 @@ class ParticipantService {
         return ValidationResult.invalid('Invalid participant ID. Please check your ID and try again.');
       }
 
-      // Check if already in use
-      final data = doc.data();
-      if (data != null && data['inUse'] == true) {
-        return ValidationResult.inUse();
-      }
-
       return ValidationResult.valid();
     } catch (e) {
       print('[ParticipantService] Error validating participant ID: $e');
@@ -191,8 +177,8 @@ class ParticipantService {
     }
   }
 
-  /// Mark a participant ID as in-use in Firebase
-  Future<bool> markParticipantIdAsInUse({
+  /// Register a device enrollment for this participant ID in Firebase
+  Future<bool> registerDeviceEnrollment({
     required String participantId,
     required String visitorId,
     Map<String, dynamic>? deviceInfo,
@@ -203,14 +189,19 @@ class ParticipantService {
           .doc(participantId)
           .update({
         'inUse': true,
-        'enrolledAt': FieldValue.serverTimestamp(),
-        'enrolledByVisitorId': visitorId,
-        'enrolledByDeviceInfo': deviceInfo,
+        'lastEnrolledAt': FieldValue.serverTimestamp(),
+        'devices': FieldValue.arrayUnion([
+          {
+            'visitorId': visitorId,
+            'enrolledAt': DateTime.now().toUtc().toIso8601String(),
+            ...?deviceInfo,
+          }
+        ]),
       });
-      print('[ParticipantService] Marked participant ID as in-use: $participantId');
+      print('[ParticipantService] Registered device for participant: $participantId');
       return true;
     } catch (e) {
-      print('[ParticipantService] Error marking participant ID as in-use: $e');
+      print('[ParticipantService] Error registering device enrollment: $e');
       return false;
     }
   }
