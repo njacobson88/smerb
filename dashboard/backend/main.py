@@ -1715,14 +1715,10 @@ import requests
 def get_storage_bucket():
     """Get Firebase Storage bucket.
 
-    Firebase projects can use either:
-    - {project}.appspot.com (legacy, most common)
-    - {project}.firebasestorage.app (newer)
-
-    We try appspot.com first as it's more reliable.
+    This project uses the newer .firebasestorage.app bucket naming.
+    Verified via: gsutil ls -> gs://r01-redditx-suicide.firebasestorage.app/
     """
-    # Use appspot.com - this is the standard Firebase Storage bucket
-    bucket_name = f"{config.FIREBASE_PROJECT_ID}.appspot.com"
+    bucket_name = f"{config.FIREBASE_PROJECT_ID}.firebasestorage.app"
     try:
         bucket = fb_storage.bucket(bucket_name)
         logger.debug(f"Using storage bucket: {bucket_name}")
