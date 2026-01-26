@@ -1043,51 +1043,65 @@ def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
                 ema_ref = participant_ref.collection("ema_responses")
                 ema_docs = list(ema_ref.order_by("completedAt", direction=firestore.Query.DESCENDING).limit(100).stream())
 
+                # Helper to safely get responses dict
+                def safe_get_responses(data, key="responses"):
+                    resp = data.get(key, {})
+                    if isinstance(resp, str):
+                        try:
+                            resp = json.loads(resp)
+                        except:
+                            resp = {}
+                    return resp if isinstance(resp, dict) else {}
+
                 # Index EMAs by sessionId for matching
                 ema_by_session = {}
                 for ema_doc in ema_docs:
                     ema = ema_doc.to_dict()
                     session_id = ema.get("sessionId")
                     if session_id:
-                        ema_by_session[session_id] = ema.get("responses", {})
+                        ema_by_session[session_id] = safe_get_responses(ema)
 
                 for alert_doc in alert_docs:
-                    alert = alert_doc.to_dict()
-                    triggered_at = alert.get("triggeredAt")
+                    try:
+                        alert = alert_doc.to_dict()
+                        triggered_at = alert.get("triggeredAt")
 
-                    if not triggered_at:
+                        if not triggered_at:
+                            continue
+
+                        # Format timestamp
+                        if hasattr(triggered_at, 'timestamp'):
+                            alert_datetime = datetime.fromtimestamp(triggered_at.timestamp())
+                            alert_date = alert_datetime.strftime("%Y-%m-%d")
+                            alert_time = alert_datetime.strftime("%H:%M:%S")
+                            triggered_iso = alert_datetime.isoformat() + "Z"
+                        else:
+                            alert_date = triggered_at.strftime("%Y-%m-%d")
+                            alert_time = triggered_at.strftime("%H:%M:%S")
+                            triggered_iso = triggered_at.isoformat() + "Z"
+
+                        # Get alert responses and merge with full EMA data
+                        alert_responses = safe_get_responses(alert)
+                        session_id = alert.get("sessionId")
+
+                        # Try to get full EMA responses for this session
+                        full_responses = ema_by_session.get(session_id, {})
+                        merged_responses = {**alert_responses, **full_responses}
+
+                        alerts.append({
+                            "participantId": pid,
+                            "alertId": alert_doc.id,
+                            "date": alert_date,
+                            "time": alert_time,
+                            "triggeredAt": triggered_iso,
+                            "sessionId": session_id,
+                            "triggerReason": alert.get("triggerReason"),
+                            "responses": merged_responses,
+                            "notificationSent": alert.get("notificationSent", False),
+                        })
+                    except Exception as alert_err:
+                        logger.warning(f"Error processing alert {alert_doc.id} for {pid}: {alert_err}")
                         continue
-
-                    # Format timestamp
-                    if hasattr(triggered_at, 'timestamp'):
-                        alert_datetime = datetime.fromtimestamp(triggered_at.timestamp())
-                        alert_date = alert_datetime.strftime("%Y-%m-%d")
-                        alert_time = alert_datetime.strftime("%H:%M:%S")
-                        triggered_iso = alert_datetime.isoformat() + "Z"
-                    else:
-                        alert_date = triggered_at.strftime("%Y-%m-%d")
-                        alert_time = triggered_at.strftime("%H:%M:%S")
-                        triggered_iso = triggered_at.isoformat() + "Z"
-
-                    # Get alert responses and merge with full EMA data
-                    alert_responses = alert.get("responses", {})
-                    session_id = alert.get("sessionId")
-
-                    # Try to get full EMA responses for this session
-                    full_responses = ema_by_session.get(session_id, {})
-                    merged_responses = {**alert_responses, **full_responses}
-
-                    alerts.append({
-                        "participantId": pid,
-                        "alertId": alert_doc.id,
-                        "date": alert_date,
-                        "time": alert_time,
-                        "triggeredAt": triggered_iso,
-                        "sessionId": session_id,
-                        "triggerReason": alert.get("triggerReason"),
-                        "responses": merged_responses,
-                        "notificationSent": alert.get("notificationSent", False),
-                    })
 
             except Exception as e:
                 logger.warning(f"Error fetching alerts for {pid}: {e}")
