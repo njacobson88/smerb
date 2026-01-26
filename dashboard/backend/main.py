@@ -7,6 +7,7 @@ import uuid
 import zipfile
 import logging
 import re
+import asyncio
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -499,6 +500,181 @@ def get_participant_ref(participant_id: str):
 # ============================================================================
 
 DASHBOARD_CACHE_COLLECTION = "dashboard_cache"
+
+# ============================================================================
+# Safety Alerts In-Memory Cache (refreshed every 2 minutes)
+# ============================================================================
+
+SAFETY_ALERT_CACHE: Dict[str, Any] = {
+    "alerts": [],
+    "updated_at": None,
+    "status": "never_run",
+    "error": None,
+}
+_safety_alert_lock = asyncio.Lock()
+_safety_alert_stop_event = asyncio.Event()
+_safety_alert_task = None
+SAFETY_ALERT_REFRESH_SECONDS = 120  # 2 minutes
+
+
+def _safe_get_responses(data: dict, key: str = "responses") -> dict:
+    """Safely extract responses dict, handling JSON string format."""
+    resp = data.get(key, {})
+    if isinstance(resp, str):
+        try:
+            resp = json.loads(resp)
+        except:
+            resp = {}
+    return resp if isinstance(resp, dict) else {}
+
+
+def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
+    """
+    Fetch safety alerts directly from Firestore.
+    This is the core logic extracted for reuse by both the background
+    refresh loop and the manual refresh endpoint.
+    """
+    alerts = []
+
+    # Get all enrolled participants
+    participants_info = get_all_participant_ids(enrolled_only=True)
+
+    for p_info in participants_info:
+        pid = p_info["id"]
+        participant_ref = get_participant_ref(pid)
+
+        try:
+            # Fetch safety alerts
+            alerts_ref = participant_ref.collection("safety_alerts")
+            alert_docs = list(alerts_ref.order_by("triggeredAt", direction=firestore.Query.DESCENDING).limit(50).stream())
+
+            # Fetch recent EMA responses to match with alerts
+            ema_ref = participant_ref.collection("ema_responses")
+            ema_docs = list(ema_ref.order_by("completedAt", direction=firestore.Query.DESCENDING).limit(100).stream())
+
+            # Index EMAs by sessionId for matching
+            ema_by_session = {}
+            for ema_doc in ema_docs:
+                ema = ema_doc.to_dict()
+                session_id = ema.get("sessionId")
+                if session_id:
+                    ema_by_session[session_id] = _safe_get_responses(ema)
+
+            for alert_doc in alert_docs:
+                try:
+                    alert = alert_doc.to_dict()
+                    triggered_at = alert.get("triggeredAt")
+
+                    if not triggered_at:
+                        continue
+
+                    # Format timestamp
+                    if hasattr(triggered_at, 'timestamp'):
+                        alert_datetime = datetime.fromtimestamp(triggered_at.timestamp())
+                        alert_date = alert_datetime.strftime("%Y-%m-%d")
+                        alert_time = alert_datetime.strftime("%H:%M:%S")
+                        triggered_iso = alert_datetime.isoformat() + "Z"
+                    else:
+                        alert_date = triggered_at.strftime("%Y-%m-%d")
+                        alert_time = triggered_at.strftime("%H:%M:%S")
+                        triggered_iso = triggered_at.isoformat() + "Z"
+
+                    # Get alert responses and merge with full EMA data
+                    alert_responses = _safe_get_responses(alert)
+                    session_id = alert.get("sessionId")
+
+                    # Try to get full EMA responses for this session
+                    full_responses = ema_by_session.get(session_id, {})
+                    merged_responses = {**alert_responses, **full_responses}
+
+                    alerts.append({
+                        "participantId": pid,
+                        "alertId": alert_doc.id,
+                        "date": alert_date,
+                        "time": alert_time,
+                        "triggeredAt": triggered_iso,
+                        "sessionId": session_id,
+                        "triggerReason": alert.get("triggerReason"),
+                        "responses": merged_responses,
+                        "notificationSent": alert.get("notificationSent", False),
+                    })
+                except Exception as alert_err:
+                    logger.warning(f"Error processing alert {alert_doc.id} for {pid}: {alert_err}")
+                    continue
+
+        except Exception as e:
+            logger.warning(f"Error fetching alerts for {pid}: {e}")
+            continue
+
+    # Sort by triggeredAt descending (most recent first)
+    alerts.sort(key=lambda x: x.get("triggeredAt", ""), reverse=True)
+    return alerts
+
+
+async def refresh_safety_alert_cache():
+    """Background task that refreshes the safety alert cache every 2 minutes."""
+    global SAFETY_ALERT_CACHE
+    logger.info("[SafetyAlerts] Background refresh loop starting")
+
+    while not _safety_alert_stop_event.is_set():
+        try:
+            # Run the blocking Firestore call in a thread pool
+            loop = asyncio.get_event_loop()
+            alerts = await loop.run_in_executor(None, fetch_live_safety_alerts)
+
+            async with _safety_alert_lock:
+                SAFETY_ALERT_CACHE.update({
+                    "alerts": alerts,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "status": "ok",
+                    "error": None,
+                })
+            logger.info(f"[SafetyAlerts] Cache refreshed: {len(alerts)} alerts")
+
+        except Exception as exc:
+            logger.exception("[SafetyAlerts] Refresh failed")
+            async with _safety_alert_lock:
+                SAFETY_ALERT_CACHE.update({
+                    "status": "error",
+                    "error": str(exc),
+                })
+
+        # Wait for the refresh interval or stop event
+        try:
+            await asyncio.wait_for(
+                _safety_alert_stop_event.wait(),
+                timeout=SAFETY_ALERT_REFRESH_SECONDS
+            )
+            # If we get here without timeout, stop event was set
+            break
+        except asyncio.TimeoutError:
+            # Normal timeout, continue the loop
+            pass
+
+    logger.info("[SafetyAlerts] Background refresh loop stopped")
+
+
+@app.on_event("startup")
+async def start_safety_alert_refresh():
+    """Start the background safety alert refresh task on app startup."""
+    global _safety_alert_task
+    _safety_alert_stop_event.clear()
+    _safety_alert_task = asyncio.create_task(refresh_safety_alert_cache())
+    logger.info("[SafetyAlerts] Background refresh task started")
+
+
+@app.on_event("shutdown")
+async def stop_safety_alert_refresh():
+    """Stop the background safety alert refresh task on app shutdown."""
+    global _safety_alert_task
+    if _safety_alert_task:
+        _safety_alert_stop_event.set()
+        try:
+            await asyncio.wait_for(_safety_alert_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("[SafetyAlerts] Refresh task did not stop gracefully")
+        _safety_alert_task = None
+    logger.info("[SafetyAlerts] Background refresh task stopped")
 
 
 def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: datetime) -> dict:
@@ -1020,108 +1196,62 @@ def get_overall_status(
 
 
 @app.get("/api/safety-alerts")
-def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
+async def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
     """
-    Get all safety alerts with LIVE data from Firestore.
-    Always fetches fresh data for real-time safety monitoring.
-    Matches alerts with EMA responses to get full SI data.
+    Get safety alerts from the in-memory cache.
+    Cache is refreshed every 2 minutes by a background task.
+    Returns cached data for fast response times.
+    """
+    async with _safety_alert_lock:
+        payload = SAFETY_ALERT_CACHE.copy()
+
+    if payload["status"] == "never_run":
+        # Cache not yet initialized - return 503
+        raise HTTPException(
+            status_code=503,
+            detail="Safety alert cache not ready. Please wait a moment and try again."
+        )
+
+    return {
+        "alerts": payload["alerts"],
+        "fromCache": True,
+        "refreshedAt": payload["updated_at"],
+        "status": payload["status"],
+        "error": payload["error"],
+        "refreshIntervalSeconds": SAFETY_ALERT_REFRESH_SECONDS,
+    }
+
+
+@app.post("/api/safety-alerts/refresh")
+async def force_refresh_safety_alerts(user: dict = Depends(verify_admin_token)):
+    """
+    Force an immediate refresh of the safety alerts cache.
+    Admin only. Use when you need to see alerts immediately without waiting
+    for the 2-minute refresh cycle.
     """
     try:
-        alerts = []
-        now = datetime.utcnow()
+        # Run the blocking Firestore call in a thread pool
+        loop = asyncio.get_event_loop()
+        alerts = await loop.run_in_executor(None, fetch_live_safety_alerts)
 
-        # Get all enrolled participants
-        participants_info = get_all_participant_ids(enrolled_only=True)
+        async with _safety_alert_lock:
+            SAFETY_ALERT_CACHE.update({
+                "alerts": alerts,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "status": "ok",
+                "error": None,
+            })
 
-        for p_info in participants_info:
-            pid = p_info["id"]
-            participant_ref = get_participant_ref(pid)
-
-            try:
-                # Fetch safety alerts (live from Firestore)
-                alerts_ref = participant_ref.collection("safety_alerts")
-                alert_docs = list(alerts_ref.order_by("triggeredAt", direction=firestore.Query.DESCENDING).limit(50).stream())
-
-                # Fetch recent EMA responses to match with alerts
-                ema_ref = participant_ref.collection("ema_responses")
-                ema_docs = list(ema_ref.order_by("completedAt", direction=firestore.Query.DESCENDING).limit(100).stream())
-
-                # Helper to safely get responses dict
-                def safe_get_responses(data, key="responses"):
-                    resp = data.get(key, {})
-                    if isinstance(resp, str):
-                        try:
-                            resp = json.loads(resp)
-                        except:
-                            resp = {}
-                    return resp if isinstance(resp, dict) else {}
-
-                # Index EMAs by sessionId for matching
-                ema_by_session = {}
-                for ema_doc in ema_docs:
-                    ema = ema_doc.to_dict()
-                    session_id = ema.get("sessionId")
-                    if session_id:
-                        ema_by_session[session_id] = safe_get_responses(ema)
-
-                for alert_doc in alert_docs:
-                    try:
-                        alert = alert_doc.to_dict()
-                        triggered_at = alert.get("triggeredAt")
-
-                        if not triggered_at:
-                            continue
-
-                        # Format timestamp
-                        if hasattr(triggered_at, 'timestamp'):
-                            alert_datetime = datetime.fromtimestamp(triggered_at.timestamp())
-                            alert_date = alert_datetime.strftime("%Y-%m-%d")
-                            alert_time = alert_datetime.strftime("%H:%M:%S")
-                            triggered_iso = alert_datetime.isoformat() + "Z"
-                        else:
-                            alert_date = triggered_at.strftime("%Y-%m-%d")
-                            alert_time = triggered_at.strftime("%H:%M:%S")
-                            triggered_iso = triggered_at.isoformat() + "Z"
-
-                        # Get alert responses and merge with full EMA data
-                        alert_responses = safe_get_responses(alert)
-                        session_id = alert.get("sessionId")
-
-                        # Try to get full EMA responses for this session
-                        full_responses = ema_by_session.get(session_id, {})
-                        merged_responses = {**alert_responses, **full_responses}
-
-                        alerts.append({
-                            "participantId": pid,
-                            "alertId": alert_doc.id,
-                            "date": alert_date,
-                            "time": alert_time,
-                            "triggeredAt": triggered_iso,
-                            "sessionId": session_id,
-                            "triggerReason": alert.get("triggerReason"),
-                            "responses": merged_responses,
-                            "notificationSent": alert.get("notificationSent", False),
-                        })
-                    except Exception as alert_err:
-                        logger.warning(f"Error processing alert {alert_doc.id} for {pid}: {alert_err}")
-                        continue
-
-            except Exception as e:
-                logger.warning(f"Error fetching alerts for {pid}: {e}")
-                continue
-
-        # Sort by triggeredAt descending (most recent first)
-        alerts.sort(key=lambda x: x.get("triggeredAt", ""), reverse=True)
+        logger.info(f"[SafetyAlerts] Manual refresh completed: {len(alerts)} alerts")
 
         return {
-            "alerts": alerts,
-            "fromCache": False,
-            "refreshedAt": now.isoformat() + "Z",
-            "message": "Live data from Firestore",
+            "status": "ok",
+            "count": len(alerts),
+            "refreshedAt": SAFETY_ALERT_CACHE["updated_at"],
         }
 
     except Exception as e:
-        logger.error(f"Failed to get safety alerts: {e}", exc_info=True)
+        logger.error(f"[SafetyAlerts] Manual refresh failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
