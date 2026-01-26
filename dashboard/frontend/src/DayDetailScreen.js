@@ -428,19 +428,19 @@ const DayDetailScreen = ({
       {/* Main Content */}
       {!loading && !error && dayData && (
         <div className="space-y-6">
-          {/* Safety Alerts (if any) - Shows ONLY SI-related EMA fields */}
+          {/* Safety Alerts (if any) - Shows all responses with SI-friendly labels */}
           {dayData.safety_alerts?.length > 0 && (
             <div className="bg-red-50 border-2 border-red-300 rounded-lg p-4">
               <div className="flex items-center text-red-700 font-semibold mb-3">
                 <AlertTriangle size={20} className="mr-2" />
-                Safety Alerts - SI Risk Indicators ({dayData.safety_alerts.length})
+                Safety Alerts ({dayData.safety_alerts.length})
               </div>
+              <p className="text-xs text-red-600 mb-3">
+                Alert triggered when SI Desire Intensity reached threshold. Shows EMA responses at time of alert.
+              </p>
               <div className="space-y-3">
                 {dayData.safety_alerts.map((alert, idx) => {
-                  // Filter to only SI-related fields
-                  const siResponses = alert.responses
-                    ? Object.entries(alert.responses).filter(([key]) => SI_RELATED_FIELDS.includes(key))
-                    : [];
+                  const responses = alert.responses ? Object.entries(alert.responses) : [];
 
                   return (
                     <div key={idx} className="bg-white border border-red-200 rounded p-4 shadow-sm">
@@ -455,22 +455,29 @@ const DayDetailScreen = ({
                           </span>
                         )}
                       </div>
-                      {/* Display only SI-related responses */}
-                      {siResponses.length > 0 ? (
+                      {/* Display all responses with SI-friendly labels */}
+                      {responses.length > 0 ? (
                         <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                          {siResponses.map(([key, value], rIdx) => (
-                            <div key={rIdx} className="border-l-3 border-red-400 pl-3 py-1 bg-red-50/50 rounded-r">
-                              <div className="text-xs text-red-600 font-medium mb-0.5">
-                                {formatQuestionLabel(key)}
+                          {responses.map(([key, value], rIdx) => {
+                            const isSIField = SI_RELATED_FIELDS.includes(key);
+                            return (
+                              <div key={rIdx} className={`border-l-3 pl-3 py-1 rounded-r ${
+                                isSIField ? 'border-red-400 bg-red-50/50' : 'border-gray-300 bg-gray-50/50'
+                              }`}>
+                                <div className={`text-xs font-medium mb-0.5 ${
+                                  isSIField ? 'text-red-600' : 'text-gray-500'
+                                }`}>
+                                  {formatQuestionLabel(key)}
+                                </div>
+                                <div className="font-semibold text-gray-800">
+                                  {formatSIResponseValue(key, value)}
+                                </div>
                               </div>
-                              <div className="font-semibold text-gray-800">
-                                {formatSIResponseValue(key, value)}
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       ) : (
-                        <div className="text-gray-500 text-sm">No SI response data available</div>
+                        <div className="text-gray-500 text-sm">No response data available</div>
                       )}
                     </div>
                   );
@@ -605,19 +612,24 @@ const DayDetailScreen = ({
                         </span>
                       )}
                     </div>
-                    {/* Display responses as key-value pairs */}
+                    {/* Display responses as key-value pairs with SI-friendly labels */}
                     {checkin.responses && Object.keys(checkin.responses).length > 0 ? (
                       <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-                        {Object.entries(checkin.responses).map(([key, value], rIdx) => (
-                          <div key={rIdx} className="text-sm border-l-2 border-gray-300 pl-3 py-1">
-                            <div className="text-gray-500 text-xs mb-0.5">
-                              {formatQuestionLabel(key)}
+                        {Object.entries(checkin.responses).map(([key, value], rIdx) => {
+                          const isSIField = SI_RELATED_FIELDS.includes(key);
+                          return (
+                            <div key={rIdx} className={`text-sm border-l-2 pl-3 py-1 ${
+                              isSIField ? 'border-red-300 bg-red-50/30' : 'border-gray-300'
+                            }`}>
+                              <div className={`text-xs mb-0.5 ${isSIField ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                                {formatQuestionLabel(key)}
+                              </div>
+                              <div className="font-medium text-gray-800">
+                                {formatSIResponseValue(key, value)}
+                              </div>
                             </div>
-                            <div className="font-medium text-gray-800">
-                              {formatResponseValue(value)}
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="text-gray-400 text-sm">No responses recorded</div>
