@@ -1,0 +1,17 @@
+{
+  "projects": {
+    "default": "r01-redditx-suicide"
+  },
+  "targets": {
+    "r01-redditx-suicide": {
+      "hosting": {
+        "app": [
+          "r01-redditx-suicide"
+        ],
+        "dashboard": [
+          "socialscope-dashboard"
+        ]
+      }
+    }
+  }
+}

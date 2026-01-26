@@ -56,6 +56,19 @@ macos/Pods/
 # Node modules
 node_modules/
 
+# Python virtual environments
+venv/
+.venv/
+__pycache__/
+*.egg-info/
+
+# Dashboard build artifacts
+dashboard/frontend/build/
+dashboard/backend/venv/
+
+# Firebase
+.firebase/
+
 # Large binary files in deprecated folder
 old_potentially_deprecated/ios_pods/
 old_potentially_deprecated/tessdata/**/*.traineddata
