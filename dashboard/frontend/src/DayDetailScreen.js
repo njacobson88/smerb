@@ -644,7 +644,7 @@ const DayDetailScreen = ({
             </div>
           </div>
 
-          {/* Screenshot Timeline */}
+          {/* Screenshot Timeline with Preview */}
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold text-gray-800 mb-4">Screenshot Timeline</h2>
             <div className="grid grid-cols-24 gap-1">
@@ -690,6 +690,56 @@ const DayDetailScreen = ({
                 <div className="w-3 h-3 bg-green-400 rounded mr-1" /> High (10+)
               </span>
             </div>
+
+            {/* Screenshot Preview Samples */}
+            {dayData.sample_screenshots?.length > 0 && (
+              <div className="mt-6 pt-6 border-t">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center">
+                  <Camera size={16} className="mr-2" />
+                  Screenshot Preview (Sample of {dayData.sample_screenshots.length} across the day)
+                </h3>
+                <div className="grid grid-cols-5 gap-3">
+                  {dayData.sample_screenshots.map((screenshot, idx) => (
+                    <div key={idx} className="relative group">
+                      <a
+                        href={screenshot.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block"
+                      >
+                        <div className="aspect-[9/16] bg-gray-100 rounded-lg overflow-hidden border border-gray-200 hover:border-blue-400 transition-colors">
+                          <img
+                            src={screenshot.url}
+                            alt={`Screenshot at ${screenshot.time}`}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                          />
+                        </div>
+                        <div className="mt-1 text-xs text-center">
+                          <span className="text-gray-600">{screenshot.time}</span>
+                          {screenshot.platform && (
+                            <span
+                              className="ml-1 px-1.5 py-0.5 rounded text-white text-[10px]"
+                              style={{
+                                backgroundColor: screenshot.platform.toLowerCase() === 'reddit' ? '#FF4500' :
+                                  screenshot.platform.toLowerCase() === 'twitter' ? '#1DA1F2' : '#6B7280'
+                              }}
+                            >
+                              {screenshot.platform}
+                            </span>
+                          )}
+                        </div>
+                      </a>
+                      {/* Hover overlay */}
+                      <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-10 transition-all rounded-lg pointer-events-none" />
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-400 mt-2 text-center">
+                  Click to view full size. Showing ~10 samples distributed throughout the day.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* OCR Words Chart */}

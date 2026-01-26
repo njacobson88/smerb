@@ -1,7 +1,7 @@
 // SocialScope.js - Main Dashboard Application
 
 import React, { useState, useEffect } from 'react';
-import { Users, Download, AlertTriangle, LogOut, Settings } from 'lucide-react';
+import { Users, Download, AlertTriangle, LogOut, Settings, Clock } from 'lucide-react';
 import OverallScreen from './OverallScreen';
 import ParticipantDetailScreen from './ParticipantDetailScreen';
 import DayDetailScreen from './DayDetailScreen';
@@ -229,6 +229,9 @@ const ExportScreen = () => {
   const [asyncJobId, setAsyncJobId] = useState(null);
   const [asyncStatus, setAsyncStatus] = useState(null);
   const [notifyEmail, setNotifyEmail] = useState('');
+  // My exports state
+  const [myExports, setMyExports] = useState([]);
+  const [loadingExports, setLoadingExports] = useState(true);
 
   // Fetch estimate when participant ID changes
   const fetchEstimate = async () => {
@@ -272,6 +275,32 @@ const ExportScreen = () => {
     }, 500);
     return () => clearTimeout(timer);
   }, [participantId, startDate, endDate]);
+
+  // Fetch user's export jobs
+  const fetchMyExports = async () => {
+    try {
+      const response = await authFetch(`${API_BASE_URL}/api/export/jobs`);
+      if (response.ok) {
+        const data = await response.json();
+        setMyExports(data.jobs || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch exports:', err);
+    } finally {
+      setLoadingExports(false);
+    }
+  };
+
+  React.useEffect(() => {
+    fetchMyExports();
+    // Refresh every 10 seconds if there are pending/processing jobs
+    const interval = setInterval(() => {
+      if (myExports.some(j => j.status === 'pending' || j.status === 'processing')) {
+        fetchMyExports();
+      }
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [myExports.length]);
 
   // Poll for async job status
   React.useEffect(() => {
@@ -589,7 +618,7 @@ const ExportScreen = () => {
               </div>
             )}
             <p className="text-xs text-blue-600 mt-2">
-              This may take several minutes. You can close this page - you'll receive an email when complete.
+              This may take several minutes. Check "My Exports" below for status.
             </p>
           </div>
         )}
@@ -644,6 +673,98 @@ const ExportScreen = () => {
           </a>
         </div>
       )}
+
+      {/* My Exports Section */}
+      <div className="mt-8 border-t pt-6">
+        <h3 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
+          <Clock size={20} className="mr-2" />
+          My Exports
+        </h3>
+
+        {loadingExports ? (
+          <div className="text-gray-500 text-sm">Loading exports...</div>
+        ) : myExports.length === 0 ? (
+          <div className="text-gray-500 text-sm p-4 bg-gray-50 rounded-lg text-center">
+            No exports yet. Start an export above.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {myExports.map((job) => (
+              <div
+                key={job.jobId}
+                className={`p-4 rounded-lg border ${
+                  job.status === 'completed' ? 'bg-green-50 border-green-200' :
+                  job.status === 'failed' ? 'bg-red-50 border-red-200' :
+                  'bg-blue-50 border-blue-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-gray-800">
+                      {job.participantId} - Level {job.exportLevel}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      Started: {job.createdAt ? new Date(job.createdAt).toLocaleString('en-US', {
+                        timeZone: 'America/New_York',
+                        month: 'short', day: 'numeric',
+                        hour: 'numeric', minute: '2-digit', hour12: true
+                      }) : 'Unknown'} EST
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    {job.status === 'completed' && (
+                      <a
+                        href={job.downloadUrl}
+                        className="inline-flex items-center px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700"
+                        download
+                      >
+                        <Download size={14} className="mr-1" />
+                        Download
+                      </a>
+                    )}
+                    {job.status === 'processing' && (
+                      <div className="text-blue-700">
+                        <div className="flex items-center text-sm font-medium">
+                          <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full mr-2"></div>
+                          Processing...
+                        </div>
+                        {job.screenshotTotal > 0 && (
+                          <div className="text-xs mt-1">
+                            {job.screenshotProgress || 0}/{job.screenshotTotal} screenshots
+                          </div>
+                        )}
+                        {job.timeEstimate && (
+                          <div className="text-xs text-blue-600">{job.timeEstimate}</div>
+                        )}
+                      </div>
+                    )}
+                    {job.status === 'pending' && (
+                      <div className="text-blue-600 text-sm flex items-center">
+                        <div className="animate-pulse h-2 w-2 bg-blue-500 rounded-full mr-2"></div>
+                        Starting...
+                      </div>
+                    )}
+                    {job.status === 'failed' && (
+                      <div className="text-red-600 text-sm">
+                        Failed: {job.error || 'Unknown error'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {/* Progress bar for processing jobs */}
+                {job.status === 'processing' && job.screenshotTotal > 0 && (
+                  <div className="mt-2 w-full bg-blue-200 rounded-full h-1.5">
+                    <div
+                      className="bg-blue-600 h-1.5 rounded-full transition-all"
+                      style={{ width: `${((job.screenshotProgress || 0) / job.screenshotTotal) * 100}%` }}
+                    ></div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

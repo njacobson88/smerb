@@ -1480,6 +1480,49 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
         # Count only actual screenshots, not all events
         screenshot_events = [e for e in events if e.get("type") == "screenshot"]
 
+        # Build sample screenshots by hour for preview (max 10 per hour)
+        hourly_screenshots = defaultdict(list)
+        for event in screenshot_events:
+            if event.get("screenshot_url"):
+                ts_str = event.get("timestamp")
+                if ts_str:
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00").replace("+00:00", ""))
+                        hour = ts.hour
+                        hourly_screenshots[hour].append({
+                            "url": event["screenshot_url"],
+                            "timestamp": ts_str,
+                            "platform": event.get("platform"),
+                            "time": ts.strftime("%I:%M %p"),
+                        })
+                    except:
+                        pass
+
+        # Sample ~10 screenshots per hour (evenly distributed)
+        sample_screenshots_by_hour = {}
+        for hour, screenshots in hourly_screenshots.items():
+            if len(screenshots) <= 10:
+                sample_screenshots_by_hour[hour] = screenshots
+            else:
+                # Take evenly spaced samples
+                step = len(screenshots) / 10
+                sample_screenshots_by_hour[hour] = [
+                    screenshots[int(i * step)] for i in range(10)
+                ]
+
+        # Also create a flat list of ~10 screenshots across the whole day
+        all_screenshots = []
+        for hour in sorted(hourly_screenshots.keys()):
+            all_screenshots.extend(hourly_screenshots[hour])
+
+        if len(all_screenshots) <= 10:
+            day_sample_screenshots = all_screenshots
+        else:
+            step = len(all_screenshots) / 10
+            day_sample_screenshots = [
+                all_screenshots[int(i * step)] for i in range(10)
+            ]
+
         return {
             "participant_id": participant_id,
             "date": date,
@@ -1497,6 +1540,8 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
             "events": events[:100],  # Limit to 100 events for performance
             "checkins": checkins,
             "safety_alerts": safety_alerts,
+            "sample_screenshots_by_hour": sample_screenshots_by_hour,
+            "sample_screenshots": day_sample_screenshots,
         }
 
     except HTTPException:
@@ -1906,6 +1951,49 @@ def start_async_export(
         raise
     except Exception as e:
         logger.error(f"Failed to start async export: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/export/jobs")
+def get_user_export_jobs(user: dict = Depends(verify_firebase_token)):
+    """Get all export jobs for the current user."""
+    try:
+        user_email = user.get("email")
+        jobs_ref = db.collection(EXPORT_JOBS_COLLECTION)
+
+        # Query jobs created by this user, ordered by creation time
+        jobs_query = jobs_ref.where("createdBy", "==", user_email).order_by("createdAt", direction=firestore.Query.DESCENDING).limit(20)
+
+        jobs = []
+        for job_doc in jobs_query.stream():
+            job_data = job_doc.to_dict()
+
+            # Convert timestamps
+            for ts_field in ["createdAt", "startedAt", "completedAt"]:
+                if job_data.get(ts_field) and hasattr(job_data[ts_field], 'timestamp'):
+                    job_data[ts_field] = datetime.fromtimestamp(job_data[ts_field].timestamp()).isoformat() + "Z"
+
+            # Calculate time estimate based on export level and screenshot count
+            if job_data.get("status") == "processing":
+                total = job_data.get("screenshotTotal", 0)
+                progress = job_data.get("screenshotProgress", 0)
+                if total > 0 and progress > 0:
+                    # Estimate ~2 seconds per screenshot
+                    remaining = total - progress
+                    est_seconds = remaining * 2
+                    if est_seconds > 60:
+                        job_data["timeEstimate"] = f"~{est_seconds // 60} min remaining"
+                    else:
+                        job_data["timeEstimate"] = f"~{est_seconds} sec remaining"
+                else:
+                    job_data["timeEstimate"] = "Calculating..."
+
+            jobs.append(job_data)
+
+        return {"jobs": jobs}
+
+    except Exception as e:
+        logger.error(f"Failed to get user export jobs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
