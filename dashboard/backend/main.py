@@ -6,16 +6,19 @@ import json
 import uuid
 import zipfile
 import logging
+import re
 from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any, Tuple
 from ipaddress import ip_address, ip_network
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 import firebase_admin
@@ -1587,6 +1590,133 @@ def get_storage_bucket():
         return fb_storage.bucket(f"{config.FIREBASE_PROJECT_ID}.appspot.com")
 
 
+# Shared session for HTTP downloads (connection reuse)
+_download_session = None
+
+def get_download_session():
+    """Get a shared requests session for connection reuse."""
+    global _download_session
+    if _download_session is None:
+        _download_session = requests.Session()
+        # Configure connection pooling
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=2
+        )
+        _download_session.mount('https://', adapter)
+        _download_session.mount('http://', adapter)
+    return _download_session
+
+
+def extract_storage_path_from_url(url: str) -> Optional[str]:
+    """Extract Firebase Storage blob path from a download URL."""
+    if not url:
+        return None
+    # Firebase Storage URLs: https://firebasestorage.googleapis.com/v0/b/{bucket}/o/{encoded_path}?alt=media&token=...
+    match = re.search(r'/o/([^?]+)', url)
+    if match:
+        return unquote(match.group(1))
+    return None
+
+
+def download_single_screenshot(ss_info: Dict[str, Any], bucket, session) -> Tuple[str, Optional[bytes], str]:
+    """
+    Download a single screenshot, trying Storage API first, then HTTP.
+    Returns: (event_id, image_bytes or None, extension)
+    """
+    event_id = ss_info.get("event_id", "unknown")
+    url = ss_info.get("url", "")
+    storage_path = ss_info.get("storagePath")  # Direct path if available
+
+    img_data = None
+    ext = ".jpg"
+
+    try:
+        # Try Storage API first if we have a path
+        if storage_path and bucket:
+            try:
+                blob = bucket.blob(storage_path)
+                img_data = blob.download_as_bytes()
+                if ".png" in storage_path.lower():
+                    ext = ".png"
+                return (event_id, img_data, ext)
+            except Exception as e:
+                logger.debug(f"Storage API download failed for {event_id}, falling back to HTTP: {e}")
+
+        # Try to extract storage path from URL
+        if not img_data and url:
+            extracted_path = extract_storage_path_from_url(url)
+            if extracted_path and bucket:
+                try:
+                    blob = bucket.blob(extracted_path)
+                    img_data = blob.download_as_bytes()
+                    if ".png" in extracted_path.lower():
+                        ext = ".png"
+                    return (event_id, img_data, ext)
+                except Exception as e:
+                    logger.debug(f"Storage API (extracted path) failed for {event_id}: {e}")
+
+        # Fallback to HTTP download with shared session
+        if not img_data and url and url.startswith("http"):
+            response = session.get(url, timeout=30)
+            if response.status_code == 200:
+                img_data = response.content
+                if ".png" in url.lower():
+                    ext = ".png"
+                elif response.headers.get("content-type", "").startswith("image/png"):
+                    ext = ".png"
+
+    except Exception as e:
+        logger.warning(f"Failed to download screenshot {event_id}: {e}")
+
+    return (event_id, img_data, ext)
+
+
+def download_screenshots_concurrent(
+    screenshot_infos: List[Dict[str, Any]],
+    max_workers: int = 10
+) -> List[Tuple[str, bytes, str, str]]:
+    """
+    Download multiple screenshots concurrently.
+    Returns list of (event_id, image_bytes, extension, timestamp_str) tuples.
+    """
+    results = []
+    bucket = None
+    try:
+        bucket = get_storage_bucket()
+    except Exception as e:
+        logger.warning(f"Could not get storage bucket: {e}")
+
+    session = get_download_session()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_info = {
+            executor.submit(download_single_screenshot, ss_info, bucket, session): ss_info
+            for ss_info in screenshot_infos
+        }
+
+        for future in as_completed(future_to_info):
+            ss_info = future_to_info[future]
+            try:
+                event_id, img_data, ext = future.result()
+                if img_data:
+                    # Format timestamp for filename
+                    ts_val = ss_info.get("timestamp")
+                    if ts_val:
+                        if hasattr(ts_val, 'isoformat'):
+                            ts_str = ts_val.isoformat().replace(":", "-").replace("T", "_")[:19]
+                        else:
+                            ts_str = str(ts_val).replace(":", "-").replace("T", "_")[:19]
+                    else:
+                        ts_str = f"img_{event_id[:8]}"
+                    results.append((event_id, img_data, ext, ts_str))
+            except Exception as e:
+                logger.warning(f"Error processing screenshot download: {e}")
+
+    return results
+
+
 # Export Jobs Collection for async exports
 EXPORT_JOBS_COLLECTION = "export_jobs"
 
@@ -1638,7 +1768,14 @@ def send_export_email(email: str, participant_id: str, download_url: str, filena
 def run_background_export(job_id: str, participant_id: str, export_level: int,
                           start_date: Optional[str], end_date: Optional[str],
                           user_email: str):
-    """Background thread function to run export and update job status."""
+    """Background thread function to run export and update job status.
+
+    Optimizations:
+    - Uses concurrent downloads (ThreadPoolExecutor) for screenshots
+    - Uses ZIP_STORED for images (already compressed, no benefit from deflate)
+    - Uses Storage API directly when possible (faster than HTTP)
+    - Reduces Firestore update frequency (every 25% progress)
+    """
     job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(job_id)
 
     try:
@@ -1661,6 +1798,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
         export_id = job_id
         export_path = EXPORT_DIR / f"{export_id}.zip"
 
+        # Use ZIP_DEFLATED for text, but we'll use ZIP_STORED for images
         with zipfile.ZipFile(export_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             # Export participant metadata
             if participant_data:
@@ -1715,7 +1853,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     events_query = events_ref
 
                 events_data = []
-                screenshot_urls = []
+                screenshot_infos = []
 
                 for event_doc in events_query.stream():
                     event = event_doc.to_dict()
@@ -1727,9 +1865,10 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     if export_level >= 3:
                         screenshot_url = event.get("screenshotUrl")
                         if screenshot_url:
-                            screenshot_urls.append({
+                            screenshot_infos.append({
                                 "event_id": event_doc.id,
                                 "url": screenshot_url,
+                                "storagePath": event.get("screenshotStoragePath"),  # Direct path if available
                                 "timestamp": event.get("timestamp"),
                             })
 
@@ -1738,39 +1877,36 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                 if events_data:
                     zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))
 
-                # Level 3: Download screenshots
-                if export_level >= 3 and screenshot_urls:
-                    total = len(screenshot_urls)
+                # Level 3: Download screenshots concurrently
+                if export_level >= 3 and screenshot_infos:
+                    total = len(screenshot_infos)
+                    logger.info(f"Downloading {total} screenshots concurrently for export {job_id}")
                     job_ref.update({"screenshotTotal": total, "screenshotProgress": 0})
 
-                    for idx, ss_info in enumerate(screenshot_urls):
-                        try:
-                            url = ss_info["url"]
-                            if url and url.startswith("http"):
-                                response = requests.get(url, timeout=30)
-                                if response.status_code == 200:
-                                    ext = ".jpg"
-                                    if ".png" in url.lower():
-                                        ext = ".png"
+                    # Download all screenshots concurrently
+                    downloaded = download_screenshots_concurrent(screenshot_infos, max_workers=15)
 
-                                    ts_val = ss_info.get("timestamp")
-                                    if ts_val:
-                                        if hasattr(ts_val, 'isoformat'):
-                                            ts = ts_val.isoformat().replace(":", "-").replace("T", "_")[:19]
-                                        else:
-                                            ts = str(ts_val).replace(":", "-").replace("T", "_")[:19]
-                                    else:
-                                        ts = f"img_{idx}"
+                    # Write to zip using ZIP_STORED (images are already compressed)
+                    for idx, (event_id, img_data, ext, ts_str) in enumerate(downloaded):
+                        filename = f"screenshots/{ts_str}_{event_id[:8]}{ext}"
+                        # Use ZIP_STORED for images - they're already compressed
+                        zf.writestr(
+                            zipfile.ZipInfo(filename),
+                            img_data,
+                            compress_type=zipfile.ZIP_STORED
+                        )
 
-                                    filename = f"screenshots/{ts}_{ss_info['event_id'][:8]}{ext}"
-                                    zf.writestr(filename, response.content)
+                        # Update progress at 25%, 50%, 75%, and 100%
+                        progress_pct = (idx + 1) / len(downloaded)
+                        if progress_pct >= 0.25 and idx == int(len(downloaded) * 0.25):
+                            job_ref.update({"screenshotProgress": int(total * 0.25)})
+                        elif progress_pct >= 0.50 and idx == int(len(downloaded) * 0.50):
+                            job_ref.update({"screenshotProgress": int(total * 0.50)})
+                        elif progress_pct >= 0.75 and idx == int(len(downloaded) * 0.75):
+                            job_ref.update({"screenshotProgress": int(total * 0.75)})
 
-                            # Update progress every 10 screenshots
-                            if idx % 10 == 0:
-                                job_ref.update({"screenshotProgress": idx + 1})
-
-                        except Exception as e:
-                            logger.warning(f"Failed to download screenshot {idx}: {e}")
+                    job_ref.update({"screenshotProgress": total})
+                    logger.info(f"Downloaded {len(downloaded)}/{total} screenshots for export {job_id}")
 
         # Generate filename and store result
         level_names = {1: "meta", 2: "ocr", 3: "full"}
@@ -1787,7 +1923,6 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
             blob.upload_from_filename(str(export_path))
 
             # Generate signed URL valid for 7 days
-            from datetime import timedelta
             download_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
@@ -2107,6 +2242,11 @@ def export_participant_data(
     Level 1: Metadata + EMA responses + Safety alerts
     Level 2: Level 1 + All events with OCR data
     Level 3: Level 2 + Screenshot images from Firebase Storage
+
+    Optimizations:
+    - Uses concurrent downloads for screenshots
+    - Uses ZIP_STORED for images (already compressed)
+    - Uploads to Firebase Storage for persistent download links
     """
     try:
         # Check participant exists in either collection
@@ -2188,7 +2328,7 @@ def export_participant_data(
                     events_query = events_ref.order_by("timestamp")
 
                 events_data = []
-                screenshot_urls = []  # For level 3
+                screenshot_infos = []  # For level 3
 
                 for event_doc in events_query.stream():
                     event = event_doc.to_dict()
@@ -2197,13 +2337,14 @@ def export_participant_data(
                         if ts_val and hasattr(ts_val, 'timestamp'):
                             event[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
 
-                    # Collect screenshot URLs for level 3
+                    # Collect screenshot info for level 3
                     if export_level >= 3:
                         screenshot_url = event.get("screenshotUrl")
                         if screenshot_url:
-                            screenshot_urls.append({
+                            screenshot_infos.append({
                                 "event_id": event_doc.id,
                                 "url": screenshot_url,
+                                "storagePath": event.get("screenshotStoragePath"),
                                 "timestamp": event.get("timestamp"),
                             })
 
@@ -2212,46 +2353,23 @@ def export_participant_data(
                 if events_data:
                     zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))
 
-                # Level 3: Download and include screenshots
-                if export_level >= 3 and screenshot_urls:
-                    logger.info(f"Downloading {len(screenshot_urls)} screenshots for export")
-                    import requests
-                    from urllib.parse import unquote
+                # Level 3: Download screenshots concurrently
+                if export_level >= 3 and screenshot_infos:
+                    logger.info(f"Downloading {len(screenshot_infos)} screenshots concurrently for sync export")
 
-                    for idx, ss_info in enumerate(screenshot_urls):
-                        try:
-                            url = ss_info["url"]
+                    # Download all screenshots concurrently
+                    downloaded = download_screenshots_concurrent(screenshot_infos, max_workers=15)
 
-                            # Firebase Storage download URLs can be fetched directly
-                            # URL format: https://firebasestorage.googleapis.com/v0/b/{bucket}/o/{path}?alt=media&token={token}
-                            if url and url.startswith("http"):
-                                response = requests.get(url, timeout=30)
-                                if response.status_code == 200:
-                                    img_data = response.content
-                                    # Determine file extension from URL or content-type
-                                    ext = ".jpg"
-                                    if ".png" in url.lower():
-                                        ext = ".png"
-                                    elif response.headers.get("content-type", "").startswith("image/png"):
-                                        ext = ".png"
+                    # Write to zip using ZIP_STORED (images are already compressed)
+                    for event_id, img_data, ext, ts_str in downloaded:
+                        filename = f"screenshots/{ts_str}_{event_id[:8]}{ext}"
+                        zf.writestr(
+                            zipfile.ZipInfo(filename),
+                            img_data,
+                            compress_type=zipfile.ZIP_STORED
+                        )
 
-                                    # Use timestamp for filename
-                                    ts_val = ss_info.get("timestamp")
-                                    if ts_val:
-                                        if hasattr(ts_val, 'isoformat'):
-                                            ts = ts_val.isoformat().replace(":", "-").replace("T", "_")[:19]
-                                        else:
-                                            ts = str(ts_val).replace(":", "-").replace("T", "_")[:19]
-                                    else:
-                                        ts = f"img_{idx}"
-
-                                    filename = f"screenshots/{ts}_{ss_info['event_id'][:8]}{ext}"
-                                    zf.writestr(filename, img_data)
-                                    logger.info(f"Downloaded screenshot {idx+1}/{len(screenshot_urls)}: {filename}")
-                                else:
-                                    logger.warning(f"Failed to download screenshot {idx}: HTTP {response.status_code}")
-                        except Exception as e:
-                            logger.warning(f"Failed to download screenshot {idx}: {e}")
+                    logger.info(f"Downloaded {len(downloaded)}/{len(screenshot_infos)} screenshots for sync export")
 
         level_names = {1: "meta", 2: "ocr", 3: "full"}
         filename = f"socialscope_export_{participant_id}_L{export_level}_{level_names.get(export_level, 'meta')}"
@@ -2259,13 +2377,33 @@ def export_participant_data(
             filename += f"_{start_date}_to_{end_date}"
         filename += ".zip"
 
+        # Upload to Firebase Storage for persistent download link
+        download_url = f"/api/exports/{export_id}"
+        try:
+            bucket = get_storage_bucket()
+            storage_path = f"exports/{participant_id}/{export_id}.zip"
+            blob = bucket.blob(storage_path)
+            blob.upload_from_filename(str(export_path))
+
+            # Generate signed URL valid for 7 days
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(days=7),
+                method="GET"
+            )
+            download_url = signed_url
+            logger.info(f"Uploaded sync export to Firebase Storage: {storage_path}")
+        except Exception as upload_err:
+            logger.warning(f"Failed to upload sync export to Storage, using local: {upload_err}")
+
         EXPORT_INDEX[export_id] = {
             "filename": filename,
-            "created_at": datetime.now().timestamp()
+            "created_at": datetime.now().timestamp(),
+            "download_url": download_url,
         }
 
         return {
-            "download_url": f"/api/exports/{export_id}",
+            "download_url": download_url,
             "filename": filename
         }
 
@@ -2278,20 +2416,41 @@ def export_participant_data(
 
 @app.get("/api/exports/{export_id}")
 def download_export(export_id: str):
-    """Download an export file."""
+    """Download an export file.
+
+    First tries local file, then checks EXPORT_INDEX for a stored signed URL,
+    then checks Firestore export_jobs for async export URLs.
+    """
     export_path = EXPORT_DIR / f"{export_id}.zip"
 
-    if not export_path.exists():
-        raise HTTPException(status_code=404, detail="Export not found")
+    # Try local file first
+    if export_path.exists():
+        meta = EXPORT_INDEX.get(export_id, {})
+        filename = meta.get("filename", f"{export_id}.zip")
+        return FileResponse(
+            export_path,
+            media_type="application/zip",
+            filename=filename
+        )
 
+    # Check if we have a stored signed URL in memory
     meta = EXPORT_INDEX.get(export_id, {})
-    filename = meta.get("filename", f"{export_id}.zip")
+    if meta.get("download_url") and meta["download_url"].startswith("http"):
+        return RedirectResponse(url=meta["download_url"])
 
-    return FileResponse(
-        export_path,
-        media_type="application/zip",
-        filename=filename
-    )
+    # Check Firestore for async export jobs
+    try:
+        job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(export_id)
+        job_doc = job_ref.get()
+        if job_doc.exists:
+            job_data = job_doc.to_dict()
+            download_url = job_data.get("downloadUrl")
+            if download_url and download_url.startswith("http"):
+                return RedirectResponse(url=download_url)
+    except Exception as e:
+        logger.warning(f"Error checking Firestore for export {export_id}: {e}")
+
+    raise HTTPException(status_code=404, detail="Export not found or expired")
 
 
 # ============================================================================
