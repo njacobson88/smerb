@@ -1765,7 +1765,25 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
             filename += f"_{start_date}_to_{end_date}"
         filename += ".zip"
 
-        download_url = f"https://socialscope-dashboard-api-436153481478.us-central1.run.app/api/exports/{export_id}"
+        # Upload to Firebase Storage for persistent storage
+        try:
+            bucket = get_storage_bucket()
+            storage_path = f"exports/{participant_id}/{export_id}.zip"
+            blob = bucket.blob(storage_path)
+            blob.upload_from_filename(str(export_path))
+
+            # Generate signed URL valid for 7 days
+            from datetime import timedelta
+            download_url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(days=7),
+                method="GET"
+            )
+            logger.info(f"Uploaded export to Firebase Storage: {storage_path}")
+        except Exception as upload_err:
+            logger.error(f"Failed to upload export to Storage: {upload_err}")
+            # Fall back to local URL (may not work if container restarts)
+            download_url = f"https://socialscope-dashboard-api-436153481478.us-central1.run.app/api/exports/{export_id}"
 
         EXPORT_INDEX[export_id] = {
             "filename": filename,
@@ -1778,10 +1796,6 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
             "filename": filename,
             "completedAt": datetime.utcnow(),
         })
-
-        # Send email notification
-        if user_email:
-            send_export_email(user_email, participant_id, download_url, filename)
 
         logger.info(f"Background export completed: {job_id}")
 
@@ -1943,7 +1957,7 @@ def start_async_export(
         return {
             "jobId": job_id,
             "status": "pending",
-            "message": "Export started. You will receive an email when complete, or check status at /api/export/jobs/{jobId}",
+            "message": "Export started. Check 'My Exports' for status.",
             "statusUrl": f"/api/export/jobs/{job_id}",
         }
 
@@ -2023,6 +2037,46 @@ def get_export_job_status(
         raise
     except Exception as e:
         logger.error(f"Failed to get export job status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/export/jobs/{job_id}")
+def cancel_export_job(
+    job_id: str,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Cancel a pending or processing export job."""
+    try:
+        job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(job_id)
+        job_doc = job_ref.get()
+
+        if not job_doc.exists:
+            raise HTTPException(status_code=404, detail="Export job not found")
+
+        job_data = job_doc.to_dict()
+
+        # Only allow cancellation of pending or processing jobs
+        if job_data.get("status") not in ["pending", "processing"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot cancel job with status: {job_data.get('status')}"
+            )
+
+        # Update job status to cancelled
+        job_ref.update({
+            "status": "cancelled",
+            "cancelledAt": datetime.utcnow(),
+            "cancelledBy": user.get("email", "unknown")
+        })
+
+        logger.info(f"Export job {job_id} cancelled by {user.get('email')}")
+
+        return {"message": "Export job cancelled", "job_id": job_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cancel export job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

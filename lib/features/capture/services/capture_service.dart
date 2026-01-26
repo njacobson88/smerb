@@ -32,7 +32,7 @@ class CaptureService {
     final session = SessionsCompanion(
       id: drift.Value(sessionId),
       participantId: drift.Value(participantId),
-      startedAt: drift.Value(DateTime.now().toUtc()),
+      startedAt: drift.Value(DateTime.now()),  // Local time for participant
       deviceInfo:
           drift.Value(deviceInfo != null ? jsonEncode(deviceInfo) : null),
     );
@@ -48,7 +48,7 @@ class CaptureService {
   Future<void> endSession() async {
     if (_currentSessionId == null) return;
 
-    await _database.endSession(_currentSessionId!, DateTime.now().toUtc());
+    await _database.endSession(_currentSessionId!, DateTime.now());  // Local time
     print('[CaptureService] Ended session: $_currentSessionId');
     _currentSessionId = null;
   }
@@ -109,7 +109,7 @@ class CaptureService {
         url: drift.Value(data['url'] as String?),
         data: drift.Value(jsonEncode(data['data'] ?? {})),
         synced: const drift.Value(false),
-        createdAt: drift.Value(DateTime.now().toUtc()),
+        createdAt: drift.Value(DateTime.now()),  // Local time for participant
       );
 
       // Save to database

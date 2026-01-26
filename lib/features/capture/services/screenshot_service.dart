@@ -156,7 +156,7 @@ class ScreenshotService {
         sessionId: drift.Value(sessionId),
         participantId: drift.Value(participantId),
         eventType: const drift.Value('screenshot'),
-        timestamp: drift.Value(DateTime.now().toUtc()),
+        timestamp: drift.Value(DateTime.now()),  // Local time for participant
         platform: drift.Value(_currentPlatform),
         url: drift.Value(url?.toString()),
         data: drift.Value('{"filePath": "$filePath", "timestamp": $timestamp, "fileSize": ${compressedBytes.length}, "originalSize": ${screenshot.length}, "compressionRatio": "$compressionRatio%"}'),
@@ -170,7 +170,7 @@ class ScreenshotService {
       await _captureHtml(
         eventId: eventId,
         url: url?.toString(),
-        capturedAt: DateTime.now().toUtc(),
+        capturedAt: DateTime.now(),  // Local time for participant
       );
     } catch (e) {
       print('[ScreenshotService] Error saving screenshot: $e');

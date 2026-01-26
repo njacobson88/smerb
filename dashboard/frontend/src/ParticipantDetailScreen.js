@@ -1,7 +1,7 @@
 // ParticipantDetailScreen.js - Single Participant Daily View
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { ChevronLeft, ChevronRight, Download, Loader2, Camera, FileText, AlertTriangle, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { ChevronLeft, ChevronRight, Download, Loader2, Camera, FileText, AlertTriangle, RefreshCw, Clock, CheckCircle, XCircle } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
 
 // Color constants
@@ -46,6 +46,10 @@ const ParticipantDetailScreen = ({
   const [exportDownload, setExportDownload] = useState(null);
   const [exportLevel, setExportLevel] = useState(1);
   const [showExportOptions, setShowExportOptions] = useState(false);
+  const [showExportConfirm, setShowExportConfirm] = useState(false);
+  const [pendingExportLevel, setPendingExportLevel] = useState(null);
+  const [activeExport, setActiveExport] = useState(null); // Track async export job
+  const pollIntervalRef = useRef(null);
 
   // Find current index in participant list
   const currentIndex = participantList?.indexOf(currentParticipantId) ?? -1;
@@ -98,30 +102,129 @@ const ParticipantDetailScreen = ({
     }
   }, [currentParticipantId, fetchSummary]);
 
-  // Handle data export
-  const handleExport = async (level = exportLevel) => {
+  // Poll for async export status
+  const pollExportStatus = useCallback(async (jobId) => {
+    try {
+      const response = await authFetch(`${API_BASE_URL}/api/export/jobs/${jobId}`);
+      if (response.ok) {
+        const job = await response.json();
+        setActiveExport(job);
+
+        if (job.status === 'completed') {
+          // Stop polling and show download
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+          setExportDownload({
+            url: `${API_BASE_URL}${job.download_url}`,
+            filename: job.filename
+          });
+        } else if (job.status === 'failed') {
+          // Stop polling on failure
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+          setExportError(job.error || 'Export failed');
+        }
+      }
+    } catch (err) {
+      console.error('Error polling export status:', err);
+    }
+  }, []);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Handle data export - show confirmation for Level 3
+  const handleExportClick = (level) => {
+    setShowExportOptions(false);
+    if (level === 3) {
+      // Show confirmation dialog for Level 3 (screenshots)
+      setPendingExportLevel(level);
+      setShowExportConfirm(true);
+    } else {
+      // Proceed directly for Level 1 and 2
+      executeExport(level);
+    }
+  };
+
+  // Execute the actual export
+  const executeExport = async (level) => {
     setExportLoading(true);
     setExportError(null);
     setExportDownload(null);
-    setShowExportOptions(false);
+    setShowExportConfirm(false);
+    setActiveExport(null);
+
+    // Clear any existing polling
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
 
     try {
-      const params = new URLSearchParams({
-        participant_id: currentParticipantId,
-        export_level: level.toString()
-      });
-      const response = await authFetch(`${API_BASE_URL}/api/export?${params}`);
+      if (level === 3) {
+        // Use async export for Level 3 (screenshots)
+        const response = await authFetch(`${API_BASE_URL}/api/export/async`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            participant_id: currentParticipantId,
+            export_level: level
+          })
+        });
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Export failed');
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.detail || 'Export failed');
+        }
+
+        const data = await response.json();
+
+        // Set active export and start polling
+        setActiveExport({
+          job_id: data.job_id,
+          status: 'pending',
+          export_level: level,
+          participant_id: currentParticipantId,
+          created_at: new Date().toISOString(),
+          progress: 0
+        });
+
+        // Start polling every 3 seconds
+        pollIntervalRef.current = setInterval(() => {
+          pollExportStatus(data.job_id);
+        }, 3000);
+
+        // Also poll immediately
+        setTimeout(() => pollExportStatus(data.job_id), 500);
+      } else {
+        // Synchronous export for Level 1 and 2
+        const params = new URLSearchParams({
+          participant_id: currentParticipantId,
+          export_level: level.toString()
+        });
+        const response = await authFetch(`${API_BASE_URL}/api/export?${params}`);
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.detail || 'Export failed');
+        }
+
+        const data = await response.json();
+        setExportDownload({
+          url: `${API_BASE_URL}${data.download_url}`,
+          filename: data.filename
+        });
       }
-
-      const data = await response.json();
-      setExportDownload({
-        url: `${API_BASE_URL}${data.download_url}`,
-        filename: data.filename
-      });
     } catch (err) {
       setExportError(err.message);
     } finally {
@@ -207,11 +310,12 @@ const ParticipantDetailScreen = ({
                   {[1, 2, 3].map(level => (
                     <button
                       key={level}
-                      onClick={() => handleExport(level)}
+                      onClick={() => handleExportClick(level)}
                       className="w-full text-left p-3 rounded-md hover:bg-gray-100 transition-colors"
                     >
                       <div className="font-medium text-gray-800">
                         Level {level}: {exportLevelDescriptions[level].name}
+                        {level === 3 && <span className="ml-2 text-orange-500 text-xs">(Large)</span>}
                       </div>
                       <div className="text-sm text-gray-500">
                         {exportLevelDescriptions[level].desc}
@@ -230,13 +334,79 @@ const ParticipantDetailScreen = ({
           </div>
         )}
 
+        {/* Active Export Status */}
+        {activeExport && activeExport.status !== 'completed' && (
+          <div className="mt-3 p-4 bg-blue-50 border border-blue-200 rounded">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center">
+                {activeExport.status === 'processing' ? (
+                  <Loader2 className="animate-spin text-blue-500 mr-2" size={18} />
+                ) : activeExport.status === 'failed' ? (
+                  <XCircle className="text-red-500 mr-2" size={18} />
+                ) : (
+                  <Clock className="text-blue-500 mr-2" size={18} />
+                )}
+                <span className="font-medium text-gray-800">
+                  Level 3 Export: {activeExport.status === 'processing' ? 'Processing...' : activeExport.status === 'failed' ? 'Failed' : 'Queued'}
+                </span>
+              </div>
+              {activeExport.status === 'failed' && (
+                <button
+                  onClick={() => setActiveExport(null)}
+                  className="text-gray-500 hover:text-gray-700 text-xs"
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+
+            {activeExport.status === 'processing' && (
+              <>
+                <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+                  <div
+                    className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${activeExport.progress || 0}%` }}
+                  />
+                </div>
+                <div className="text-sm text-gray-600">
+                  {activeExport.progress ? `${activeExport.progress}% complete` : 'Starting...'}
+                  {activeExport.screenshots_processed !== undefined && (
+                    <span className="ml-2">
+                      ({activeExport.screenshots_processed}/{activeExport.screenshots_total || '?'} screenshots)
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+
+            {activeExport.status === 'pending' && (
+              <div className="text-sm text-gray-600">
+                Export queued. This may take 5-15 minutes for large datasets with screenshots.
+              </div>
+            )}
+
+            {activeExport.status === 'failed' && (
+              <div className="text-sm text-red-600">
+                {activeExport.error || 'Export failed. Please try again.'}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Export Download Ready */}
         {exportDownload && (
           <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded text-green-700 text-sm flex items-center justify-between">
-            <a href={exportDownload.url} className="underline font-medium" download>
-              Download: {exportDownload.filename}
-            </a>
+            <div className="flex items-center">
+              <CheckCircle className="mr-2" size={18} />
+              <a href={exportDownload.url} className="underline font-medium" download>
+                Download: {exportDownload.filename}
+              </a>
+            </div>
             <button
-              onClick={() => setExportDownload(null)}
+              onClick={() => {
+                setExportDownload(null);
+                setActiveExport(null);
+              }}
               className="text-gray-500 hover:text-gray-700 text-xs"
             >
               Dismiss
@@ -425,6 +595,54 @@ const ParticipantDetailScreen = ({
               No data recorded for this participant yet.
             </div>
           )}
+        </div>
+      )}
+
+      {/* Level 3 Export Confirmation Modal - at root level for proper z-index */}
+      {showExportConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center mb-4">
+              <AlertTriangle className="text-orange-500 mr-3" size={28} />
+              <h3 className="text-lg font-bold text-gray-800">Full Export Warning</h3>
+            </div>
+
+            <div className="mb-4 text-gray-600 space-y-3">
+              <p>
+                <strong>Level 3 exports include all screenshots</strong> and can be very large
+                ({totalScreenshots.toLocaleString()} screenshots for this participant).
+              </p>
+              <p className="text-orange-600 font-medium">
+                This may:
+              </p>
+              <ul className="list-disc list-inside text-sm space-y-1 text-orange-700">
+                <li>Take 5-15 minutes or longer to generate</li>
+                <li>Incur significant Firebase read/download costs</li>
+                <li>Result in a large ZIP file (potentially 100MB+)</li>
+              </ul>
+              <p className="text-sm">
+                Consider using <strong>Level 2</strong> if you only need OCR text data without images.
+              </p>
+            </div>
+
+            <div className="flex space-x-3">
+              <button
+                onClick={() => {
+                  setShowExportConfirm(false);
+                  setPendingExportLevel(null);
+                }}
+                className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => executeExport(pendingExportLevel)}
+                className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-md hover:bg-orange-600 font-medium"
+              >
+                Proceed with Export
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

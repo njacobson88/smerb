@@ -50,7 +50,7 @@ class _CheckinScreenState extends State<CheckinScreen>
   @override
   void initState() {
     super.initState();
-    _startedAt = DateTime.now().toUtc();
+    _startedAt = DateTime.now();  // Local time for participant
 
     // Setup crisis flash animation
     _crisisFlashController = AnimationController(
@@ -182,7 +182,7 @@ class _CheckinScreenState extends State<CheckinScreen>
   }
 
   Future<void> _submitCheckin() async {
-    final now = DateTime.now().toUtc();
+    final now = DateTime.now();  // Local time for participant
     final checkinId = const Uuid().v4();
 
     final companion = EmaResponsesCompanion(

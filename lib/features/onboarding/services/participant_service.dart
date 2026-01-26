@@ -193,7 +193,7 @@ class ParticipantService {
         'devices': FieldValue.arrayUnion([
           {
             'visitorId': visitorId,
-            'enrolledAt': DateTime.now().toUtc().toIso8601String(),
+            'enrolledAt': DateTime.now().toIso8601String(),  // Local time
             ...?deviceInfo,
           }
         ]),
@@ -228,7 +228,7 @@ class ParticipantService {
     final participant = Participant(
       id: participantId,
       visitorId: visitorId,
-      enrolledAt: DateTime.now().toUtc(),
+      enrolledAt: DateTime.now(),  // Local time for participant
     );
 
     await _saveParticipant(participant);
@@ -246,7 +246,7 @@ class ParticipantService {
 
     final updated = participant.copyWith(
       redditLoggedIn: loggedIn,
-      redditLoginAt: loggedIn ? DateTime.now().toUtc() : null,
+      redditLoginAt: loggedIn ? DateTime.now() : null,  // Local time
       redditUsername: username,
     );
 
@@ -265,7 +265,7 @@ class ParticipantService {
 
     final updated = participant.copyWith(
       twitterLoggedIn: loggedIn,
-      twitterLoginAt: loggedIn ? DateTime.now().toUtc() : null,
+      twitterLoginAt: loggedIn ? DateTime.now() : null,  // Local time
       twitterUsername: username,
     );
 

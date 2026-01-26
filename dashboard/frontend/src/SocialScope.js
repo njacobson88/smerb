@@ -228,7 +228,6 @@ const ExportScreen = () => {
   // Async export state
   const [asyncJobId, setAsyncJobId] = useState(null);
   const [asyncStatus, setAsyncStatus] = useState(null);
-  const [notifyEmail, setNotifyEmail] = useState('');
   // My exports state
   const [myExports, setMyExports] = useState([]);
   const [loadingExports, setLoadingExports] = useState(true);
@@ -282,12 +281,33 @@ const ExportScreen = () => {
       const response = await authFetch(`${API_BASE_URL}/api/export/jobs`);
       if (response.ok) {
         const data = await response.json();
+        console.log('[My Exports] Fetched jobs:', data.jobs?.length || 0, data.jobs);
         setMyExports(data.jobs || []);
+      } else {
+        console.error('[My Exports] Failed to fetch:', response.status);
       }
     } catch (err) {
-      console.error('Failed to fetch exports:', err);
+      console.error('[My Exports] Error fetching exports:', err);
     } finally {
       setLoadingExports(false);
+    }
+  };
+
+  // Cancel an export job
+  const handleCancelExport = async (jobId) => {
+    try {
+      const response = await authFetch(`${API_BASE_URL}/api/export/jobs/${jobId}`, {
+        method: 'DELETE',
+      });
+      if (response.ok) {
+        // Refresh the exports list
+        fetchMyExports();
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        console.error('Failed to cancel export:', errData.detail);
+      }
+    } catch (err) {
+      console.error('Failed to cancel export:', err);
     }
   };
 
@@ -358,7 +378,6 @@ const ExportScreen = () => {
             export_level: exportLevel,
             start_date: startDate || null,
             end_date: endDate || null,
-            notify_email: notifyEmail || null,
           }),
         });
 
@@ -370,7 +389,11 @@ const ExportScreen = () => {
         const data = await response.json();
         setAsyncJobId(data.jobId);
         setAsyncStatus({ status: 'pending' });
-        // Don't set loading to false - keep showing progress
+        setLoading(false);
+        // Refresh My Exports list after a brief delay to ensure Firestore write completes
+        setTimeout(() => {
+          fetchMyExports();
+        }, 1000);
       } catch (err) {
         setError(err.message);
         setLoading(false);
@@ -567,7 +590,7 @@ const ExportScreen = () => {
                     </div>
                   )}
                   <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800">
-                    ⚠️ Large export - runs in background. You'll receive an email when complete.
+                    ⚠️ Large export - runs in background. Check "My Exports" below for status.
                   </div>
                 </div>
               </div>
@@ -575,27 +598,9 @@ const ExportScreen = () => {
           </div>
         </div>
 
-        {/* Email notification for Level 3 */}
-        {exportLevel === 3 && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Email for notification (optional)
-            </label>
-            <input
-              type="email"
-              value={notifyEmail}
-              onChange={(e) => setNotifyEmail(e.target.value)}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="you@dartmouth.edu (leave blank to use your login email)"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              You'll receive an email with the download link when the export completes.
-            </p>
-          </div>
-        )}
 
         {/* Async Export Progress */}
-        {asyncStatus && loading && (
+        {asyncStatus && (asyncStatus.status === 'pending' || asyncStatus.status === 'processing') && (
           <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
             <div className="flex items-center mb-2">
               <div className="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full mr-3"></div>
@@ -736,12 +741,31 @@ const ExportScreen = () => {
                         {job.timeEstimate && (
                           <div className="text-xs text-blue-600">{job.timeEstimate}</div>
                         )}
+                        <button
+                          onClick={() => handleCancelExport(job.jobId)}
+                          className="mt-2 px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
+                        >
+                          Cancel
+                        </button>
                       </div>
                     )}
                     {job.status === 'pending' && (
-                      <div className="text-blue-600 text-sm flex items-center">
-                        <div className="animate-pulse h-2 w-2 bg-blue-500 rounded-full mr-2"></div>
-                        Starting...
+                      <div className="text-blue-600 text-sm">
+                        <div className="flex items-center">
+                          <div className="animate-pulse h-2 w-2 bg-blue-500 rounded-full mr-2"></div>
+                          Queued...
+                        </div>
+                        <button
+                          onClick={() => handleCancelExport(job.jobId)}
+                          className="mt-2 px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                    {job.status === 'cancelled' && (
+                      <div className="text-gray-500 text-sm">
+                        Cancelled
                       </div>
                     )}
                     {job.status === 'failed' && (
