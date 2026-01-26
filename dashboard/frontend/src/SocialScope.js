@@ -423,7 +423,9 @@ const ExportScreen = () => {
       }
 
       const data = await response.json();
-      setDownloadUrl(`${API_BASE_URL}${data.download_url}`);
+      // Handle both absolute URLs (signed Firebase Storage) and relative paths
+      const url = data.download_url;
+      setDownloadUrl(url?.startsWith('http') ? url : `${API_BASE_URL}${url}`);
     } catch (err) {
       if (err.name !== 'AbortError') {
         setError(err.message);

@@ -116,8 +116,11 @@ const ParticipantDetailScreen = ({
             clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
           }
+          // Handle both absolute URLs (signed Firebase Storage) and relative paths
+          // Async jobs use downloadUrl (camelCase) from Firestore
+          const url = job.downloadUrl || job.download_url;
           setExportDownload({
-            url: `${API_BASE_URL}${job.download_url}`,
+            url: url?.startsWith('http') ? url : `${API_BASE_URL}${url}`,
             filename: job.filename
           });
         } else if (job.status === 'failed') {
@@ -220,8 +223,10 @@ const ParticipantDetailScreen = ({
         }
 
         const data = await response.json();
+        // Handle both absolute URLs (signed Firebase Storage) and relative paths
+        const url = data.download_url;
         setExportDownload({
-          url: `${API_BASE_URL}${data.download_url}`,
+          url: url?.startsWith('http') ? url : `${API_BASE_URL}${url}`,
           filename: data.filename
         });
       }
