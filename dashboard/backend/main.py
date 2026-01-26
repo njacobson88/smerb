@@ -211,6 +211,39 @@ def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/debug/test-signing")
+def debug_test_signing():
+    """Debug endpoint to test signed URL generation."""
+    try:
+        # Test the signing credentials function
+        sa_email, access_token = get_signing_credentials()
+
+        # Try to sign a URL for an existing blob
+        bucket = get_storage_bucket()
+        blob = bucket.blob("exports/test2/bcab47efac3949edb4d9a08565a6d43a.zip")
+
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(hours=1),
+            method="GET",
+            service_account_email=sa_email,
+            access_token=access_token
+        )
+
+        return {
+            "status": "success",
+            "sa_email": sa_email,
+            "token_prefix": access_token[:20] + "...",
+            "signed_url_prefix": url[:100] + "..."
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 @app.get("/api/debug/day-test/{participant_id}/{date}")
 def debug_day_test(participant_id: str, date: str):
     """Debug endpoint to test day queries."""
@@ -1710,6 +1743,8 @@ EXPORT_INDEX = {}
 from firebase_admin import storage as fb_storage
 import threading
 import requests
+import google.auth
+from google.auth.transport import requests as google_requests
 
 
 def get_storage_bucket():
@@ -1726,6 +1761,33 @@ def get_storage_bucket():
     except Exception as e:
         logger.error(f"Failed to initialize storage bucket {bucket_name}: {e}")
         raise
+
+
+def get_signing_credentials():
+    """Get credentials for signing URLs in Cloud Run.
+
+    Cloud Run uses Compute Engine credentials which don't have private keys.
+    We need to get the access token and service account email to use
+    IAM-based signing via the signBlob API.
+
+    Returns:
+        tuple: (service_account_email, access_token)
+    """
+    credentials, project = google.auth.default()
+
+    # Refresh credentials to get a valid access token
+    auth_request = google_requests.Request()
+    credentials.refresh(auth_request)
+
+    # Get the service account email
+    service_account_email = getattr(credentials, 'service_account_email', None)
+    if not service_account_email:
+        # Fallback for compute engine credentials
+        service_account_email = f"{config.FIREBASE_PROJECT_ID.replace('-', '')}@appspot.gserviceaccount.com"
+        # Actually use the compute service account
+        service_account_email = "436153481478-compute@developer.gserviceaccount.com"
+
+    return service_account_email, credentials.token
 
 
 # Shared session for HTTP downloads (connection reuse)
@@ -2064,13 +2126,15 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
 
             # Generate signed URL valid for 7 days
             # Include Content-Disposition header to force download in browser
-            # Use service_account_email for IAM-based signing (Cloud Run doesn't have private keys)
+            # Use IAM-based signing (Cloud Run doesn't have private keys)
+            sa_email, access_token = get_signing_credentials()
             download_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
                 method="GET",
                 response_disposition=f'attachment; filename="{filename}"',
-                service_account_email="436153481478-compute@developer.gserviceaccount.com"
+                service_account_email=sa_email,
+                access_token=access_token
             )
             logger.info(f"[Export] Successfully uploaded to Firebase Storage: {storage_path}")
         except Exception as upload_err:
@@ -2533,13 +2597,15 @@ def export_participant_data(
 
             # Generate signed URL valid for 7 days
             # Include Content-Disposition header to force download in browser
-            # Use service_account_email for IAM-based signing (Cloud Run doesn't have private keys)
+            # Use IAM-based signing (Cloud Run doesn't have private keys)
+            sa_email, access_token = get_signing_credentials()
             signed_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
                 method="GET",
                 response_disposition=f'attachment; filename="{filename}"',
-                service_account_email="436153481478-compute@developer.gserviceaccount.com"
+                service_account_email=sa_email,
+                access_token=access_token
             )
             download_url = signed_url
             logger.info(f"[SyncExport] Successfully uploaded to Firebase Storage: {storage_path}")
