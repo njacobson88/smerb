@@ -13,19 +13,8 @@ class OcrService {
   final AppDatabase database;
 
   bool _isProcessing = false;
-  int _processedCount = 0;
-  int _errorCount = 0;
 
   OcrService({required this.database});
-
-  /// Check if currently processing
-  bool get isProcessing => _isProcessing;
-
-  /// Get processed count since last reset
-  int get processedCount => _processedCount;
-
-  /// Get error count since last reset
-  int get errorCount => _errorCount;
 
   /// Process a single screenshot and extract text
   /// Returns the extracted text or null if processing failed
@@ -100,7 +89,6 @@ class OcrService {
       );
 
       await database.insertOcrResult(result);
-      _processedCount++;
 
       print('[OcrService] Saved OCR result: $wordCount words, ${stopwatch.elapsedMilliseconds}ms');
 
@@ -108,7 +96,6 @@ class OcrService {
       return database.getOcrResultForEvent(event.id);
     } catch (e) {
       print('[OcrService] Error processing screenshot: $e');
-      _errorCount++;
       return null;
     }
   }
@@ -163,14 +150,6 @@ class OcrService {
     return {
       'total': totalOcr,
       'pending': pendingCount,
-      'processed': _processedCount,
-      'errors': _errorCount,
     };
-  }
-
-  /// Reset counters
-  void resetCounters() {
-    _processedCount = 0;
-    _errorCount = 0;
   }
 }

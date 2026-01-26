@@ -280,13 +280,6 @@ class ParticipantService {
     await prefs.setString(_participantKey, jsonEncode(participant.toJson()));
   }
 
-  /// Clear participant data (for testing/logout)
-  Future<void> clearParticipant() async {
-    final prefs = await _preferences;
-    await prefs.remove(_participantKey);
-    print('[ParticipantService] Cleared participant data');
-  }
-
   /// Get participant ID (convenience method)
   Future<String?> getParticipantId() async {
     final participant = await getParticipant();

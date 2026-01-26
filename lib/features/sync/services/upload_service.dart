@@ -15,13 +15,8 @@ class UploadService {
   bool _isSyncingHtml = false;
   bool _isSyncingEma = false;
 
-  // Sync progress tracking
-  int _eventsSynced = 0;
-  int _ocrResultsSynced = 0;
+  // Track screenshots uploaded for syncAll return value
   int _screenshotsUploaded = 0;
-  int _htmlCapturesSynced = 0;
-  int _htmlStatusLogsSynced = 0;
-  int _emaResponsesSynced = 0;
 
   UploadService({
     required this.database,
@@ -29,15 +24,6 @@ class UploadService {
     FirebaseStorage? storage,
   })  : _firestore = firestore ?? FirebaseFirestore.instance,
         _storage = storage ?? FirebaseStorage.instance;
-
-  /// Get sync progress
-  Map<String, int> get syncProgress => {
-    'eventsSynced': _eventsSynced,
-    'ocrResultsSynced': _ocrResultsSynced,
-    'screenshotsUploaded': _screenshotsUploaded,
-    'htmlCapturesSynced': _htmlCapturesSynced,
-    'htmlStatusLogsSynced': _htmlStatusLogsSynced,
-  };
 
   /// Sync all unsynced events to Firebase
   /// Returns the number of events synced
@@ -158,7 +144,6 @@ class UploadService {
         .doc(event.id)
         .set(docData);
 
-    _eventsSynced++;
     print('[UploadService] Uploaded event: ${event.eventType} (${event.id})');
   }
 
@@ -244,7 +229,6 @@ class UploadService {
         if (syncedIds.isNotEmpty) {
           await database.markOcrResultsAsSynced(syncedIds);
           totalSynced += syncedIds.length;
-          _ocrResultsSynced += syncedIds.length;
           print('[UploadService] Marked ${syncedIds.length} OCR results as synced');
         }
 
@@ -320,7 +304,6 @@ class UploadService {
         if (syncedIds.isNotEmpty) {
           await database.markHtmlCapturesAsSynced(syncedIds);
           totalSynced += syncedIds.length;
-          _htmlCapturesSynced += syncedIds.length;
           print('[UploadService] Marked ${syncedIds.length} HTML captures as synced');
         }
 
@@ -413,7 +396,6 @@ class UploadService {
         if (syncedIds.isNotEmpty) {
           await database.markHtmlStatusLogsSynced(syncedIds);
           totalSynced += syncedIds.length;
-          _htmlStatusLogsSynced += syncedIds.length;
           print('[UploadService] Marked ${syncedIds.length} HTML status logs as synced');
         }
 
@@ -485,7 +467,6 @@ class UploadService {
       if (syncedIds.isNotEmpty) {
         await database.markEmaResponsesAsSynced(syncedIds);
         totalSynced = syncedIds.length;
-        _emaResponsesSynced += totalSynced;
         print('[UploadService] EMA sync complete. Total: $totalSynced');
       }
     } finally {
@@ -518,13 +499,8 @@ class UploadService {
   }
 
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
-    // Reset progress counters
-    _eventsSynced = 0;
-    _ocrResultsSynced = 0;
+    // Reset screenshot counter
     _screenshotsUploaded = 0;
-    _htmlCapturesSynced = 0;
-    _htmlStatusLogsSynced = 0;
-    _emaResponsesSynced = 0;
 
     // Sync events first (includes OCR data for screenshots)
     final eventsSynced = await syncEvents(batchSize: eventBatchSize);
@@ -594,31 +570,6 @@ class UploadService {
     } catch (e) {
       print('[UploadService] Failed to register participant: $e');
       rethrow;
-    }
-  }
-
-  /// Update participant login status in Firebase
-  Future<void> updateParticipantLogin({
-    required String participantId,
-    required String platform,
-    required bool loggedIn,
-    String? username,
-  }) async {
-    try {
-      final updates = <String, dynamic>{
-        '${platform}LoggedIn': loggedIn,
-        '${platform}LoginAt': loggedIn ? FieldValue.serverTimestamp() : null,
-      };
-      if (username != null) {
-        updates['${platform}Username'] = username;
-      }
-
-      await _firestore.collection('participants').doc(participantId).update(updates);
-
-      print('[UploadService] Updated $platform login for $participantId: $loggedIn');
-    } catch (e) {
-      print('[UploadService] Failed to update participant login: $e');
-      // Don't rethrow - login tracking failure shouldn't break the app
     }
   }
 }

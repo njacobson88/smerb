@@ -153,11 +153,6 @@ class AppDatabase extends _$AppDatabase {
     return (select(events)..where((e) => e.eventType.equals(type))).get();
   }
 
-  /// Get events for a session
-  Future<List<Event>> getEventsForSession(String sessionId) {
-    return (select(events)..where((e) => e.sessionId.equals(sessionId))).get();
-  }
-
   /// Get unsynced events
   Future<List<Event>> getUnsyncedEvents({int? limit}) {
     final query = select(events)..where((e) => e.synced.equals(false));
@@ -199,12 +194,6 @@ class AppDatabase extends _$AppDatabase {
     return delete(events).go();
   }
 
-  /// Delete events older than a date
-  Future<int> deleteEventsOlderThan(DateTime date) {
-    return (delete(events)..where((e) => e.createdAt.isSmallerThanValue(date)))
-        .go();
-  }
-
   // ==========================================================================
   // SESSION QUERIES
   // ==========================================================================
@@ -240,11 +229,6 @@ class AppDatabase extends _$AppDatabase {
         eventCount: Value(session.eventCount + 1),
       ),
     );
-  }
-
-  /// Get all sessions
-  Future<List<Session>> getAllSessions() {
-    return select(sessions).get();
   }
 
   // ==========================================================================
@@ -311,12 +295,6 @@ class AppDatabase extends _$AppDatabase {
   /// Insert a new HTML capture
   Future<int> insertHtmlCapture(HtmlCapturesCompanion capture) {
     return into(htmlCaptures).insert(capture);
-  }
-
-  /// Get HTML capture for an event
-  Future<HtmlCapture?> getHtmlCaptureForEvent(String eventId) {
-    return (select(htmlCaptures)..where((h) => h.eventId.equals(eventId)))
-        .getSingleOrNull();
   }
 
   /// Get unsynced HTML captures
@@ -387,22 +365,6 @@ class AppDatabase extends _$AppDatabase {
   Future<int> markEmaResponsesAsSynced(List<String> responseIds) {
     return (update(emaResponses)..where((e) => e.id.isIn(responseIds)))
         .write(const EmaResponsesCompanion(synced: Value(true)));
-  }
-
-  /// Get all EMA responses for a participant
-  Future<List<EmaResponse>> getEmaResponsesForParticipant(String participantId) {
-    return (select(emaResponses)
-          ..where((e) => e.participantId.equals(participantId))
-          ..orderBy([(e) => OrderingTerm.desc(e.completedAt)]))
-        .get();
-  }
-
-  /// Get EMA response count
-  Future<int> getEmaResponseCount() async {
-    final count = countAll();
-    final query = selectOnly(emaResponses)..addColumns([count]);
-    final result = await query.getSingle();
-    return result.read(count) ?? 0;
   }
 
   /// Get screenshot events pending OCR processing

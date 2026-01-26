@@ -1921,50 +1921,6 @@ def download_screenshots_concurrent(
 EXPORT_JOBS_COLLECTION = "export_jobs"
 
 
-def send_export_email(email: str, participant_id: str, download_url: str, filename: str):
-    """Send email notification when export is complete using SendGrid."""
-    sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
-    if not sendgrid_api_key:
-        logger.warning("SENDGRID_API_KEY not configured - email not sent")
-        return False
-
-    try:
-        response = requests.post(
-            "https://api.sendgrid.com/v3/mail/send",
-            headers={
-                "Authorization": f"Bearer {sendgrid_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "personalizations": [{"to": [{"email": email}]}],
-                "from": {"email": "noreply@socialscope-dashboard.web.app", "name": "SocialScope Dashboard"},
-                "subject": f"SocialScope Export Ready: {participant_id}",
-                "content": [{
-                    "type": "text/html",
-                    "value": f"""
-                    <h2>Your SocialScope Export is Ready</h2>
-                    <p>Your data export for participant <strong>{participant_id}</strong> has completed.</p>
-                    <p><strong>Filename:</strong> {filename}</p>
-                    <p><a href="{download_url}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Download Export</a></p>
-                    <p style="color: #666; font-size: 12px;">This link will expire in 48 hours.</p>
-                    <hr>
-                    <p style="color: #999; font-size: 11px;">SocialScope Research Dashboard - Dartmouth College</p>
-                    """
-                }],
-            },
-            timeout=10,
-        )
-        if response.status_code in (200, 202):
-            logger.info(f"Export email sent to {email}")
-            return True
-        else:
-            logger.error(f"SendGrid error: {response.status_code} - {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Failed to send export email: {e}")
-        return False
-
-
 def run_background_export(job_id: str, participant_id: str, export_level: int,
                           start_date: Optional[str], end_date: Optional[str],
                           user_email: str):

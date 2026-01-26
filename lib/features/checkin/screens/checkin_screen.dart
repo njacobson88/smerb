@@ -4,7 +4,6 @@ import 'package:card_swiper/card_swiper.dart';
 import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:http/http.dart' as http;
 import '../models/ema_config.dart';
 import '../../storage/database/database.dart';
 import 'package:drift/drift.dart' as drift;

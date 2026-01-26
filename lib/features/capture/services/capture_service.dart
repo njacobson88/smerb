@@ -124,23 +124,8 @@ class CaptureService {
   }
 
   // ==========================================================================
-  // STATISTICS
+  // DATA MANAGEMENT
   // ==========================================================================
-
-  /// Get total event count
-  Future<int> getTotalEventCount() {
-    return _database.getEventCount();
-  }
-
-  /// Get event counts by type
-  Future<Map<String, int>> getEventCountsByType() {
-    return _database.getEventCountByType();
-  }
-
-  /// Get all events (for debugging)
-  Future<List<Event>> getAllEvents() {
-    return _database.getAllEvents();
-  }
 
   /// Clear all data (for testing)
   Future<void> clearAllData() async {

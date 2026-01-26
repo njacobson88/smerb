@@ -31,9 +31,6 @@ class CheckinService {
   bool _checkinAvailable = false;
   int? _currentWindowIndex;
 
-  // Callback for UI updates
-  void Function(bool available)? onAvailabilityChanged;
-
   CheckinService({required this.database});
 
   bool get isInitialized => _initialized;
@@ -157,10 +154,7 @@ class CheckinService {
 
   void _checkWindows() {
     if (alwaysAvailable) {
-      if (!_checkinAvailable) {
-        _checkinAvailable = true;
-        onAvailabilityChanged?.call(true);
-      }
+      _checkinAvailable = true;
       return;
     }
 
@@ -177,11 +171,8 @@ class CheckinService {
       }
     }
 
-    if (inWindow != _checkinAvailable || windowIndex != _currentWindowIndex) {
-      _checkinAvailable = inWindow;
-      _currentWindowIndex = windowIndex;
-      onAvailabilityChanged?.call(_checkinAvailable);
-    }
+    _checkinAvailable = inWindow;
+    _currentWindowIndex = windowIndex;
   }
 
   /// Schedule notifications for today's remaining windows
