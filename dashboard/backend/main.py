@@ -93,6 +93,10 @@ def is_ip_allowed(client_ip: str) -> bool:
 @app.middleware("http")
 async def dartmouth_ip_whitelist(request: Request, call_next):
     """Middleware to restrict access to Dartmouth IP ranges only."""
+    # Allow scheduler endpoint to bypass IP check (uses secret authentication instead)
+    if request.url.path == "/api/scheduler/refresh-cache":
+        return await call_next(request)
+
     # Get client IP (handle proxies)
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
