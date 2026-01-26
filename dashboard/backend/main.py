@@ -2064,18 +2064,19 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
 
             # Generate signed URL valid for 7 days
             # Include Content-Disposition header to force download in browser
+            # Use service_account_email for IAM-based signing (Cloud Run doesn't have private keys)
             download_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
                 method="GET",
-                response_disposition=f'attachment; filename="{filename}"'
+                response_disposition=f'attachment; filename="{filename}"',
+                service_account_email="436153481478-compute@developer.gserviceaccount.com"
             )
             logger.info(f"[Export] Successfully uploaded to Firebase Storage: {storage_path}")
         except Exception as upload_err:
             logger.error(f"[Export] FAILED to upload to Storage: {upload_err}", exc_info=True)
-            # Fall back to local URL - this will break when container restarts!
-            download_url = f"https://socialscope-dashboard-api-436153481478.us-central1.run.app/api/exports/{export_id}"
-            logger.warning(f"[Export] Using fallback local URL (unreliable): {download_url}")
+            # Don't fall back to unreliable local URLs - surface the error
+            raise Exception(f"Storage upload failed: {upload_err}")
 
         EXPORT_INDEX[export_id] = {
             "filename": filename,
@@ -2532,17 +2533,19 @@ def export_participant_data(
 
             # Generate signed URL valid for 7 days
             # Include Content-Disposition header to force download in browser
+            # Use service_account_email for IAM-based signing (Cloud Run doesn't have private keys)
             signed_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
                 method="GET",
-                response_disposition=f'attachment; filename="{filename}"'
+                response_disposition=f'attachment; filename="{filename}"',
+                service_account_email="436153481478-compute@developer.gserviceaccount.com"
             )
             download_url = signed_url
             logger.info(f"[SyncExport] Successfully uploaded to Firebase Storage: {storage_path}")
         except Exception as upload_err:
             logger.error(f"[SyncExport] FAILED to upload to Storage: {upload_err}", exc_info=True)
-            logger.warning(f"[SyncExport] Using fallback local URL (unreliable): {download_url}")
+            raise HTTPException(status_code=500, detail=f"Storage upload failed: {upload_err}")
 
         EXPORT_INDEX[export_id] = {
             "filename": filename,
