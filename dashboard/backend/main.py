@@ -1713,11 +1713,23 @@ import requests
 
 
 def get_storage_bucket():
-    """Get Firebase Storage bucket."""
+    """Get Firebase Storage bucket.
+
+    Firebase projects can use either:
+    - {project}.appspot.com (legacy, most common)
+    - {project}.firebasestorage.app (newer)
+
+    We try appspot.com first as it's more reliable.
+    """
+    # Use appspot.com - this is the standard Firebase Storage bucket
+    bucket_name = f"{config.FIREBASE_PROJECT_ID}.appspot.com"
     try:
-        return fb_storage.bucket(f"{config.FIREBASE_PROJECT_ID}.firebasestorage.app")
-    except Exception:
-        return fb_storage.bucket(f"{config.FIREBASE_PROJECT_ID}.appspot.com")
+        bucket = fb_storage.bucket(bucket_name)
+        logger.debug(f"Using storage bucket: {bucket_name}")
+        return bucket
+    except Exception as e:
+        logger.error(f"Failed to initialize storage bucket {bucket_name}: {e}")
+        raise
 
 
 # Shared session for HTTP downloads (connection reuse)
@@ -2050,19 +2062,24 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
             bucket = get_storage_bucket()
             storage_path = f"exports/{participant_id}/{export_id}.zip"
             blob = bucket.blob(storage_path)
+            logger.info(f"[Export] Uploading {export_path} to gs://{bucket.name}/{storage_path}")
             blob.upload_from_filename(str(export_path))
+            logger.info(f"[Export] Upload complete, generating signed URL")
 
             # Generate signed URL valid for 7 days
+            # Include Content-Disposition header to force download in browser
             download_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
-                method="GET"
+                method="GET",
+                response_disposition=f'attachment; filename="{filename}"'
             )
-            logger.info(f"Uploaded export to Firebase Storage: {storage_path}")
+            logger.info(f"[Export] Successfully uploaded to Firebase Storage: {storage_path}")
         except Exception as upload_err:
-            logger.error(f"Failed to upload export to Storage: {upload_err}")
-            # Fall back to local URL (may not work if container restarts)
+            logger.error(f"[Export] FAILED to upload to Storage: {upload_err}", exc_info=True)
+            # Fall back to local URL - this will break when container restarts!
             download_url = f"https://socialscope-dashboard-api-436153481478.us-central1.run.app/api/exports/{export_id}"
+            logger.warning(f"[Export] Using fallback local URL (unreliable): {download_url}")
 
         EXPORT_INDEX[export_id] = {
             "filename": filename,
@@ -2513,18 +2530,23 @@ def export_participant_data(
             bucket = get_storage_bucket()
             storage_path = f"exports/{participant_id}/{export_id}.zip"
             blob = bucket.blob(storage_path)
+            logger.info(f"[SyncExport] Uploading {export_path} to gs://{bucket.name}/{storage_path}")
             blob.upload_from_filename(str(export_path))
+            logger.info(f"[SyncExport] Upload complete, generating signed URL")
 
             # Generate signed URL valid for 7 days
+            # Include Content-Disposition header to force download in browser
             signed_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
-                method="GET"
+                method="GET",
+                response_disposition=f'attachment; filename="{filename}"'
             )
             download_url = signed_url
-            logger.info(f"Uploaded sync export to Firebase Storage: {storage_path}")
+            logger.info(f"[SyncExport] Successfully uploaded to Firebase Storage: {storage_path}")
         except Exception as upload_err:
-            logger.warning(f"Failed to upload sync export to Storage, using local: {upload_err}")
+            logger.error(f"[SyncExport] FAILED to upload to Storage: {upload_err}", exc_info=True)
+            logger.warning(f"[SyncExport] Using fallback local URL (unreliable): {download_url}")
 
         EXPORT_INDEX[export_id] = {
             "filename": filename,
