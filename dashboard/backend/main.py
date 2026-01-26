@@ -1019,51 +1019,15 @@ def get_overall_status(
 @app.get("/api/safety-alerts")
 def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
     """
-    Get all safety alerts from cached data (fast).
-    Returns alerts aggregated from the dashboard cache.
+    Get all safety alerts with LIVE data from Firestore.
+    Always fetches fresh data for real-time safety monitoring.
+    Matches alerts with EMA responses to get full SI data.
     """
     try:
-        # Read from cache for fast response
-        cache_ref = db.collection(DASHBOARD_CACHE_COLLECTION).document("overall_status")
-        cache_doc = cache_ref.get()
-
         alerts = []
+        now = datetime.utcnow()
 
-        if cache_doc.exists:
-            cache_data = cache_doc.to_dict()
-            cached_participants = cache_data.get("participants", [])
-            refreshed_at = cache_data.get("refreshedAt")
-
-            if refreshed_at and hasattr(refreshed_at, 'timestamp'):
-                refreshed_at = datetime.fromtimestamp(refreshed_at.timestamp())
-
-            # Extract alerts from cached daily status
-            for p in cached_participants:
-                pid = p.get("id")
-                daily_status = p.get("dailyStatus", [])
-
-                for day in daily_status:
-                    alert_count = day.get("safety_alerts", 0)
-                    if alert_count > 0:
-                        alerts.append({
-                            "participantId": pid,
-                            "date": day.get("date"),
-                            "count": alert_count,
-                            "crisis_indicated": day.get("crisis_indicated", False),
-                        })
-
-            # Sort by date descending
-            alerts.sort(key=lambda x: x.get("date", ""), reverse=True)
-
-            return {
-                "alerts": alerts,
-                "fromCache": True,
-                "refreshedAt": (refreshed_at.isoformat() + "Z") if refreshed_at else None,
-            }
-
-        # Fallback: compute live (slower)
-        logger.warning("Cache miss for safety-alerts - computing live")
-
+        # Get all enrolled participants
         participants_info = get_all_participant_ids(enrolled_only=True)
 
         for p_info in participants_info:
@@ -1071,40 +1035,72 @@ def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
             participant_ref = get_participant_ref(pid)
 
             try:
+                # Fetch safety alerts (live from Firestore)
                 alerts_ref = participant_ref.collection("safety_alerts")
-                for alert_doc in alerts_ref.stream():
+                alert_docs = list(alerts_ref.order_by("triggeredAt", direction=firestore.Query.DESCENDING).limit(50).stream())
+
+                # Fetch recent EMA responses to match with alerts
+                ema_ref = participant_ref.collection("ema_responses")
+                ema_docs = list(ema_ref.order_by("completedAt", direction=firestore.Query.DESCENDING).limit(100).stream())
+
+                # Index EMAs by sessionId for matching
+                ema_by_session = {}
+                for ema_doc in ema_docs:
+                    ema = ema_doc.to_dict()
+                    session_id = ema.get("sessionId")
+                    if session_id:
+                        ema_by_session[session_id] = ema.get("responses", {})
+
+                for alert_doc in alert_docs:
                     alert = alert_doc.to_dict()
                     triggered_at = alert.get("triggeredAt")
-                    if triggered_at:
-                        if hasattr(triggered_at, 'timestamp'):
-                            alert_date = datetime.fromtimestamp(triggered_at.timestamp()).strftime("%Y-%m-%d")
-                        else:
-                            alert_date = triggered_at.strftime("%Y-%m-%d")
 
-                        alerts.append({
-                            "participantId": pid,
-                            "date": alert_date,
-                            "count": 1,
-                        })
-            except Exception:
+                    if not triggered_at:
+                        continue
+
+                    # Format timestamp
+                    if hasattr(triggered_at, 'timestamp'):
+                        alert_datetime = datetime.fromtimestamp(triggered_at.timestamp())
+                        alert_date = alert_datetime.strftime("%Y-%m-%d")
+                        alert_time = alert_datetime.strftime("%H:%M:%S")
+                        triggered_iso = alert_datetime.isoformat() + "Z"
+                    else:
+                        alert_date = triggered_at.strftime("%Y-%m-%d")
+                        alert_time = triggered_at.strftime("%H:%M:%S")
+                        triggered_iso = triggered_at.isoformat() + "Z"
+
+                    # Get alert responses and merge with full EMA data
+                    alert_responses = alert.get("responses", {})
+                    session_id = alert.get("sessionId")
+
+                    # Try to get full EMA responses for this session
+                    full_responses = ema_by_session.get(session_id, {})
+                    merged_responses = {**alert_responses, **full_responses}
+
+                    alerts.append({
+                        "participantId": pid,
+                        "alertId": alert_doc.id,
+                        "date": alert_date,
+                        "time": alert_time,
+                        "triggeredAt": triggered_iso,
+                        "sessionId": session_id,
+                        "triggerReason": alert.get("triggerReason"),
+                        "responses": merged_responses,
+                        "notificationSent": alert.get("notificationSent", False),
+                    })
+
+            except Exception as e:
+                logger.warning(f"Error fetching alerts for {pid}: {e}")
                 continue
 
-        # Aggregate alerts by participant and date
-        aggregated = {}
-        for a in alerts:
-            key = f"{a['participantId']}_{a['date']}"
-            if key in aggregated:
-                aggregated[key]["count"] += 1
-            else:
-                aggregated[key] = a
-
-        alerts = list(aggregated.values())
-        alerts.sort(key=lambda x: x.get("date", ""), reverse=True)
+        # Sort by triggeredAt descending (most recent first)
+        alerts.sort(key=lambda x: x.get("triggeredAt", ""), reverse=True)
 
         return {
             "alerts": alerts,
             "fromCache": False,
-            "message": "Computed live - cache not available",
+            "refreshedAt": now.isoformat() + "Z",
+            "message": "Live data from Firestore",
         }
 
     except Exception as e:
