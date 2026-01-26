@@ -1389,6 +1389,7 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
 
                 checkins.append({
                     "id": checkin_doc.id,
+                    "sessionId": checkin.get("sessionId"),
                     "timestamp": ts.isoformat() if ts else None,
                     "time": ts.strftime("%I:%M %p") if ts else None,
                     "responses": responses,
@@ -1399,6 +1400,7 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
             logger.warning(f"Error fetching checkins for day: {e}")
 
         # Get safety alerts for this day
+        # Also match with corresponding EMA responses for full SI data
         safety_alerts = []
         try:
             alerts_ref = participant_ref.collection("safety_alerts")
@@ -1409,9 +1411,32 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
                 "triggeredAt", "<", next_date
             )
 
+            # Build a map of sessionId -> EMA responses for matching
+            ema_by_session = {}
+            for checkin in checkins:
+                if checkin.get("sessionId"):
+                    ema_by_session[checkin["sessionId"]] = checkin.get("responses", {})
+            # Also check the raw checkin data for sessionId
+            try:
+                checkins_ref = participant_ref.collection("ema_responses")
+                for ema_doc in checkins_ref.stream():
+                    ema_data = ema_doc.to_dict()
+                    session_id = ema_data.get("sessionId")
+                    if session_id and session_id not in ema_by_session:
+                        responses = ema_data.get("responses", {})
+                        if isinstance(responses, str):
+                            try:
+                                responses = json.loads(responses)
+                            except:
+                                responses = {}
+                        ema_by_session[session_id] = responses
+            except Exception:
+                pass
+
             for alert_doc in alerts_query.stream():
                 alert = alert_doc.to_dict()
                 triggered_at = alert.get("triggeredAt")
+                session_id = alert.get("sessionId")
 
                 # Handle various timestamp formats
                 if hasattr(triggered_at, 'timestamp'):
@@ -1421,12 +1446,22 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
                 else:
                     ts = triggered_at
 
+                # Get alert's partial responses
+                alert_responses = alert.get("responses", {})
+
+                # Try to get full responses from matching EMA
+                full_responses = ema_by_session.get(session_id, {})
+
+                # Merge: use full EMA responses, but fall back to alert responses if not in EMA
+                merged_responses = {**alert_responses, **full_responses}
+
                 safety_alerts.append({
                     "id": alert_doc.id,
                     "timestamp": ts.isoformat() if ts else None,
                     "time": ts.strftime("%I:%M %p") if ts else None,
                     "handled": alert.get("handled", False),
-                    "responses": alert.get("responses", {}),
+                    "responses": merged_responses,
+                    "sessionId": session_id,
                 })
         except Exception as e:
             logger.warning(f"Error fetching safety alerts for day: {e}")
