@@ -1,6 +1,6 @@
 # SocialScope - Social Media Exposure Research Platform
 
-A comprehensive research platform for studying social media usage patterns and their relationship to mental health outcomes. Built with Flutter for iOS, Firebase for backend services, and a React monitoring dashboard.
+A comprehensive research platform for studying social media usage patterns and their relationship to mental health outcomes. Built with Flutter for iOS and Android, Firebase for backend services, and a React monitoring dashboard.
 
 ## Project Overview
 
@@ -21,8 +21,9 @@ SocialScope enables researchers to:
 ┌─────────────────────────────────────────────────────────────────┐
 │                        SocialScope Platform                      │
 ├─────────────────┬─────────────────────┬─────────────────────────┤
-│   iOS App       │   Firebase Backend   │   Researcher Dashboard  │
+│   Mobile App    │   Firebase Backend   │   Researcher Dashboard  │
 │   (Flutter)     │   (Firestore/Storage)│   (React)               │
+│   iOS & Android │                     │                         │
 ├─────────────────┼─────────────────────┼─────────────────────────┤
 │ • WebView       │ • participants/     │ • Real-time monitoring  │
 │ • Screenshots   │ • events/           │ • Safety alerts         │
@@ -36,15 +37,16 @@ SocialScope enables researchers to:
 
 ## Features
 
-### Mobile App (iOS)
+### Mobile App (iOS & Android)
 
+- **Cross-platform**: Native performance on both iOS and Android via Flutter
 - **Multi-platform social media capture**: Reddit and X/Twitter support
 - **Screenshot capture**: Automatic screenshots when content changes (throttled to reduce storage)
-- **On-device OCR**: Text extraction using Apple Vision framework
-- **EMA check-ins**: 3x daily ecological momentary assessments
+- **On-device OCR**: Text extraction using Apple Vision (iOS) and Google ML Kit (Android)
+- **EMA check-ins**: 3x daily ecological momentary assessments with local notifications
 - **Safety monitoring**: Automated SI screening with configurable thresholds
 - **Background sync**: Uploads data to Firebase when connected
-- **Offline-first**: All data stored locally, synced when available
+- **Offline-first**: All data stored locally in SQLite, synced when available
 - **Participant onboarding**: ID validation, consent, and platform login
 
 ### Firebase Backend
@@ -71,9 +73,10 @@ SocialScope enables researchers to:
 
 - Flutter SDK 3.19+
 - Xcode 15+ (for iOS development)
+- Android Studio (for Android development)
 - Node.js 18+ (for dashboard)
 - Firebase CLI
-- CocoaPods
+- CocoaPods (iOS only)
 
 ### 1. Clone and Install Dependencies
 
@@ -95,10 +98,11 @@ cd ios && pod install && cd ..
 
 1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com)
 2. Enable Firestore, Storage, and Authentication
-3. Download configuration files:
-   - `ios/Runner/GoogleService-Info.plist`
-   - `macos/Runner/GoogleService-Info.plist` (if needed)
-4. Configure Firebase in the project:
+3. Add iOS and Android apps to your Firebase project
+4. Download configuration files:
+   - `ios/Runner/GoogleService-Info.plist` (iOS)
+   - `android/app/google-services.json` (Android)
+5. Configure Firebase in the project:
    ```bash
    flutterfire configure
    ```
@@ -117,11 +121,16 @@ pip install -r requirements.txt
 ### 4. Run the App
 
 ```bash
-# iOS Simulator
+# Run on connected device or emulator
 flutter run
 
-# Or build for device
+# Build for iOS
 flutter build ios
+
+# Build for Android
+flutter build apk
+# or for app bundle
+flutter build appbundle
 ```
 
 ### 5. Deploy Dashboard
@@ -200,7 +209,8 @@ smerb_app/
 │       ├── config.py                # Configuration
 │       └── requirements.txt
 │
-├── ios/                             # iOS native code
+├── android/                         # Android native code & ML Kit OCR
+├── ios/                             # iOS native code & Vision OCR
 ├── macos/                           # macOS native code
 ├── firebase.json                    # Firebase configuration
 ├── firestore.rules                  # Security rules
