@@ -77,9 +77,94 @@ const formatResponseValue = (value) => {
 
 // Format question key to readable label
 const formatQuestionLabel = (key) => {
+  // Special labels for SI-related fields
+  const siLabels = {
+    'desire_intensity': 'SI Desire Intensity',
+    'safety_alert_response': 'Safety Alert Response',
+    'intention_strength': 'SI Intention Strength',
+    'ability_safe': 'Ability to Stay Safe',
+    'thoughts_past_4hrs': 'SI Thoughts (Past 4 hrs)',
+    'thoughts_duration': 'SI Thoughts Duration',
+    'thoughts_intent': 'SI Thoughts Intent',
+  };
+
+  if (siLabels[key]) {
+    return siLabels[key];
+  }
+
   return key
     .replace(/_/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
+};
+
+// SI-related fields to show in safety alerts box
+const SI_RELATED_FIELDS = [
+  'desire_intensity',
+  'safety_alert_response',
+  'intention_strength',
+  'ability_safe',
+  'thoughts_past_4hrs',
+  'thoughts_duration',
+  'thoughts_intent',
+];
+
+// Thoughts duration mapping (based on EMA questions)
+const THOUGHTS_DURATION_LABELS = {
+  1: 'A few seconds',
+  2: 'A few minutes',
+  3: 'Less than an hour',
+  4: 'More than an hour',
+  5: 'Most of the day',
+};
+
+// Format SI response values with special handling
+const formatSIResponseValue = (key, value) => {
+  if (value === null || value === undefined) return '-';
+
+  // Special handling for thoughts_duration
+  if (key === 'thoughts_duration') {
+    const numVal = typeof value === 'number' ? value : parseInt(value);
+    if (THOUGHTS_DURATION_LABELS[numVal]) {
+      return `${numVal} - ${THOUGHTS_DURATION_LABELS[numVal]}`;
+    }
+  }
+
+  // Special handling for thoughts_past_4hrs
+  if (key === 'thoughts_past_4hrs') {
+    if (value === true || value === 'true') return 'Yes - Had SI thoughts';
+    if (value === false || value === 'false') return 'No';
+    return String(value);
+  }
+
+  // Special handling for safety_alert_response
+  if (key === 'safety_alert_response') {
+    if (value === true || value === 'true') return 'Yes - Needs help';
+    if (value === false || value === 'false') return 'No - Can stay safe';
+    return String(value);
+  }
+
+  // Handle actual booleans
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+
+  // Handle numbers (scores 0-100)
+  if (typeof value === 'number') {
+    if (value >= 0 && value <= 100) {
+      return `${value.toFixed(1)}/100`;
+    }
+    return value.toString();
+  }
+
+  // Handle string numbers
+  if (typeof value === 'string') {
+    const numVal = parseFloat(value);
+    if (!isNaN(numVal) && numVal >= 0 && numVal <= 100) {
+      return `${numVal.toFixed(1)}/100`;
+    }
+  }
+
+  return String(value);
 };
 
 
@@ -343,37 +428,53 @@ const DayDetailScreen = ({
       {/* Main Content */}
       {!loading && !error && dayData && (
         <div className="space-y-6">
-          {/* Safety Alerts (if any) */}
+          {/* Safety Alerts (if any) - Shows ONLY SI-related EMA fields */}
           {dayData.safety_alerts?.length > 0 && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="bg-red-50 border-2 border-red-300 rounded-lg p-4">
               <div className="flex items-center text-red-700 font-semibold mb-3">
                 <AlertTriangle size={20} className="mr-2" />
-                Safety Alerts ({dayData.safety_alerts.length})
+                Safety Alerts - SI Risk Indicators ({dayData.safety_alerts.length})
               </div>
               <div className="space-y-3">
-                {dayData.safety_alerts.map((alert, idx) => (
-                  <div key={idx} className="bg-white border border-red-100 rounded p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="text-sm font-medium text-gray-700">{alert.time}</div>
-                      {alert.handled && (
-                        <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded">Handled</span>
+                {dayData.safety_alerts.map((alert, idx) => {
+                  // Filter to only SI-related fields
+                  const siResponses = alert.responses
+                    ? Object.entries(alert.responses).filter(([key]) => SI_RELATED_FIELDS.includes(key))
+                    : [];
+
+                  return (
+                    <div key={idx} className="bg-white border border-red-200 rounded p-4 shadow-sm">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="text-sm font-medium text-gray-700">
+                          <Clock size={14} className="inline mr-1" />
+                          {alert.time}
+                        </div>
+                        {alert.handled && (
+                          <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded font-medium">
+                            SMS Sent
+                          </span>
+                        )}
+                      </div>
+                      {/* Display only SI-related responses */}
+                      {siResponses.length > 0 ? (
+                        <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                          {siResponses.map(([key, value], rIdx) => (
+                            <div key={rIdx} className="border-l-3 border-red-400 pl-3 py-1 bg-red-50/50 rounded-r">
+                              <div className="text-xs text-red-600 font-medium mb-0.5">
+                                {formatQuestionLabel(key)}
+                              </div>
+                              <div className="font-semibold text-gray-800">
+                                {formatSIResponseValue(key, value)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-gray-500 text-sm">No SI response data available</div>
                       )}
                     </div>
-                    {/* Display responses as key-value pairs */}
-                    {alert.responses && Object.keys(alert.responses).length > 0 && (
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-2">
-                        {Object.entries(alert.responses).map(([key, value], rIdx) => (
-                          <div key={rIdx} className="text-sm border-l-2 border-red-200 pl-3">
-                            <span className="text-gray-600">{formatQuestionLabel(key)}:</span>
-                            <span className="ml-2 font-medium text-gray-800">
-                              {formatResponseValue(value)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

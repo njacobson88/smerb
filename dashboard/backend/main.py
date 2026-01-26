@@ -1481,6 +1481,8 @@ EXPORT_INDEX = {}
 
 # Firebase Storage for downloading screenshots
 from firebase_admin import storage as fb_storage
+import threading
+import requests
 
 
 def get_storage_bucket():
@@ -1489,6 +1491,227 @@ def get_storage_bucket():
         return fb_storage.bucket(f"{config.FIREBASE_PROJECT_ID}.firebasestorage.app")
     except Exception:
         return fb_storage.bucket(f"{config.FIREBASE_PROJECT_ID}.appspot.com")
+
+
+# Export Jobs Collection for async exports
+EXPORT_JOBS_COLLECTION = "export_jobs"
+
+
+def send_export_email(email: str, participant_id: str, download_url: str, filename: str):
+    """Send email notification when export is complete using SendGrid."""
+    sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
+    if not sendgrid_api_key:
+        logger.warning("SENDGRID_API_KEY not configured - email not sent")
+        return False
+
+    try:
+        response = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": f"Bearer {sendgrid_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "personalizations": [{"to": [{"email": email}]}],
+                "from": {"email": "noreply@socialscope-dashboard.web.app", "name": "SocialScope Dashboard"},
+                "subject": f"SocialScope Export Ready: {participant_id}",
+                "content": [{
+                    "type": "text/html",
+                    "value": f"""
+                    <h2>Your SocialScope Export is Ready</h2>
+                    <p>Your data export for participant <strong>{participant_id}</strong> has completed.</p>
+                    <p><strong>Filename:</strong> {filename}</p>
+                    <p><a href="{download_url}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Download Export</a></p>
+                    <p style="color: #666; font-size: 12px;">This link will expire in 48 hours.</p>
+                    <hr>
+                    <p style="color: #999; font-size: 11px;">SocialScope Research Dashboard - Dartmouth College</p>
+                    """
+                }],
+            },
+            timeout=10,
+        )
+        if response.status_code in (200, 202):
+            logger.info(f"Export email sent to {email}")
+            return True
+        else:
+            logger.error(f"SendGrid error: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to send export email: {e}")
+        return False
+
+
+def run_background_export(job_id: str, participant_id: str, export_level: int,
+                          start_date: Optional[str], end_date: Optional[str],
+                          user_email: str):
+    """Background thread function to run export and update job status."""
+    job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(job_id)
+
+    try:
+        job_ref.update({"status": "processing", "startedAt": datetime.utcnow()})
+
+        # Get participant data
+        participant_data = get_participant_data(participant_id)
+        participant_ref = get_participant_ref(participant_id)
+
+        if not participant_data:
+            events_check = list(participant_ref.collection("events").limit(1).stream())
+            if not events_check:
+                job_ref.update({
+                    "status": "failed",
+                    "error": "Participant not found",
+                    "completedAt": datetime.utcnow(),
+                })
+                return
+
+        export_id = job_id
+        export_path = EXPORT_DIR / f"{export_id}.zip"
+
+        with zipfile.ZipFile(export_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # Export participant metadata
+            if participant_data:
+                zf.writestr("participant_metadata.json", json.dumps(participant_data, indent=2, default=str))
+
+            # Export EMA responses
+            try:
+                checkins_ref = participant_ref.collection("ema_responses")
+                checkins_data = []
+                for checkin_doc in checkins_ref.stream():
+                    checkin = checkin_doc.to_dict()
+                    for ts_field in ["completedAt", "startedAt", "syncedAt"]:
+                        ts_val = checkin.get(ts_field)
+                        if ts_val and hasattr(ts_val, 'timestamp'):
+                            checkin[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+                    responses = checkin.get("responses", {})
+                    if isinstance(responses, str):
+                        try:
+                            checkin["responses"] = json.loads(responses)
+                        except:
+                            pass
+                    checkins_data.append({"id": checkin_doc.id, **checkin})
+                if checkins_data:
+                    zf.writestr("ema_responses.json", json.dumps(checkins_data, indent=2, default=str))
+            except Exception as e:
+                logger.warning(f"Error exporting EMA: {e}")
+
+            # Export safety alerts
+            try:
+                alerts_ref = participant_ref.collection("safety_alerts")
+                alerts_data = []
+                for alert_doc in alerts_ref.stream():
+                    alert = alert_doc.to_dict()
+                    for ts_field in ["triggeredAt", "syncedAt"]:
+                        ts_val = alert.get(ts_field)
+                        if ts_val and hasattr(ts_val, 'timestamp'):
+                            alert[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+                    alerts_data.append({"id": alert_doc.id, **alert})
+                if alerts_data:
+                    zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
+            except Exception:
+                pass
+
+            # Level 2+: Export events
+            if export_level >= 2:
+                events_ref = participant_ref.collection("events")
+                if start_date and end_date:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                    events_query = events_ref.where("timestamp", ">=", start_dt).where("timestamp", "<", end_dt)
+                else:
+                    events_query = events_ref
+
+                events_data = []
+                screenshot_urls = []
+
+                for event_doc in events_query.stream():
+                    event = event_doc.to_dict()
+                    for ts_field in ["timestamp", "capturedAt", "createdAt", "syncedAt"]:
+                        ts_val = event.get(ts_field)
+                        if ts_val and hasattr(ts_val, 'timestamp'):
+                            event[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+
+                    if export_level >= 3:
+                        screenshot_url = event.get("screenshotUrl")
+                        if screenshot_url:
+                            screenshot_urls.append({
+                                "event_id": event_doc.id,
+                                "url": screenshot_url,
+                                "timestamp": event.get("timestamp"),
+                            })
+
+                    events_data.append({"id": event_doc.id, **event})
+
+                if events_data:
+                    zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))
+
+                # Level 3: Download screenshots
+                if export_level >= 3 and screenshot_urls:
+                    total = len(screenshot_urls)
+                    job_ref.update({"screenshotTotal": total, "screenshotProgress": 0})
+
+                    for idx, ss_info in enumerate(screenshot_urls):
+                        try:
+                            url = ss_info["url"]
+                            if url and url.startswith("http"):
+                                response = requests.get(url, timeout=30)
+                                if response.status_code == 200:
+                                    ext = ".jpg"
+                                    if ".png" in url.lower():
+                                        ext = ".png"
+
+                                    ts_val = ss_info.get("timestamp")
+                                    if ts_val:
+                                        if hasattr(ts_val, 'isoformat'):
+                                            ts = ts_val.isoformat().replace(":", "-").replace("T", "_")[:19]
+                                        else:
+                                            ts = str(ts_val).replace(":", "-").replace("T", "_")[:19]
+                                    else:
+                                        ts = f"img_{idx}"
+
+                                    filename = f"screenshots/{ts}_{ss_info['event_id'][:8]}{ext}"
+                                    zf.writestr(filename, response.content)
+
+                            # Update progress every 10 screenshots
+                            if idx % 10 == 0:
+                                job_ref.update({"screenshotProgress": idx + 1})
+
+                        except Exception as e:
+                            logger.warning(f"Failed to download screenshot {idx}: {e}")
+
+        # Generate filename and store result
+        level_names = {1: "meta", 2: "ocr", 3: "full"}
+        filename = f"socialscope_export_{participant_id}_L{export_level}_{level_names.get(export_level, 'meta')}"
+        if start_date and end_date:
+            filename += f"_{start_date}_to_{end_date}"
+        filename += ".zip"
+
+        download_url = f"https://socialscope-dashboard-api-436153481478.us-central1.run.app/api/exports/{export_id}"
+
+        EXPORT_INDEX[export_id] = {
+            "filename": filename,
+            "created_at": datetime.now().timestamp()
+        }
+
+        job_ref.update({
+            "status": "completed",
+            "downloadUrl": download_url,
+            "filename": filename,
+            "completedAt": datetime.utcnow(),
+        })
+
+        # Send email notification
+        if user_email:
+            send_export_email(user_email, participant_id, download_url, filename)
+
+        logger.info(f"Background export completed: {job_id}")
+
+    except Exception as e:
+        logger.error(f"Background export failed: {e}", exc_info=True)
+        job_ref.update({
+            "status": "failed",
+            "error": str(e),
+            "completedAt": datetime.utcnow(),
+        })
 
 
 @app.get("/api/export/estimate")
@@ -1580,6 +1803,103 @@ def estimate_export(
         }
     except Exception as e:
         logger.error(f"Failed to estimate export: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class AsyncExportRequest(BaseModel):
+    participant_id: str
+    export_level: int = 1
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    notify_email: Optional[str] = None
+
+
+@app.post("/api/export/async")
+def start_async_export(
+    request: AsyncExportRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Start an asynchronous export job for large exports (Level 3 with screenshots).
+    Returns immediately with a job ID. Client can poll for status or receive email notification.
+    """
+    try:
+        # Validate participant exists
+        participant_data = get_participant_data(request.participant_id)
+        participant_ref = get_participant_ref(request.participant_id)
+
+        if not participant_data:
+            events_check = list(participant_ref.collection("events").limit(1).stream())
+            if not events_check:
+                raise HTTPException(status_code=404, detail="Participant not found")
+
+        # Create job document
+        job_id = uuid.uuid4().hex
+        job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(job_id)
+
+        user_email = request.notify_email or user.get("email")
+
+        job_ref.set({
+            "jobId": job_id,
+            "participantId": request.participant_id,
+            "exportLevel": request.export_level,
+            "startDate": request.start_date,
+            "endDate": request.end_date,
+            "status": "pending",
+            "createdAt": datetime.utcnow(),
+            "createdBy": user.get("email"),
+            "notifyEmail": user_email,
+        })
+
+        # Start background thread
+        thread = threading.Thread(
+            target=run_background_export,
+            args=(job_id, request.participant_id, request.export_level,
+                  request.start_date, request.end_date, user_email),
+            daemon=True
+        )
+        thread.start()
+
+        return {
+            "jobId": job_id,
+            "status": "pending",
+            "message": "Export started. You will receive an email when complete, or check status at /api/export/jobs/{jobId}",
+            "statusUrl": f"/api/export/jobs/{job_id}",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start async export: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/export/jobs/{job_id}")
+def get_export_job_status(
+    job_id: str,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Get the status of an export job."""
+    try:
+        job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(job_id)
+        job_doc = job_ref.get()
+
+        if not job_doc.exists:
+            raise HTTPException(status_code=404, detail="Export job not found")
+
+        job_data = job_doc.to_dict()
+
+        # Convert timestamps
+        for ts_field in ["createdAt", "startedAt", "completedAt"]:
+            if job_data.get(ts_field) and hasattr(job_data[ts_field], 'timestamp'):
+                job_data[ts_field] = datetime.fromtimestamp(job_data[ts_field].timestamp()).isoformat() + "Z"
+
+        return job_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get export job status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

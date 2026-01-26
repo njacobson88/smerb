@@ -225,6 +225,10 @@ const ExportScreen = () => {
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [estimate, setEstimate] = useState(null);
   const [abortController, setAbortController] = useState(null);
+  // Async export state
+  const [asyncJobId, setAsyncJobId] = useState(null);
+  const [asyncStatus, setAsyncStatus] = useState(null);
+  const [notifyEmail, setNotifyEmail] = useState('');
 
   // Fetch estimate when participant ID changes
   const fetchEstimate = async () => {
@@ -269,12 +273,83 @@ const ExportScreen = () => {
     return () => clearTimeout(timer);
   }, [participantId, startDate, endDate]);
 
+  // Poll for async job status
+  React.useEffect(() => {
+    if (!asyncJobId) return;
+
+    const pollStatus = async () => {
+      try {
+        const response = await authFetch(`${API_BASE_URL}/api/export/jobs/${asyncJobId}`);
+        if (response.ok) {
+          const data = await response.json();
+          setAsyncStatus(data);
+
+          if (data.status === 'completed') {
+            setDownloadUrl(data.downloadUrl);
+            setLoading(false);
+          } else if (data.status === 'failed') {
+            setError(data.error || 'Export failed');
+            setLoading(false);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to poll job status:', err);
+      }
+    };
+
+    // Poll every 5 seconds while job is active
+    const interval = setInterval(() => {
+      if (asyncStatus?.status === 'pending' || asyncStatus?.status === 'processing') {
+        pollStatus();
+      }
+    }, 5000);
+
+    // Initial poll
+    pollStatus();
+
+    return () => clearInterval(interval);
+  }, [asyncJobId, asyncStatus?.status]);
+
   const handleExport = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setDownloadUrl(null);
+    setAsyncJobId(null);
+    setAsyncStatus(null);
 
+    // For Level 3, use async export
+    if (exportLevel === 3) {
+      try {
+        const response = await authFetch(`${API_BASE_URL}/api/export/async`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            participant_id: participantId,
+            export_level: exportLevel,
+            start_date: startDate || null,
+            end_date: endDate || null,
+            notify_email: notifyEmail || null,
+          }),
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.detail || 'Failed to start export');
+        }
+
+        const data = await response.json();
+        setAsyncJobId(data.jobId);
+        setAsyncStatus({ status: 'pending' });
+        // Don't set loading to false - keep showing progress
+      } catch (err) {
+        setError(err.message);
+        setLoading(false);
+      }
+      return;
+    }
+
+    // For Level 1 & 2, use synchronous export
     const controller = new AbortController();
     setAbortController(controller);
 
@@ -310,9 +385,11 @@ const ExportScreen = () => {
   const handleCancel = () => {
     if (abortController) {
       abortController.abort();
-      setLoading(false);
-      setAbortController(null);
     }
+    setLoading(false);
+    setAbortController(null);
+    setAsyncJobId(null);
+    setAsyncStatus(null);
   };
 
   const getLevelInfo = (level) => {
@@ -458,16 +535,64 @@ const ExportScreen = () => {
                   {getLevelInfo(3) && (
                     <div className="text-sm text-orange-600 mt-1">
                       Est. size: {getLevelInfo(3).size_display} • {getLevelInfo(3).time_display}
-                      {getLevelInfo(3).needs_background && (
-                        <span className="ml-2 text-red-600">(Large export - may take time)</span>
-                      )}
                     </div>
                   )}
+                  <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800">
+                    ⚠️ Large export - runs in background. You'll receive an email when complete.
+                  </div>
                 </div>
               </div>
             </label>
           </div>
         </div>
+
+        {/* Email notification for Level 3 */}
+        {exportLevel === 3 && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Email for notification (optional)
+            </label>
+            <input
+              type="email"
+              value={notifyEmail}
+              onChange={(e) => setNotifyEmail(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              placeholder="you@dartmouth.edu (leave blank to use your login email)"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              You'll receive an email with the download link when the export completes.
+            </p>
+          </div>
+        )}
+
+        {/* Async Export Progress */}
+        {asyncStatus && loading && (
+          <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center mb-2">
+              <div className="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full mr-3"></div>
+              <span className="font-medium text-blue-800">
+                {asyncStatus.status === 'pending' && 'Starting export...'}
+                {asyncStatus.status === 'processing' && 'Processing export...'}
+              </span>
+            </div>
+            {asyncStatus.screenshotTotal > 0 && (
+              <div className="mt-2">
+                <div className="text-sm text-blue-700 mb-1">
+                  Downloading screenshots: {asyncStatus.screenshotProgress || 0} / {asyncStatus.screenshotTotal}
+                </div>
+                <div className="w-full bg-blue-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-600 h-2 rounded-full transition-all"
+                    style={{ width: `${((asyncStatus.screenshotProgress || 0) / asyncStatus.screenshotTotal) * 100}%` }}
+                  ></div>
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-blue-600 mt-2">
+              This may take several minutes. You can close this page - you'll receive an email when complete.
+            </p>
+          </div>
+        )}
 
         {/* Export / Cancel Buttons */}
         <div className="flex gap-3">
@@ -479,10 +604,10 @@ const ExportScreen = () => {
             {loading ? (
               <span className="flex items-center justify-center">
                 <div className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full mr-2"></div>
-                Generating Export...
+                {exportLevel === 3 ? 'Export in Progress...' : 'Generating Export...'}
               </span>
             ) : (
-              'Export Data'
+              exportLevel === 3 ? 'Start Background Export' : 'Export Data'
             )}
           </button>
 
