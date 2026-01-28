@@ -453,7 +453,7 @@ def debug_collections():
         try:
             test2_events = list(test2_ref.collection("events").limit(5).stream())
             result["test2_events_count"] = len(test2_events)
-        except Exception:
+        except Exception as e:
             result["test2_events_count"] = "error"
 
         return result
@@ -556,7 +556,7 @@ def _safe_get_responses(data: dict, key: str = "responses") -> dict:
     if isinstance(resp, str):
         try:
             resp = json.loads(resp)
-        except:
+        except (json.JSONDecodeError, TypeError, ValueError):
             resp = {}
     return resp if isinstance(resp, dict) else {}
 
@@ -682,7 +682,7 @@ async def refresh_safety_alert_cache():
             break
         except asyncio.TimeoutError:
             # Normal timeout, continue the loop
-            pass
+            logger.debug(f"Silently handled exception: {e}")
 
     logger.info("[SafetyAlerts] Background refresh loop stopped")
 
@@ -782,8 +782,8 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
                 else:
                     alert_date = triggered_at.strftime("%Y-%m-%d")
                 daily_status[alert_date]["safety_alerts"] += 1
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Silently handled exception: {e}")
 
     # Get check-ins from ema_responses
     try:
@@ -811,15 +811,15 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
                 if isinstance(responses, str):
                     try:
                         responses = json.loads(responses)
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         responses = {}
 
                 for key, value in responses.items():
                     if isinstance(value, str) and value.lower() in ("yes", "true"):
                         if "crisis" in key.lower() or "harm" in key.lower() or "hurt" in key.lower():
                             daily_status[checkin_date]["crisis_indicated"] = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Silently handled exception: {e}")
 
     return dict(daily_status)
 
@@ -1049,7 +1049,7 @@ def get_participants(user: dict = Depends(verify_firebase_token)):
             if enrolled_at and isinstance(enrolled_at, str):
                 try:
                     enrolled_at = datetime.fromisoformat(enrolled_at.replace("Z", "+00:00"))
-                except:
+                except (json.JSONDecodeError, TypeError, ValueError):
                     pass
 
             participants.append({
@@ -1383,7 +1383,7 @@ def get_participant_summary(participant_id: str, user: dict = Depends(verify_fir
                     if isinstance(responses, str):
                         try:
                             responses = json.loads(responses)
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             responses = {}
 
                     # Check for crisis indicator in responses
@@ -1393,8 +1393,8 @@ def get_participant_summary(participant_id: str, user: dict = Depends(verify_fir
                                 if "crisis_indicated" not in daily_summaries[checkin_date]:
                                     daily_summaries[checkin_date]["crisis_indicated"] = False
                                 daily_summaries[checkin_date]["crisis_indicated"] = True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Silently handled exception: {e}")
 
         # Get safety alerts
         try:
@@ -1411,8 +1411,8 @@ def get_participant_summary(participant_id: str, user: dict = Depends(verify_fir
                     else:
                         alert_date = triggered_at.strftime("%Y-%m-%d")
                     daily_summaries[alert_date]["safety_alerts"] += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Silently handled exception: {e}")
 
         # Convert to list sorted by date
         summary_list = []
@@ -1556,7 +1556,7 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
                 if isinstance(responses, str):
                     try:
                         responses = json.loads(responses)
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         responses = {}
 
                 # Check for crisis indicator in responses
@@ -1607,11 +1607,11 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
                         if isinstance(responses, str):
                             try:
                                 responses = json.loads(responses)
-                            except:
+                            except (json.JSONDecodeError, TypeError, ValueError):
                                 responses = {}
                         ema_by_session[session_id] = responses
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Silently handled exception: {e}")
 
             for alert_doc in alerts_query.stream():
                 alert = alert_doc.to_dict()
@@ -1675,7 +1675,7 @@ def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_f
                             "platform": event.get("platform"),
                             "time": ts.strftime("%I:%M %p"),
                         })
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         pass
 
         # Sample ~10 screenshots per hour (evenly distributed)
@@ -1974,7 +1974,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     if isinstance(responses, str):
                         try:
                             checkin["responses"] = json.loads(responses)
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             pass
                     checkins_data.append({"id": checkin_doc.id, **checkin})
                 if checkins_data:
@@ -1995,8 +1995,8 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     alerts_data.append({"id": alert_doc.id, **alert})
                 if alerts_data:
                     zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Silently handled exception in safety alert export: {e}")
 
             # Level 2+: Export events
             if export_level >= 2:
@@ -2450,7 +2450,7 @@ def export_participant_data(
                     if isinstance(responses, str):
                         try:
                             checkin["responses"] = json.loads(responses)
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             pass
                     checkins_data.append({"id": checkin_doc.id, **checkin})
 
@@ -2473,8 +2473,8 @@ def export_participant_data(
 
                 if alerts_data:
                     zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Silently handled exception in safety alert export: {e}")
 
             # Level 2+: Export events with OCR data
             if export_level >= 2:

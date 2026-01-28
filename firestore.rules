@@ -1,24 +1,39 @@
 rules_version = '2';
 
+// ============================================================================
+// SECURITY WARNING: These rules are currently in TEST MODE
+// All collections allow read/write without authentication.
+//
+// TODO: Before scaling to production with sensitive data, update these rules:
+// 1. Require Firebase Authentication for dashboard access
+// 2. Restrict write access to mobile app service account
+// 3. Implement per-field validation
+// 4. Add rate limiting via Cloud Functions
+//
+// Example production rule:
+//   allow read: if request.auth != null && request.auth.token.email.matches('.*@dartmouth.edu');
+//   allow write: if request.auth != null && request.auth.token.admin == true;
+// ============================================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Participants collection - stores events per participant
+    // Participants collection - stores participant metadata and subcollections
     match /participants/{participantId} {
-      // Allow read/write for now (test mode)
-      // In production, restrict to authenticated users
+      // TEST MODE: Allow all access
+      // PRODUCTION: Restrict to authenticated dashboard users (read) and mobile app (write)
       allow read, write: if true;
 
-      // Events subcollection
+      // Events subcollection - screenshot events, page views, interactions
       match /events/{eventId} {
         allow read, write: if true;
       }
 
-      // EMA responses subcollection
+      // EMA responses subcollection - check-in survey responses
       match /ema_responses/{responseId} {
         allow read, write: if true;
       }
 
-      // Safety alerts subcollection (triggers Twilio paging)
+      // Safety alerts subcollection - SI screening triggers
       match /safety_alerts/{alertId} {
         allow read, write: if true;
       }
@@ -29,9 +44,24 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    // Valid participants collection - master list of valid IDs
+    // Valid participants collection - master list of valid IDs for enrollment
     match /valid_participants/{participantId} {
-      // Allow read to validate IDs, allow write to mark as in-use
+      // Mobile app reads to validate enrollment, writes to mark device registration
+      allow read, write: if true;
+    }
+
+    // Dashboard cache collection - cached aggregated data
+    match /dashboard_cache/{cacheId} {
+      allow read, write: if true;
+    }
+
+    // Export jobs collection - tracks async export requests
+    match /export_jobs/{jobId} {
+      allow read, write: if true;
+    }
+
+    // Dashboard users collection - role-based access control
+    match /dashboard_users/{userId} {
       allow read, write: if true;
     }
 

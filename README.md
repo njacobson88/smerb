@@ -154,10 +154,6 @@ smerb_app/
 │   ├── main.dart                    # App entry point
 │   ├── firebase_options.dart        # Firebase configuration
 │   │
-│   ├── core/
-│   │   └── config/
-│   │       └── capture_config.dart  # Capture settings
-│   │
 │   ├── features/
 │   │   ├── browser/                 # WebView browser
 │   │   │   └── screens/
