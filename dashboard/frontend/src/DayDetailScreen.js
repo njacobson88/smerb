@@ -80,12 +80,16 @@ const formatQuestionLabel = (key) => {
   // Special labels for SI-related fields
   const siLabels = {
     'desire_intensity': 'SI Desire Intensity',
-    'safety_alert_response': 'Safety Alert Response',
     'intention_strength': 'SI Intention Strength',
     'ability_safe': 'Ability to Stay Safe',
     'thoughts_past_4hrs': 'SI Thoughts (Past 4 hrs)',
     'thoughts_duration': 'SI Thoughts Duration',
     'thoughts_intent': 'SI Thoughts Intent',
+    'safety_confirmed_danger': 'Confirmed Immediate Danger',
+    'safety_confirmed_at_question': 'Trigger Question',
+    'safety_confirmation_number': 'Confirmation #',
+    // Legacy field
+    'safety_alert_response': 'Safety Alert Response (legacy)',
   };
 
   if (siLabels[key]) {
@@ -100,12 +104,16 @@ const formatQuestionLabel = (key) => {
 // SI-related fields to show in safety alerts box
 const SI_RELATED_FIELDS = [
   'desire_intensity',
-  'safety_alert_response',
   'intention_strength',
   'ability_safe',
   'thoughts_past_4hrs',
   'thoughts_duration',
   'thoughts_intent',
+  'safety_confirmed_danger',
+  'safety_confirmed_at_question',
+  'safety_confirmation_number',
+  // Legacy field (old app versions)
+  'safety_alert_response',
 ];
 
 // Thoughts duration mapping (based on EMA questions)
@@ -136,7 +144,14 @@ const formatSIResponseValue = (key, value) => {
     return String(value);
   }
 
-  // Special handling for safety_alert_response
+  // Special handling for safety confirmation fields
+  if (key === 'safety_confirmed_danger') {
+    if (value === true || value === 'true') return '⚠️ YES — Confirmed immediate danger';
+    if (value === false || value === 'false') return 'No — Denied immediate danger';
+    return String(value);
+  }
+
+  // Legacy field
   if (key === 'safety_alert_response') {
     if (value === true || value === 'true') return 'Yes - Needs help';
     if (value === false || value === 'false') return 'No - Can stay safe';
@@ -451,7 +466,12 @@ const DayDetailScreen = ({
                         </div>
                         {alert.handled && (
                           <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded font-medium">
-                            SMS Sent
+                            {alert.confirmedDanger ? 'Alert Sent — Confirmed Danger' : 'SMS Sent'}
+                          </span>
+                        )}
+                        {alert.confirmedDanger === false && !alert.handled && (
+                          <span className="px-2 py-1 bg-yellow-100 text-yellow-700 text-xs rounded font-medium">
+                            Threshold Exceeded — Denied Danger
                           </span>
                         )}
                       </div>

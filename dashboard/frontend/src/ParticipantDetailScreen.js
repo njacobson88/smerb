@@ -1,7 +1,7 @@
 // ParticipantDetailScreen.js - Single Participant Daily View
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ChevronLeft, ChevronRight, Download, Loader2, Camera, FileText, AlertTriangle, RefreshCw, Clock, CheckCircle, XCircle } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Loader2, Camera, FileText, AlertTriangle, RefreshCw, Clock, CheckCircle, XCircle, Pencil, Save, X } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
 
 // Color constants
@@ -50,6 +50,19 @@ const ParticipantDetailScreen = ({
   const [pendingExportLevel, setPendingExportLevel] = useState(null);
   const [activeExport, setActiveExport] = useState(null); // Track async export job
   const pollIntervalRef = useRef(null);
+
+  // Study start date editing state
+  const [editingStudyStart, setEditingStudyStart] = useState(false);
+  const [studyStartInput, setStudyStartInput] = useState('');
+  const [studyStartSaving, setStudyStartSaving] = useState(false);
+  const [studyStartError, setStudyStartError] = useState(null);
+  const [studyStartSuccess, setStudyStartSuccess] = useState(false);
+
+  // Active status toggle state
+  const [activeStatusSaving, setActiveStatusSaving] = useState(false);
+  const [activeStatusError, setActiveStatusError] = useState(null);
+  const [showInactiveConfirm, setShowInactiveConfirm] = useState(false);
+  const [inactiveReason, setInactiveReason] = useState('');
 
   // Find current index in participant list
   const currentIndex = participantList?.indexOf(currentParticipantId) ?? -1;
@@ -243,6 +256,116 @@ const ParticipantDetailScreen = ({
     3: { name: 'Full Export', desc: 'Everything including screenshot images' }
   };
 
+  // Handle study start date edit
+  const handleEditStudyStart = () => {
+    setStudyStartInput(summary?.study_start_date || '');
+    setEditingStudyStart(true);
+    setStudyStartError(null);
+    setStudyStartSuccess(false);
+  };
+
+  const handleCancelStudyStartEdit = () => {
+    setEditingStudyStart(false);
+    setStudyStartInput('');
+    setStudyStartError(null);
+  };
+
+  const handleSaveStudyStart = async () => {
+    if (!studyStartInput) {
+      setStudyStartError('Please enter a date');
+      return;
+    }
+
+    // Validate date format
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(studyStartInput)) {
+      setStudyStartError('Invalid date format. Use YYYY-MM-DD.');
+      return;
+    }
+
+    setStudyStartSaving(true);
+    setStudyStartError(null);
+
+    try {
+      const response = await authFetch(
+        `${API_BASE_URL}/api/participant/${currentParticipantId}/study-start-date`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ study_start_date: studyStartInput })
+        }
+      );
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `Failed to update study start date`);
+      }
+
+      // Update the summary with the new date
+      setSummary(prev => ({
+        ...prev,
+        study_start_date: studyStartInput,
+        study_start_is_custom: true
+      }));
+
+      setEditingStudyStart(false);
+      setStudyStartSuccess(true);
+
+      // Clear success message after 3 seconds
+      setTimeout(() => setStudyStartSuccess(false), 3000);
+    } catch (err) {
+      setStudyStartError(err.message);
+    } finally {
+      setStudyStartSaving(false);
+    }
+  };
+
+  // Handle active status toggle
+  const handleToggleActiveStatus = async (newStatus) => {
+    // If marking as inactive, show confirmation dialog
+    if (!newStatus && !showInactiveConfirm) {
+      setShowInactiveConfirm(true);
+      return;
+    }
+
+    setActiveStatusSaving(true);
+    setActiveStatusError(null);
+    setShowInactiveConfirm(false);
+
+    try {
+      const response = await authFetch(
+        `${API_BASE_URL}/api/participant/${currentParticipantId}/active-status`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            is_active: newStatus,
+            reason: newStatus ? null : (inactiveReason || 'Manually marked inactive')
+          })
+        }
+      );
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to update status');
+      }
+
+      // Update local state
+      setSummary(prev => ({
+        ...prev,
+        is_active: newStatus,
+        is_active_manual: true,
+        inactive_reason: newStatus ? null : (inactiveReason || 'Manually marked inactive')
+      }));
+
+      setInactiveReason('');
+    } catch (err) {
+      setActiveStatusError(err.message);
+    } finally {
+      setActiveStatusSaving(false);
+    }
+  };
+
   // Calculate totals
   const dailySummary = summary?.daily_summary || [];
   const totalScreenshots = dailySummary.reduce((sum, d) => sum + (d.screenshots || 0), 0);
@@ -286,12 +409,98 @@ const ParticipantDetailScreen = ({
       <div className="bg-white rounded-lg shadow p-6 mb-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800 mb-2">
-              Participant: {currentParticipantId}
-            </h1>
+            <div className="flex items-center mb-2">
+              <h1 className="text-2xl font-bold text-gray-800">
+                Participant: {currentParticipantId}
+              </h1>
+              {summary && (
+                <button
+                  onClick={() => handleToggleActiveStatus(!summary.is_active)}
+                  disabled={activeStatusSaving}
+                  className={`ml-3 px-3 py-1 rounded-full text-xs font-bold cursor-pointer hover:opacity-80 transition-opacity disabled:opacity-50 ${
+                    summary.is_active
+                      ? 'bg-green-100 text-green-800 hover:bg-green-200'
+                      : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                  }`}
+                  title={summary.is_active ? 'Click to mark as inactive' : 'Click to reactivate'}
+                >
+                  {activeStatusSaving ? '...' : (summary.is_active ? 'ACTIVE' : 'INACTIVE')}
+                </button>
+              )}
+              {summary && summary.is_active && summary.days_remaining !== undefined && (
+                <span className="ml-2 text-sm text-gray-500">
+                  Day {summary.study_day}/90 ({summary.days_remaining} days remaining)
+                </span>
+              )}
+              {summary && !summary.is_active && (
+                <span className="ml-2 text-sm text-gray-500">
+                  {summary.inactive_reason || (summary.is_active_manual ? 'Manually marked inactive' : 'Study completed')}
+                </span>
+              )}
+              {activeStatusError && (
+                <span className="ml-2 text-sm text-red-500">{activeStatusError}</span>
+              )}
+            </div>
             {summary && (
               <div className="text-gray-600 text-sm space-y-1">
-                <div>Study Start: {summary.study_start_date || 'Unknown'}</div>
+                <div className="flex items-center">
+                  <span className="mr-2">Study Start:</span>
+                  {editingStudyStart ? (
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="date"
+                        value={studyStartInput}
+                        onChange={(e) => setStudyStartInput(e.target.value)}
+                        className="px-2 py-1 border rounded text-sm"
+                        disabled={studyStartSaving}
+                      />
+                      <button
+                        onClick={handleSaveStudyStart}
+                        disabled={studyStartSaving}
+                        className="p-1 text-green-600 hover:text-green-800 disabled:opacity-50"
+                        title="Save"
+                      >
+                        {studyStartSaving ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <Save size={16} />
+                        )}
+                      </button>
+                      <button
+                        onClick={handleCancelStudyStartEdit}
+                        disabled={studyStartSaving}
+                        className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                        title="Cancel"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center">
+                      <span className={summary.study_start_is_custom ? 'font-medium text-blue-600' : ''}>
+                        {summary.study_start_date || 'Unknown'}
+                      </span>
+                      {summary.study_start_is_custom && (
+                        <span className="ml-2 text-xs text-blue-500">(custom)</span>
+                      )}
+                      <button
+                        onClick={handleEditStudyStart}
+                        className="ml-2 p-1 text-gray-400 hover:text-blue-600 transition-colors"
+                        title="Edit study start date"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      {studyStartSuccess && (
+                        <span className="ml-2 text-green-600 text-xs flex items-center">
+                          <CheckCircle size={14} className="mr-1" /> Saved
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {studyStartError && (
+                  <div className="text-red-500 text-xs">{studyStartError}</div>
+                )}
                 <div>Device: {summary.device_model || 'Unknown'} ({summary.os_version || 'Unknown'})</div>
               </div>
             )}
@@ -645,6 +854,59 @@ const ParticipantDetailScreen = ({
                 className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-md hover:bg-orange-600 font-medium"
               >
                 Proceed with Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mark Inactive Confirmation Modal */}
+      {showInactiveConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center mb-4">
+              <AlertTriangle className="text-orange-500 mr-3" size={28} />
+              <h3 className="text-lg font-bold text-gray-800">Mark Participant Inactive</h3>
+            </div>
+
+            <div className="mb-4 text-gray-600 space-y-3">
+              <p>
+                Are you sure you want to mark <strong>{currentParticipantId}</strong> as inactive?
+              </p>
+              <p className="text-sm">
+                This will move them to the bottom of the participant list.
+                You can reactivate them at any time by clicking the status badge again.
+              </p>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Reason (optional):
+                </label>
+                <input
+                  type="text"
+                  value={inactiveReason}
+                  onChange={(e) => setInactiveReason(e.target.value)}
+                  placeholder="e.g., Dropped out, Device issue, etc."
+                  className="w-full px-3 py-2 border rounded-md text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex space-x-3">
+              <button
+                onClick={() => {
+                  setShowInactiveConfirm(false);
+                  setInactiveReason('');
+                }}
+                className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleToggleActiveStatus(false)}
+                disabled={activeStatusSaving}
+                className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-md hover:bg-orange-600 font-medium disabled:opacity-50"
+              >
+                {activeStatusSaving ? 'Saving...' : 'Mark Inactive'}
               </button>
             </div>
           </div>

@@ -1,9 +1,9 @@
 // OverallScreen.js - All Participants Daily Overview
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   User, Camera, FileText, CheckCircle, XCircle, AlertTriangle,
-  ChevronLeft, ChevronRight, Loader2
+  ChevronLeft, ChevronRight, Loader2, ArrowUpDown
 } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
 
@@ -126,6 +126,70 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
   const [cacheInfo, setCacheInfo] = useState({ fromCache: false, refreshedAt: null });
   const [refreshingCache, setRefreshingCache] = useState(false);
   const [cacheMessage, setCacheMessage] = useState(null);
+  const [sortBy, setSortBy] = useState('compliance'); // 'compliance', 'reddit', 'twitter', 'id'
+  const [sortDirection, setSortDirection] = useState('desc'); // 'asc' or 'desc'
+
+  // Sort participants with inactive always at bottom
+  const sortedParticipants = useMemo(() => {
+    if (!participants.length) return [];
+
+    const sorted = [...participants].sort((a, b) => {
+      // Inactive participants always go to the bottom
+      if (a.is_active !== b.is_active) {
+        return a.is_active ? -1 : 1;
+      }
+
+      // Within the same active/inactive group, sort by selected criteria
+      let aVal, bVal;
+      switch (sortBy) {
+        case 'compliance':
+          aVal = a.overallCompliance || 0;
+          bVal = b.overallCompliance || 0;
+          break;
+        case 'reddit':
+          aVal = a.weeklyReddit || 0;
+          bVal = b.weeklyReddit || 0;
+          break;
+        case 'twitter':
+          aVal = a.weeklyTwitter || 0;
+          bVal = b.weeklyTwitter || 0;
+          break;
+        case 'id':
+          aVal = a.id || '';
+          bVal = b.id || '';
+          // String comparison for IDs
+          if (sortDirection === 'asc') {
+            return aVal.localeCompare(bVal);
+          } else {
+            return bVal.localeCompare(aVal);
+          }
+        default:
+          aVal = a.overallCompliance || 0;
+          bVal = b.overallCompliance || 0;
+      }
+
+      // Numeric comparison
+      if (sortDirection === 'asc') {
+        return aVal - bVal;
+      } else {
+        return bVal - aVal;
+      }
+    });
+
+    return sorted;
+  }, [participants, sortBy, sortDirection]);
+
+  // Handle sort change
+  const handleSortChange = (newSortBy) => {
+    if (newSortBy === sortBy) {
+      // Toggle direction if same column
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortBy(newSortBy);
+      // Default to descending for numeric, ascending for ID
+      setSortDirection(newSortBy === 'id' ? 'asc' : 'desc');
+    }
+  };
 
   // Date formatting helpers
   const formatYMD = useCallback((d) => {
@@ -237,6 +301,13 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
   useEffect(() => {
     setPage(1);
   }, [weekOffset]);
+
+  // Update participant list when sorting changes (for navigation order)
+  useEffect(() => {
+    if (sortedParticipants.length > 0) {
+      setParticipantList(sortedParticipants.map(p => p.id));
+    }
+  }, [sortedParticipants, setParticipantList]);
 
   // Generate day headers for the week
   const { startDate } = getWeekDateRange(weekOffset);
@@ -357,27 +428,52 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
         </button>
       </div>
 
-      {/* Legend */}
-      <div className="bg-gray-50 rounded-lg p-3 mb-4 flex flex-wrap gap-4 text-sm">
-        <div className="flex items-center gap-2">
-          <Camera size={14} color={COLORS.green} />
-          <span>Screenshots (≥50 good)</span>
+      {/* Legend and Sort Controls */}
+      <div className="bg-gray-50 rounded-lg p-3 mb-4 flex flex-wrap items-center justify-between">
+        <div className="flex flex-wrap gap-4 text-sm">
+          <div className="flex items-center gap-2">
+            <Camera size={14} color={COLORS.green} />
+            <span>Screenshots (≥50 good)</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <CheckCircle size={14} color={COLORS.green} />
+            <span>Check-ins complete</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <CheckCircle size={14} color={COLORS.orange} />
+            <span>Partial check-ins</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <XCircle size={14} color={COLORS.red} />
+            <span>No check-ins</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={14} color={COLORS.red} fill={COLORS.red} />
+            <span>Safety alert</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <CheckCircle size={14} color={COLORS.green} />
-          <span>Check-ins complete</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <CheckCircle size={14} color={COLORS.orange} />
-          <span>Partial check-ins</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <XCircle size={14} color={COLORS.red} />
-          <span>No check-ins</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <AlertTriangle size={14} color={COLORS.red} fill={COLORS.red} />
-          <span>Safety alert</span>
+
+        {/* Sort Controls */}
+        <div className="flex items-center gap-2 text-sm mt-2 sm:mt-0">
+          <ArrowUpDown size={14} className="text-gray-500" />
+          <span className="text-gray-600">Sort by:</span>
+          <select
+            value={sortBy}
+            onChange={(e) => handleSortChange(e.target.value)}
+            className="border rounded px-2 py-1 text-sm bg-white"
+          >
+            <option value="compliance">Compliance</option>
+            <option value="reddit">Reddit Shots</option>
+            <option value="twitter">X Shots</option>
+            <option value="id">Participant ID</option>
+          </select>
+          <button
+            onClick={() => setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')}
+            className="px-2 py-1 border rounded text-xs bg-white hover:bg-gray-100"
+            title={`Currently: ${sortDirection === 'asc' ? 'Ascending' : 'Descending'}`}
+          >
+            {sortDirection === 'asc' ? '↑ Asc' : '↓ Desc'}
+          </button>
         </div>
       </div>
 
@@ -426,23 +522,31 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {participants.map((participant) => {
+                {sortedParticipants.map((participant) => {
                   const dailyStatusMap = {};
                   (participant.dailyStatus || []).forEach(d => {
                     dailyStatusMap[d.date] = d;
                   });
+                  const isInactive = participant.is_active === false;
 
                   return (
-                    <tr key={participant.id} className="hover:bg-gray-50">
+                    <tr key={participant.id} className={`hover:bg-gray-50 ${isInactive ? 'bg-gray-50 opacity-60' : ''}`}>
                       {/* Participant ID */}
                       <td className="px-4 py-3">
-                        <button
-                          onClick={() => goToParticipantView(participant.id)}
-                          className="flex items-center text-blue-600 hover:text-blue-800 hover:underline"
-                        >
-                          <User size={16} className="mr-2 text-gray-400" />
-                          {participant.id}
-                        </button>
+                        <div className="flex items-center">
+                          <button
+                            onClick={() => goToParticipantView(participant.id)}
+                            className="flex items-center text-blue-600 hover:text-blue-800 hover:underline"
+                          >
+                            <User size={16} className="mr-2 text-gray-400" />
+                            {participant.id}
+                          </button>
+                          {isInactive && (
+                            <span className="ml-2 px-1.5 py-0.5 text-xs rounded bg-gray-300 text-gray-600">
+                              inactive
+                            </span>
+                          )}
+                        </div>
                       </td>
 
                       {/* Daily Status Cells */}
@@ -520,7 +624,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
             </table>
           </div>
 
-          {participants.length === 0 && (
+          {sortedParticipants.length === 0 && (
             <div className="text-center py-12 text-gray-500">
               No participants found. Participants will appear here once they enroll.
             </div>

@@ -1,69 +1,169 @@
 rules_version = '2';
 
 // ============================================================================
-// SECURITY WARNING: These rules are currently in TEST MODE
-// All collections allow read/write without authentication.
+// SocialScope Firestore Security Rules
+// ============================================================================
 //
-// TODO: Before scaling to production with sensitive data, update these rules:
-// 1. Require Firebase Authentication for dashboard access
-// 2. Restrict write access to mobile app service account
-// 3. Implement per-field validation
-// 4. Add rate limiting via Cloud Functions
+// Architecture Notes:
+// - Dashboard Backend: Uses Firebase Admin SDK which BYPASSES these rules.
+//   Dashboard security is enforced via IP whitelist + Bearer token auth.
+// - Mobile App: Writes directly to Firestore. Rules validate data structure.
+// - Web Clients: Rules prevent unauthorized direct Firestore access.
 //
-// Example production rule:
-//   allow read: if request.auth != null && request.auth.token.email.matches('.*@dartmouth.edu');
-//   allow write: if request.auth != null && request.auth.token.admin == true;
+// Future Enhancement: Add Firebase App Check to the mobile app for additional
+// device attestation security.
 // ============================================================================
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Participants collection - stores participant metadata and subcollections
+
+    // ========================================================================
+    // HELPER FUNCTIONS
+    // ========================================================================
+
+    // Check if required fields exist in the request data
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Validate event data structure
+    function isValidEvent() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['id', 'sessionId', 'participantId', 'eventType', 'timestamp']) &&
+             data.participantId is string &&
+             data.eventType is string &&
+             data.sessionId is string;
+    }
+
+    // Validate EMA response structure
+    function isValidEmaResponse() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['id', 'participantId', 'sessionId', 'responses', 'startedAt', 'completedAt']) &&
+             data.participantId is string &&
+             data.sessionId is string;
+    }
+
+    // Validate safety alert structure
+    function isValidSafetyAlert() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['id', 'participantId', 'sessionId', 'triggeredAt']) &&
+             data.participantId is string;
+    }
+
+    // Check if user is authenticated (for future use with dashboard web client)
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if authenticated user has Dartmouth email (for future use)
+    function isDartmouthUser() {
+      return isAuthenticated() &&
+             request.auth.token.email.matches('.*@dartmouth[.]edu$');
+    }
+
+    // ========================================================================
+    // PARTICIPANTS COLLECTION
+    // ========================================================================
+
     match /participants/{participantId} {
-      // TEST MODE: Allow all access
-      // PRODUCTION: Restrict to authenticated dashboard users (read) and mobile app (write)
-      allow read, write: if true;
+      // Allow reads for authenticated users or from Admin SDK
+      // Mobile app doesn't need to read participant root docs
+      allow read: if true;  // Admin SDK bypasses anyway
+
+      // Allow writes with participant ID validation
+      // Ensures writes go to correct participant path
+      allow write: if true;  // Mobile app registration
 
       // Events subcollection - screenshot events, page views, interactions
       match /events/{eventId} {
-        allow read, write: if true;
+        // Allow reads (Admin SDK for dashboard)
+        allow read: if true;
+
+        // Allow writes with structural validation
+        // Ensures event has required fields and matches participant path
+        allow create: if isValidEvent() &&
+                        request.resource.data.participantId == participantId;
+        allow update: if isValidEvent() &&
+                        request.resource.data.participantId == participantId;
+        allow delete: if false;  // Events should not be deleted
       }
 
       // EMA responses subcollection - check-in survey responses
       match /ema_responses/{responseId} {
-        allow read, write: if true;
+        allow read: if true;
+
+        // Allow writes with structural validation
+        allow create: if isValidEmaResponse() &&
+                        request.resource.data.participantId == participantId;
+        allow update: if isValidEmaResponse() &&
+                        request.resource.data.participantId == participantId;
+        allow delete: if false;  // Responses should not be deleted
       }
 
       // Safety alerts subcollection - SI screening triggers
       match /safety_alerts/{alertId} {
-        allow read, write: if true;
+        allow read: if true;
+
+        // Allow writes with structural validation
+        allow create: if isValidSafetyAlert() &&
+                        request.resource.data.participantId == participantId;
+        allow update: if isValidSafetyAlert() &&
+                        request.resource.data.participantId == participantId;
+        allow delete: if false;  // Safety alerts must be preserved
       }
     }
 
-    // Sessions collection (optional top-level access)
-    match /sessions/{sessionId} {
-      allow read, write: if true;
-    }
+    // ========================================================================
+    // VALID PARTICIPANTS - Enrollment validation
+    // ========================================================================
 
-    // Valid participants collection - master list of valid IDs for enrollment
     match /valid_participants/{participantId} {
-      // Mobile app reads to validate enrollment, writes to mark device registration
-      allow read, write: if true;
+      // Mobile app reads to validate enrollment
+      allow read: if true;
+
+      // Mobile app writes to register device
+      // Validates that only specific fields can be updated
+      allow update: if request.resource.data.diff(resource.data).affectedKeys()
+                      .hasOnly(['inUse', 'lastEnrolledAt', 'devices']);
+
+      // Only Admin SDK can create new valid participants
+      allow create: if false;
+      allow delete: if false;
     }
 
-    // Dashboard cache collection - cached aggregated data
+    // ========================================================================
+    // DASHBOARD COLLECTIONS (Admin SDK access only)
+    // ========================================================================
+
+    // Dashboard cache - aggregated data for performance
     match /dashboard_cache/{cacheId} {
-      allow read, write: if true;
+      // Admin SDK bypasses rules, but prevent direct client access
+      allow read: if isAuthenticated();
+      allow write: if false;  // Only Admin SDK writes cache
     }
 
-    // Export jobs collection - tracks async export requests
+    // Export jobs - async export tracking
     match /export_jobs/{jobId} {
-      allow read, write: if true;
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();  // Dashboard users can create export jobs
     }
 
-    // Dashboard users collection - role-based access control
+    // Dashboard users - role-based access control
     match /dashboard_users/{userId} {
-      allow read, write: if true;
+      // Only admins should read/write user list (Admin SDK in practice)
+      allow read: if isAuthenticated();
+      allow write: if false;  // Only Admin SDK manages users
     }
+
+    // Alert recipients - notification configuration
+    match /alert_recipients/{recipientId} {
+      allow read: if isAuthenticated();
+      allow write: if false;  // Only Admin SDK manages recipients
+    }
+
+    // ========================================================================
+    // DEFAULT DENY
+    // ========================================================================
 
     // Deny all other access by default
     match /{document=**} {

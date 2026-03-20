@@ -18,6 +18,10 @@ const API_BASE_URL = isLocal
 
 export { API_BASE_URL, getIdToken };
 
+// Global callback for network blocked detection — set by SocialScope component
+let onNetworkBlocked = null;
+export const setNetworkBlockedHandler = (handler) => { onNetworkBlocked = handler; };
+
 // Authenticated fetch helper - includes auth token in requests
 export const authFetch = async (url, options = {}) => {
   const token = await getIdToken();
@@ -27,12 +31,33 @@ export const authFetch = async (url, options = {}) => {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  return fetch(url, { ...options, headers });
+
+  let response;
+  try {
+    response = await fetch(url, { ...options, headers });
+  } catch (fetchErr) {
+    // Network-level failure (e.g. CORS block from 403 preflight)
+    if (onNetworkBlocked) onNetworkBlocked();
+    throw fetchErr;
+  }
+
+  // Detect IP whitelist block from backend
+  if (response.status === 403) {
+    const cloned = response.clone();
+    const data = await cloned.json().catch(() => ({}));
+    if (data.error === 'Access denied' || data.message?.includes('Dartmouth')) {
+      if (onNetworkBlocked) onNetworkBlocked();
+      throw new Error('Dartmouth network required');
+    }
+  }
+
+  return response;
 };
 
 const SocialScope = () => {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [networkBlocked, setNetworkBlocked] = useState(false);
   const [activeTab, setActiveTab] = useState('overall');
   const [selectedParticipant, setSelectedParticipant] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -45,6 +70,12 @@ const SocialScope = () => {
       setAuthLoading(false);
     });
     return () => unsubscribe();
+  }, []);
+
+  // Register global network-blocked handler
+  useEffect(() => {
+    setNetworkBlockedHandler(() => setNetworkBlocked(true));
+    return () => setNetworkBlockedHandler(null);
   }, []);
 
   // Handle logout
@@ -62,6 +93,46 @@ const SocialScope = () => {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
         <div className="text-gray-600">Loading...</div>
+      </div>
+    );
+  }
+
+  // Show network blocked screen
+  if (networkBlocked) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
+        <div className="bg-white rounded-lg shadow-lg p-8 max-w-md w-full text-center">
+          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-4">
+            SocialScope
+          </h1>
+          <div className="bg-amber-50 border border-amber-200 rounded-md p-4 mb-6">
+            <div className="flex justify-center mb-3">
+              <AlertTriangle size={32} className="text-amber-500" />
+            </div>
+            <p className="text-amber-800 font-medium text-lg">Dartmouth Network Required</p>
+            <p className="text-amber-700 text-sm mt-2">
+              The SocialScope dashboard is only accessible from the Dartmouth network.
+              Please connect to <strong>Dartmouth WiFi</strong> or the <strong>Dartmouth VPN</strong> and try again.
+            </p>
+          </div>
+          <div className="space-y-3">
+            <button
+              onClick={() => { setNetworkBlocked(false); window.location.reload(); }}
+              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-medium py-3 rounded-md hover:from-blue-700 hover:to-purple-700 transition-all"
+            >
+              Retry Connection
+            </button>
+            <button
+              onClick={handleLogout}
+              className="w-full text-gray-500 hover:text-gray-700 text-sm font-medium py-2"
+            >
+              Sign Out
+            </button>
+          </div>
+          <div className="mt-6 pt-4 border-t text-sm text-gray-500">
+            <p>Dartmouth College</p>
+          </div>
+        </div>
       </div>
     );
   }

@@ -68,21 +68,30 @@ class LikertOption {
 class SafetyAlert {
   final List<String> triggerQuestions;
   final int threshold;
-  final String questionText;
+  final List<String> confirmationPrompts;
   final List<CrisisResource> resources;
 
   SafetyAlert({
     required this.triggerQuestions,
     required this.threshold,
-    required this.questionText,
+    required this.confirmationPrompts,
     required this.resources,
   });
+
+  /// Get the confirmation prompt for the nth confirmation (0-indexed).
+  /// Falls back to the last prompt if index exceeds the list.
+  String getConfirmationPrompt(int index) {
+    if (index < confirmationPrompts.length) {
+      return confirmationPrompts[index];
+    }
+    return confirmationPrompts.last;
+  }
 
   factory SafetyAlert.fromJson(Map<String, dynamic> json) {
     return SafetyAlert(
       triggerQuestions: List<String>.from(json['trigger_questions']),
       threshold: json['threshold'],
-      questionText: json['question_text'],
+      confirmationPrompts: List<String>.from(json['confirmation_prompts']),
       resources: (json['crisis_resources'] as List<dynamic>)
           .map((r) => CrisisResource.fromJson(r))
           .toList(),

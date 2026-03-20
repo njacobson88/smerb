@@ -95,7 +95,8 @@
           "min": 0,
           "max": 100,
           "min_label": "Not at all",
-          "max_label": "Completely"
+          "max_label": "Completely",
+          "safety_trigger": {"threshold": 30, "inverted": true}
         },
         {
           "id": "thoughts_past_4hrs",
@@ -130,15 +131,21 @@
           "min": 0,
           "max": 100,
           "min_label": "None",
-          "max_label": "Extreme"
+          "max_label": "Extreme",
+          "safety_trigger": {"threshold": 30}
         }
       ]
     }
   ],
   "safety_alert": {
-    "trigger_questions": ["desire_intensity", "intention_strength"],
+    "trigger_questions": ["desire_intensity", "intention_strength", "thoughts_intent", "ability_safe"],
     "threshold": 30,
-    "question_text": "It seems like you are in a lot of distress right now. Are you in immediate danger of harming yourself?",
+    "confirmation_prompts": [
+      "Based on your response, we want to check in with you. Are you currently in danger of harming yourself?",
+      "We appreciate you answering honestly. Given what you've shared, we want to ask once more — are you in immediate danger of harming yourself right now?",
+      "Thank you for continuing to share. Your safety is our priority. Are you currently at risk of harming yourself?",
+      "We're asking again because your responses indicate you may be in significant distress. Are you in immediate danger right now?"
+    ],
     "crisis_resources": [
       {"name": "988 Suicide & Crisis Lifeline", "action": "call", "value": "988"},
       {"name": "Crisis Text Line", "action": "text", "value": "741741", "message": "HELLO"}

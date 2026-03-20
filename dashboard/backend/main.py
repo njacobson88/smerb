@@ -1,5 +1,5 @@
 # SocialScope Dashboard Backend
-# FastAPI application with Dartmouth IP whitelisting
+# FastAPI application with Dartmouth IP whitelisting and rate limiting
 
 import os
 import json
@@ -21,6 +21,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -46,6 +49,28 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+# ============================================================================
+# Startup Validation
+# ============================================================================
+
+# Warn about missing optional configuration
+if not config.SCHEDULER_SECRET:
+    logger.warning("SCHEDULER_SECRET not set - scheduler endpoint will reject all requests")
+
+if config.DEV_MODE:
+    logger.warning("DEV_MODE is enabled - IP whitelist is BYPASSED")
+
+# Log configuration on startup
+logger.info(f"Firebase Project: {config.FIREBASE_PROJECT_ID}")
+logger.info(f"CORS Origins: {len(config.get_cors_origins())} origins configured")
+
+# ============================================================================
+# Rate Limiting Configuration
+# ============================================================================
+
+# Create rate limiter - uses client IP address for identification
+limiter = Limiter(key_func=get_remote_address)
+
 # FastAPI app
 app = FastAPI(
     title="SocialScope Dashboard API",
@@ -53,21 +78,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration
-origins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3000",
-    # Production Firebase Hosting URLs
-    "https://socialscope-dashboard.web.app",
-    "https://socialscope-dashboard.firebaseapp.com",
-    "https://r01-redditx-suicide.web.app",
-    "https://r01-redditx-suicide.firebaseapp.com",
-]
+# Add rate limiter to app state and register exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# CORS configuration - loaded from config (can be overridden via CORS_ORIGINS env var)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=config.get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -97,8 +115,9 @@ def is_ip_allowed(client_ip: str) -> bool:
 @app.middleware("http")
 async def dartmouth_ip_whitelist(request: Request, call_next):
     """Middleware to restrict access to Dartmouth IP ranges only."""
-    # Allow scheduler endpoint to bypass IP check (uses secret authentication instead)
-    if request.url.path == "/api/scheduler/refresh-cache":
+    # Allow scheduler and REDCap endpoints to bypass IP check
+    # (these use their own authentication mechanisms)
+    if request.url.path in ("/api/scheduler/refresh-cache", "/api/redcap/data-entry-trigger"):
         return await call_next(request)
 
     # Get client IP (handle proxies)
@@ -630,6 +649,14 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                         "triggerReason": alert.get("triggerReason"),
                         "responses": merged_responses,
                         "notificationSent": alert.get("notificationSent", False),
+                        # New confirmation-based alert fields
+                        "handled": alert.get("handled", False),
+                        "confirmedDanger": alert.get("confirmedDanger"),
+                        "confirmationNumber": alert.get("confirmationNumber"),
+                        "triggerQuestion": alert.get("triggerQuestion"),
+                        # Notification results
+                        "slackResult": alert.get("slackResult"),
+                        "smsResults": alert.get("smsResults"),
                     })
                 except Exception as alert_err:
                     logger.warning(f"Error processing alert {alert_doc.id} for {pid}: {alert_err}")
@@ -682,7 +709,7 @@ async def refresh_safety_alert_cache():
             break
         except asyncio.TimeoutError:
             # Normal timeout, continue the loop
-            logger.debug(f"Silently handled exception: {e}")
+            pass
 
     logger.info("[SafetyAlerts] Background refresh loop stopped")
 
@@ -825,7 +852,8 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
 
 
 @app.post("/api/admin/refresh-cache")
-def refresh_dashboard_cache(user: dict = Depends(verify_admin_token)):
+@limiter.limit("5/minute")
+def refresh_dashboard_cache(request: Request, user: dict = Depends(verify_admin_token)):
     """
     Refresh the dashboard cache with pre-computed participant stats.
     This endpoint should be called by Cloud Scheduler every hour.
@@ -911,7 +939,8 @@ def refresh_dashboard_cache(user: dict = Depends(verify_admin_token)):
 
 
 @app.get("/api/cache/status")
-def get_cache_status(user: dict = Depends(verify_firebase_token)):
+@limiter.limit("60/minute")
+def get_cache_status(request: Request, user: dict = Depends(verify_firebase_token)):
     """Get the current cache status and last refresh time."""
     try:
         cache_ref = db.collection(DASHBOARD_CACHE_COLLECTION).document("overall_status")
@@ -1034,7 +1063,8 @@ def scheduler_refresh_cache(secret: str = Query(..., description="Scheduler secr
 # ============================================================================
 
 @app.get("/api/participants")
-def get_participants(user: dict = Depends(verify_firebase_token)):
+@limiter.limit("60/minute")
+def get_participants(request: Request, user: dict = Depends(verify_firebase_token)):
     """Get list of all enrolled participants from both collections."""
     try:
         # Use the helper function with enrolled_only filter
@@ -1077,7 +1107,9 @@ def get_participants(user: dict = Depends(verify_firebase_token)):
 
 
 @app.get("/api/overall_status")
+@limiter.limit("30/minute")
 def get_overall_status(
+    request: Request,
     start_date: str = Query(..., description="Start date YYYY-MM-DD"),
     end_date: str = Query(..., description="End date YYYY-MM-DD"),
     page: int = Query(1, ge=1, description="Page number"),
@@ -1121,9 +1153,40 @@ def get_overall_status(
                 total_twitter = sum(d.get("twitter", 0) for d in filtered_daily)
                 days_count = max(1, len(filtered_daily))
 
+                # Calculate if participant is active
+                # First check for manual override in participant doc
+                pid = p.get("id")
+                manual_status = None
+                try:
+                    # Check valid_participants first, then participants
+                    p_doc = db.collection("valid_participants").document(pid).get()
+                    if not p_doc.exists:
+                        p_doc = db.collection("participants").document(pid).get()
+                    if p_doc.exists:
+                        p_data = p_doc.to_dict()
+                        manual_status = p_data.get("manualActiveStatus")
+                except Exception:
+                    pass  # Ignore errors, fall back to auto-calculation
+
+                if manual_status is not None:
+                    is_active = manual_status
+                else:
+                    # Auto-calculate based on 90-day window
+                    study_start_str = p.get("study_start_date")
+                    if study_start_str:
+                        try:
+                            p_study_start = datetime.strptime(study_start_str, "%Y-%m-%d")
+                            days_since_start = (datetime.now() - p_study_start).days
+                            is_active = days_since_start <= 90
+                        except (ValueError, TypeError):
+                            is_active = True  # Default to active if can't parse
+                    else:
+                        is_active = True  # Default to active if no start date
+
                 results.append({
-                    "id": p.get("id"),
+                    "id": pid,
                     "study_start_date": p.get("study_start_date"),
+                    "is_active": is_active,
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
                     "weeklyCheckins": total_checkins,
@@ -1198,9 +1261,23 @@ def get_overall_status(
                 daily_list.append({"date": date_str, **day_data})
                 current += timedelta(days=1)
 
+            # Calculate if participant is active
+            # First check for manual override
+            p_data = p_info.get("data", {})
+            manual_status = p_data.get("manualActiveStatus") if p_data else None
+
+            if manual_status is not None:
+                is_active = manual_status
+            elif study_start:
+                days_since_start = (datetime.now() - study_start).days
+                is_active = days_since_start <= 90
+            else:
+                is_active = True  # Default to active if no start date
+
             results.append({
                 "id": pid,
                 "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
+                "is_active": is_active,
                 "dailyStatus": daily_list,
                 "weeklyScreenshots": total_screenshots,
                 "weeklyCheckins": total_checkins,
@@ -1229,7 +1306,8 @@ def get_overall_status(
 
 
 @app.get("/api/safety-alerts")
-async def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
+@limiter.limit("60/minute")
+async def get_safety_alerts(request: Request, user: dict = Depends(verify_firebase_token)):
     """
     Get safety alerts from the in-memory cache.
     Cache is refreshed every 2 minutes by a background task.
@@ -1239,11 +1317,34 @@ async def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
         payload = SAFETY_ALERT_CACHE.copy()
 
     if payload["status"] == "never_run":
-        # Cache not yet initialized - return 503
-        raise HTTPException(
-            status_code=503,
-            detail="Safety alert cache not ready. Please wait a moment and try again."
-        )
+        # Cache not yet initialized — fetch live instead of returning 503
+        try:
+            loop = asyncio.get_event_loop()
+            alerts = await loop.run_in_executor(None, fetch_live_safety_alerts)
+
+            async with _safety_alert_lock:
+                SAFETY_ALERT_CACHE.update({
+                    "alerts": alerts,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "status": "ok",
+                    "error": None,
+                })
+
+            logger.info(f"[SafetyAlerts] Initial fetch on first request: {len(alerts)} alerts")
+            return {
+                "alerts": alerts,
+                "fromCache": False,
+                "refreshedAt": SAFETY_ALERT_CACHE["updated_at"],
+                "status": "ok",
+                "error": None,
+                "refreshIntervalSeconds": SAFETY_ALERT_REFRESH_SECONDS,
+            }
+        except Exception as e:
+            logger.error(f"[SafetyAlerts] Initial fetch failed: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch safety alerts: {str(e)}"
+            )
 
     return {
         "alerts": payload["alerts"],
@@ -1256,7 +1357,8 @@ async def get_safety_alerts(user: dict = Depends(verify_firebase_token)):
 
 
 @app.post("/api/safety-alerts/refresh")
-async def force_refresh_safety_alerts(user: dict = Depends(verify_admin_token)):
+@limiter.limit("5/minute")
+async def force_refresh_safety_alerts(request: Request, user: dict = Depends(verify_admin_token)):
     """
     Force an immediate refresh of the safety alerts cache.
     Admin only. Use when you need to see alerts immediately without waiting
@@ -1289,7 +1391,8 @@ async def force_refresh_safety_alerts(user: dict = Depends(verify_admin_token)):
 
 
 @app.get("/api/participant/{participant_id}/summary")
-def get_participant_summary(participant_id: str, user: dict = Depends(verify_firebase_token)):
+@limiter.limit("30/minute")
+def get_participant_summary(request: Request, participant_id: str, user: dict = Depends(verify_firebase_token)):
     """Get detailed summary for a single participant."""
     try:
         # Get participant info from either collection
@@ -1310,15 +1413,28 @@ def get_participant_summary(participant_id: str, user: dict = Depends(verify_fir
                     raise HTTPException(status_code=404, detail="Participant not found")
             participant_data = {}
 
+        # Check for manually set study start date first, then fall back to enrollment date
+        custom_start = participant_data.get("studyStartDate")
         enrolled_at = participant_data.get("enrolledAt") or participant_data.get("lastEnrolledAt")
 
-        if enrolled_at:
+        if custom_start:
+            # Custom study start date was set by researcher
+            if hasattr(custom_start, 'timestamp'):
+                study_start = datetime.fromtimestamp(custom_start.timestamp())
+            elif isinstance(custom_start, str):
+                study_start = datetime.strptime(custom_start, "%Y-%m-%d")
+            else:
+                study_start = custom_start
+            study_start_is_custom = True
+        elif enrolled_at:
             if hasattr(enrolled_at, 'timestamp'):
                 study_start = datetime.fromtimestamp(enrolled_at.timestamp())
             else:
                 study_start = enrolled_at
+            study_start_is_custom = False
         else:
             study_start = datetime.now() - timedelta(days=30)
+            study_start_is_custom = False
 
         # Get all events for this participant - use 'timestamp' field
         events_ref = participant_ref.collection("events")
@@ -1429,9 +1545,32 @@ def get_participant_summary(participant_id: str, user: dict = Depends(verify_fir
                 "crisis_indicated": data.get("crisis_indicated", False),
             })
 
+        # Calculate if participant is active
+        # First check for manual override, then fall back to 90-day calculation
+        days_since_start = (datetime.now() - study_start).days
+        study_day = days_since_start + 1  # Day 1 is the start date
+
+        manual_status = participant_data.get("manualActiveStatus")
+        if manual_status is not None:
+            # Manual override exists
+            is_active = manual_status
+            is_active_manual = True
+            inactive_reason = participant_data.get("manualActiveStatusReason")
+        else:
+            # Auto-calculate based on 90-day window
+            is_active = days_since_start <= 90
+            is_active_manual = False
+            inactive_reason = None
+
         return {
             "participant_id": participant_id,
             "study_start_date": study_start.strftime("%Y-%m-%d"),
+            "study_start_is_custom": study_start_is_custom,
+            "is_active": is_active,
+            "is_active_manual": is_active_manual,
+            "inactive_reason": inactive_reason,
+            "study_day": min(study_day, 90) if is_active else 90,
+            "days_remaining": max(0, 90 - days_since_start) if is_active else 0,
             "device_model": participant_data.get("deviceModel"),
             "os_version": participant_data.get("osVersion"),
             "daily_summary": summary_list
@@ -1444,8 +1583,145 @@ def get_participant_summary(participant_id: str, user: dict = Depends(verify_fir
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class UpdateStudyStartRequest(BaseModel):
+    study_start_date: str  # Format: YYYY-MM-DD
+
+
+@app.put("/api/participant/{participant_id}/study-start-date")
+@limiter.limit("30/minute")
+def update_study_start_date(
+    request: Request,
+    participant_id: str,
+    body: UpdateStudyStartRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Update the study start date for a participant.
+    This allows researchers to adjust when the 90-day study period begins,
+    for example if a participant had a partial onboarding.
+    """
+    try:
+        # Validate date format
+        try:
+            new_start_date = datetime.strptime(body.study_start_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+        # Don't allow future dates
+        if new_start_date > datetime.now():
+            raise HTTPException(status_code=400, detail="Study start date cannot be in the future.")
+
+        # Get participant reference - check both collections
+        participant_ref = None
+        valid_ref = db.collection("valid_participants").document(participant_id)
+        participants_ref = db.collection("participants").document(participant_id)
+
+        # Check which collection has the participant
+        if valid_ref.get().exists:
+            participant_ref = valid_ref
+        elif participants_ref.get().exists:
+            participant_ref = participants_ref
+        else:
+            # Check if participant has any data (events, etc.)
+            events_check = list(participants_ref.collection("events").limit(1).stream())
+            if events_check:
+                # Participant exists via events, create/update in participants collection
+                participant_ref = participants_ref
+            else:
+                raise HTTPException(status_code=404, detail="Participant not found")
+
+        # Update the study start date
+        participant_ref.set({
+            "studyStartDate": body.study_start_date,
+            "studyStartDateUpdatedAt": datetime.utcnow(),
+            "studyStartDateUpdatedBy": user.get("email"),
+        }, merge=True)
+
+        logger.info(f"Study start date updated for {participant_id} to {body.study_start_date} by {user.get('email')}")
+
+        return {
+            "participant_id": participant_id,
+            "study_start_date": body.study_start_date,
+            "updated_by": user.get("email"),
+            "message": "Study start date updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update study start date: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class UpdateActiveStatusRequest(BaseModel):
+    is_active: bool
+    reason: Optional[str] = None  # Optional reason for the change (e.g., "dropped out", "device issue")
+
+
+@app.put("/api/participant/{participant_id}/active-status")
+@limiter.limit("30/minute")
+def update_active_status(
+    request: Request,
+    participant_id: str,
+    body: UpdateActiveStatusRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Manually set a participant's active/inactive status.
+    This overrides the automatic 90-day calculation.
+    Use this when a participant drops out early or needs to be reactivated.
+    """
+    try:
+        # Get participant reference - check both collections
+        participant_ref = None
+        valid_ref = db.collection("valid_participants").document(participant_id)
+        participants_ref = db.collection("participants").document(participant_id)
+
+        # Check which collection has the participant
+        if valid_ref.get().exists:
+            participant_ref = valid_ref
+        elif participants_ref.get().exists:
+            participant_ref = participants_ref
+        else:
+            # Check if participant has any data (events, etc.)
+            events_check = list(participants_ref.collection("events").limit(1).stream())
+            if events_check:
+                participant_ref = participants_ref
+            else:
+                raise HTTPException(status_code=404, detail="Participant not found")
+
+        # Update the active status
+        update_data = {
+            "manualActiveStatus": body.is_active,
+            "manualActiveStatusUpdatedAt": datetime.utcnow(),
+            "manualActiveStatusUpdatedBy": user.get("email"),
+        }
+        if body.reason:
+            update_data["manualActiveStatusReason"] = body.reason
+
+        participant_ref.set(update_data, merge=True)
+
+        status_str = "active" if body.is_active else "inactive"
+        logger.info(f"Active status for {participant_id} set to {status_str} by {user.get('email')}")
+
+        return {
+            "participant_id": participant_id,
+            "is_active": body.is_active,
+            "reason": body.reason,
+            "updated_by": user.get("email"),
+            "message": f"Participant marked as {status_str}"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update active status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/participant/{participant_id}/day/{date}")
-def get_day_detail(participant_id: str, date: str, user: dict = Depends(verify_firebase_token)):
+@limiter.limit("30/minute")
+def get_day_detail(request: Request, participant_id: str, date: str, user: dict = Depends(verify_firebase_token)):
     """Get detailed data for a specific participant on a specific day."""
     try:
         target_date = datetime.strptime(date, "%Y-%m-%d")
@@ -2122,7 +2398,9 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
 
 
 @app.get("/api/export/estimate")
+@limiter.limit("30/minute")
 def estimate_export(
+    request: Request,
     participant_id: str = Query(...),
     export_level: int = Query(1, ge=1, le=3, description="1=Meta+EMA, 2=+OCR/Events, 3=+Screenshots"),
     start_date: Optional[str] = Query(None),
@@ -2222,8 +2500,10 @@ class AsyncExportRequest(BaseModel):
 
 
 @app.post("/api/export/async")
+@limiter.limit("10/minute")
 def start_async_export(
-    request: AsyncExportRequest,
+    request: Request,
+    body: AsyncExportRequest,
     user: dict = Depends(verify_firebase_token),
 ):
     """
@@ -2232,8 +2512,8 @@ def start_async_export(
     """
     try:
         # Validate participant exists
-        participant_data = get_participant_data(request.participant_id)
-        participant_ref = get_participant_ref(request.participant_id)
+        participant_data = get_participant_data(body.participant_id)
+        participant_ref = get_participant_ref(body.participant_id)
 
         if not participant_data:
             events_check = list(participant_ref.collection("events").limit(1).stream())
@@ -2244,14 +2524,14 @@ def start_async_export(
         job_id = uuid.uuid4().hex
         job_ref = db.collection(EXPORT_JOBS_COLLECTION).document(job_id)
 
-        user_email = request.notify_email or user.get("email")
+        user_email = body.notify_email or user.get("email")
 
         job_ref.set({
             "jobId": job_id,
-            "participantId": request.participant_id,
-            "exportLevel": request.export_level,
-            "startDate": request.start_date,
-            "endDate": request.end_date,
+            "participantId": body.participant_id,
+            "exportLevel": body.export_level,
+            "startDate": body.start_date,
+            "endDate": body.end_date,
             "status": "pending",
             "createdAt": datetime.utcnow(),
             "createdBy": user.get("email"),
@@ -2261,8 +2541,8 @@ def start_async_export(
         # Start background thread
         thread = threading.Thread(
             target=run_background_export,
-            args=(job_id, request.participant_id, request.export_level,
-                  request.start_date, request.end_date, user_email),
+            args=(job_id, body.participant_id, body.export_level,
+                  body.start_date, body.end_date, user_email),
             daemon=True
         )
         thread.start()
@@ -2282,7 +2562,8 @@ def start_async_export(
 
 
 @app.get("/api/export/jobs")
-def get_user_export_jobs(user: dict = Depends(verify_firebase_token)):
+@limiter.limit("60/minute")
+def get_user_export_jobs(request: Request, user: dict = Depends(verify_firebase_token)):
     """Get all export jobs for the current user."""
     try:
         user_email = user.get("email")
@@ -2325,7 +2606,9 @@ def get_user_export_jobs(user: dict = Depends(verify_firebase_token)):
 
 
 @app.get("/api/export/jobs/{job_id}")
+@limiter.limit("120/minute")
 def get_export_job_status(
+    request: Request,
     job_id: str,
     user: dict = Depends(verify_firebase_token),
 ):
@@ -2354,7 +2637,9 @@ def get_export_job_status(
 
 
 @app.delete("/api/export/jobs/{job_id}")
+@limiter.limit("30/minute")
 def cancel_export_job(
+    request: Request,
     job_id: str,
     user: dict = Depends(verify_firebase_token),
 ):
@@ -2394,7 +2679,9 @@ def cancel_export_job(
 
 
 @app.get("/api/export")
+@limiter.limit("5/minute")
 def export_participant_data(
+    request: Request,
     participant_id: str = Query(...),
     export_level: int = Query(1, ge=1, le=3, description="1=Meta+EMA, 2=+Events/OCR, 3=+Screenshots"),
     start_date: Optional[str] = Query(None),
@@ -2588,7 +2875,8 @@ def export_participant_data(
 
 
 @app.get("/api/exports/{export_id}")
-def download_export(export_id: str):
+@limiter.limit("30/minute")
+def download_export(request: Request, export_id: str):
     """Download an export file.
 
     First tries local file, then checks EXPORT_INDEX for a stored signed URL,
@@ -2640,7 +2928,8 @@ class UpdateUserRequest(BaseModel):
 
 
 @app.get("/api/admin/users")
-def get_all_users(user: dict = Depends(verify_admin_token)):
+@limiter.limit("30/minute")
+def get_all_users(request: Request, user: dict = Depends(verify_admin_token)):
     """Get list of all authorized dashboard users (admin only)."""
     try:
         users_ref = db.collection(DASHBOARD_USERS_COLLECTION)
@@ -2662,11 +2951,12 @@ def get_all_users(user: dict = Depends(verify_admin_token)):
 
 
 @app.post("/api/admin/users")
-def add_user(request: AddUserRequest, user: dict = Depends(verify_admin_token)):
+@limiter.limit("20/minute")
+def add_user(request: Request, body: AddUserRequest, user: dict = Depends(verify_admin_token)):
     """Add a new authorized user (admin only)."""
     try:
-        email = request.email.lower().strip()
-        role = request.role.lower()
+        email = body.email.lower().strip()
+        role = body.role.lower()
 
         if role not in ("user", "admin"):
             raise HTTPException(status_code=400, detail="Role must be 'user' or 'admin'")
@@ -2694,11 +2984,12 @@ def add_user(request: AddUserRequest, user: dict = Depends(verify_admin_token)):
 
 
 @app.put("/api/admin/users/{email}")
-def update_user_role(email: str, request: UpdateUserRequest, user: dict = Depends(verify_admin_token)):
+@limiter.limit("20/minute")
+def update_user_role(request: Request, email: str, body: UpdateUserRequest, user: dict = Depends(verify_admin_token)):
     """Update a user's role (admin only)."""
     try:
         email = email.lower().strip()
-        role = request.role.lower()
+        role = body.role.lower()
 
         if role not in ("user", "admin"):
             raise HTTPException(status_code=400, detail="Role must be 'user' or 'admin'")
@@ -2729,7 +3020,8 @@ def update_user_role(email: str, request: UpdateUserRequest, user: dict = Depend
 
 
 @app.delete("/api/admin/users/{email}")
-def remove_user(email: str, user: dict = Depends(verify_admin_token)):
+@limiter.limit("20/minute")
+def remove_user(request: Request, email: str, user: dict = Depends(verify_admin_token)):
     """Remove a user (admin only)."""
     try:
         email = email.lower().strip()
@@ -2768,7 +3060,8 @@ class AddRecipientRequest(BaseModel):
 
 
 @app.get("/api/admin/alert-recipients")
-def get_alert_recipients(user: dict = Depends(verify_admin_token)):
+@limiter.limit("30/minute")
+def get_alert_recipients(request: Request, user: dict = Depends(verify_admin_token)):
     """Get list of safety alert SMS recipients (admin only)."""
     try:
         recipients_ref = db.collection(ALERT_RECIPIENTS_COLLECTION)
@@ -2790,11 +3083,12 @@ def get_alert_recipients(user: dict = Depends(verify_admin_token)):
 
 
 @app.post("/api/admin/alert-recipients")
-def add_alert_recipient(request: AddRecipientRequest, user: dict = Depends(verify_admin_token)):
+@limiter.limit("20/minute")
+def add_alert_recipient(request: Request, body: AddRecipientRequest, user: dict = Depends(verify_admin_token)):
     """Add a new safety alert SMS recipient (admin only)."""
     try:
         # Clean phone number (keep only digits)
-        phone = ''.join(filter(str.isdigit, request.phone))
+        phone = ''.join(filter(str.isdigit, body.phone))
 
         if len(phone) != 10:
             raise HTTPException(status_code=400, detail="Phone must be a 10-digit US number")
@@ -2807,7 +3101,7 @@ def add_alert_recipient(request: AddRecipientRequest, user: dict = Depends(verif
         # Add recipient
         recipient_ref.set({
             "phone": phone,
-            "name": request.name.strip() if request.name else None,
+            "name": body.name.strip() if body.name else None,
             "addedAt": datetime.utcnow(),
             "addedBy": user.get("email"),
         })
@@ -2822,7 +3116,8 @@ def add_alert_recipient(request: AddRecipientRequest, user: dict = Depends(verif
 
 
 @app.delete("/api/admin/alert-recipients/{phone}")
-def remove_alert_recipient(phone: str, user: dict = Depends(verify_admin_token)):
+@limiter.limit("20/minute")
+def remove_alert_recipient(request: Request, phone: str, user: dict = Depends(verify_admin_token)):
     """Remove a safety alert SMS recipient (admin only)."""
     try:
         # Clean phone number
@@ -2848,7 +3143,8 @@ def remove_alert_recipient(phone: str, user: dict = Depends(verify_admin_token))
 # ============================================================================
 
 @app.post("/api/admin/init")
-def initialize_admin():
+@limiter.limit("5/minute")
+def initialize_admin(request: Request):
     """
     Initialize the first admin user. This endpoint only works when no users exist.
     Used for initial setup only.
@@ -2882,6 +3178,250 @@ def initialize_admin():
         raise
     except Exception as e:
         logger.error(f"Failed to initialize admin: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# REDCap Integration - Automated Participant ID Generation
+# ============================================================================
+
+import random
+import requests as http_requests
+
+REDCAP_MAPPINGS_COLLECTION = "redcap_mappings"
+VALID_PARTICIPANTS_COLLECTION = "valid_participants"
+
+
+def generate_unique_9digit_id() -> str:
+    """Generate a random 9-digit ID that doesn't already exist in Firestore."""
+    max_attempts = 50
+    for _ in range(max_attempts):
+        candidate = str(random.randint(100_000_000, 999_999_999))
+        doc = db.collection(VALID_PARTICIPANTS_COLLECTION).document(candidate).get()
+        if not doc.exists:
+            return candidate
+    raise Exception("Failed to generate unique ID after maximum attempts")
+
+
+def write_id_to_redcap(record_id: str, app_id: str, event_name: str = None) -> bool:
+    """Write the generated app ID back to REDCap."""
+    if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+        logger.error("REDCap API not configured")
+        return False
+
+    record_data = [{
+        "record_id": record_id,
+        config.REDCAP_APP_ID_FIELD: app_id,
+    }]
+    if event_name:
+        record_data[0]["redcap_event_name"] = event_name
+
+    resp = http_requests.post(config.REDCAP_API_URL, data={
+        "token": config.REDCAP_API_TOKEN,
+        "content": "record",
+        "format": "json",
+        "type": "flat",
+        "overwriteBehavior": "normal",
+        "data": json.dumps(record_data),
+        "returnContent": "count",
+        "returnFormat": "json",
+    })
+
+    if resp.status_code == 200:
+        logger.info(f"[REDCap] Wrote app ID {app_id} to record {record_id}")
+        return True
+    else:
+        logger.error(f"[REDCap] Failed to write app ID: {resp.status_code} {resp.text}")
+        return False
+
+
+def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) -> dict:
+    """
+    Core logic: generate a unique 9-digit ID, write it to Firestore and REDCap.
+    Idempotent — if this record already has an ID, returns the existing one.
+    """
+    # Check if this REDCap record already has an app ID (idempotent)
+    mapping_ref = db.collection(REDCAP_MAPPINGS_COLLECTION).document(redcap_record_id)
+    mapping_doc = mapping_ref.get()
+    if mapping_doc.exists:
+        existing = mapping_doc.to_dict()
+        logger.info(f"[REDCap] Record {redcap_record_id} already has app ID: {existing['app_participant_id']}")
+        return {
+            "status": "already_exists",
+            "app_id": existing["app_participant_id"],
+            "redcap_record_id": redcap_record_id,
+        }
+
+    # Generate unique 9-digit ID
+    app_id = generate_unique_9digit_id()
+
+    # Create in valid_participants collection (what the app checks during enrollment)
+    db.collection(VALID_PARTICIPANTS_COLLECTION).document(app_id).set({
+        "redcap_record_id": redcap_record_id,
+        "created_at": datetime.utcnow(),
+        "created_by": "redcap_trigger",
+        "inUse": False,
+    })
+
+    # Create mapping record (REDCap record_id -> app ID)
+    mapping_ref.set({
+        "app_participant_id": app_id,
+        "created_at": datetime.utcnow(),
+        "redcap_event": event_name,
+    })
+
+    # Write the ID back to REDCap
+    redcap_written = write_id_to_redcap(redcap_record_id, app_id, event_name)
+
+    logger.info(f"[REDCap] Generated app ID {app_id} for record {redcap_record_id} (REDCap write: {redcap_written})")
+
+    return {
+        "status": "created",
+        "app_id": app_id,
+        "redcap_record_id": redcap_record_id,
+        "redcap_written": redcap_written,
+    }
+
+
+@app.post("/api/redcap/data-entry-trigger")
+@limiter.limit("60/minute")
+def redcap_data_entry_trigger(request: Request):
+    """
+    REDCap Data Entry Trigger endpoint.
+    Called by REDCap whenever a form is saved. Filters to only act when
+    the qualify_for_study instrument is saved with subject_qualified=Yes.
+
+    This endpoint is NOT behind Firebase auth (REDCap can't send auth tokens),
+    but it bypasses the IP whitelist (like the scheduler endpoint).
+    It verifies the request by checking the instrument name and fetching
+    the field value from REDCap before acting.
+    """
+    try:
+        # REDCap sends form-encoded POST data
+        # Fields: project_id, instrument, record, redcap_event_name, etc.
+        form_data = {}
+
+        # Handle both form data and query params
+        import urllib.parse
+        body = request.scope.get("body", b"")
+        if not body:
+            # Try to read synchronously for non-async context
+            import asyncio
+            loop = asyncio.new_event_loop()
+            body = loop.run_until_complete(request.body())
+            loop.close()
+        else:
+            body = b""
+
+        if body:
+            form_data = dict(urllib.parse.parse_qsl(body.decode("utf-8")))
+
+        instrument = form_data.get("instrument", "")
+        record_id = form_data.get("record", "")
+        event_name = form_data.get("redcap_event_name", "")
+        project_id = form_data.get("project_id", "")
+
+        logger.info(
+            f"[REDCap DET] Received: instrument={instrument}, record={record_id}, "
+            f"event={event_name}, project={project_id}"
+        )
+
+        # Only act on the qualifying instrument
+        if instrument != config.REDCAP_TRIGGER_INSTRUMENT:
+            return {"status": "ignored", "reason": f"instrument '{instrument}' is not trigger"}
+
+        # Verify the participant actually qualified by checking the field value in REDCap
+        if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+            raise HTTPException(status_code=500, detail="REDCap API not configured")
+
+        resp = http_requests.post(config.REDCAP_API_URL, data={
+            "token": config.REDCAP_API_TOKEN,
+            "content": "record",
+            "format": "json",
+            "records[0]": record_id,
+            "fields[0]": config.REDCAP_TRIGGER_FIELD,
+            "fields[1]": config.REDCAP_APP_ID_FIELD,
+            "events[0]": event_name or config.REDCAP_TRIGGER_EVENT,
+            "returnFormat": "json",
+        })
+
+        if resp.status_code != 200:
+            logger.error(f"[REDCap DET] Failed to fetch record: {resp.status_code} {resp.text}")
+            raise HTTPException(status_code=502, detail="Failed to verify with REDCap")
+
+        records = resp.json()
+        if not records:
+            return {"status": "ignored", "reason": "record not found in REDCap"}
+
+        record_data = records[0]
+        qualified_value = record_data.get(config.REDCAP_TRIGGER_FIELD, "")
+        existing_app_id = record_data.get(config.REDCAP_APP_ID_FIELD, "")
+
+        # Check if already has an app ID in REDCap
+        if existing_app_id:
+            logger.info(f"[REDCap DET] Record {record_id} already has app ID: {existing_app_id}")
+            return {"status": "already_exists", "app_id": existing_app_id}
+
+        # Check if participant qualified
+        if str(qualified_value) != config.REDCAP_TRIGGER_VALUE:
+            return {"status": "ignored", "reason": f"subject_qualified={qualified_value}, not triggered"}
+
+        # Generate and assign the app ID
+        result = generate_and_assign_app_id(
+            redcap_record_id=record_id,
+            event_name=event_name or config.REDCAP_TRIGGER_EVENT,
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[REDCap DET] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/redcap/generate-id")
+@limiter.limit("20/minute")
+def admin_generate_redcap_id(
+    request: Request,
+    record_id: str = Query(..., description="REDCap record ID"),
+    event_name: str = Query(default=None, description="REDCap event name"),
+    user: dict = Depends(verify_admin_token),
+):
+    """
+    Manually generate an app ID for a REDCap record (admin only).
+    Use when the Data Entry Trigger didn't fire or for manual enrollment.
+    """
+    try:
+        result = generate_and_assign_app_id(
+            redcap_record_id=record_id,
+            event_name=event_name or config.REDCAP_TRIGGER_EVENT,
+        )
+        logger.info(f"[REDCap] Admin {user.get('email')} generated ID for record {record_id}: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"[REDCap] Admin ID generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/redcap/mappings")
+@limiter.limit("30/minute")
+def get_redcap_mappings(request: Request, user: dict = Depends(verify_admin_token)):
+    """Get all REDCap record -> app ID mappings (admin only)."""
+    try:
+        mappings = []
+        for doc in db.collection(REDCAP_MAPPINGS_COLLECTION).stream():
+            data = doc.to_dict()
+            mappings.append({
+                "redcap_record_id": doc.id,
+                "app_participant_id": data.get("app_participant_id"),
+                "created_at": data.get("created_at").isoformat() if data.get("created_at") else None,
+                "redcap_event": data.get("redcap_event"),
+            })
+        return {"mappings": mappings}
+    except Exception as e:
+        logger.error(f"Failed to get REDCap mappings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

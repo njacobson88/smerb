@@ -42,16 +42,18 @@ class _CheckinScreenState extends State<CheckinScreen>
   late AnimationController _crisisFlashController;
   late Animation<double> _crisisFlashAnimation;
 
-  // Safety alert tracking
-  bool _safetyAlertDismissed = false;
-  bool _safetyAlertShowing = false;
+  // Safety confirmation tracking
+  bool _safetyConfirmationShowing = false;
+  String? _currentTriggerQuestionId;
+  int _confirmationCount = 0; // How many confirmations shown so far
+  final Set<String> _confirmedNoQuestions = {}; // Questions where they said "No"
+  bool _confirmedYes = false; // True if they ever said "Yes, I am in immediate danger"
 
   @override
   void initState() {
     super.initState();
-    _startedAt = DateTime.now();  // Local time for participant
+    _startedAt = DateTime.now();
 
-    // Setup crisis flash animation
     _crisisFlashController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
@@ -97,14 +99,27 @@ class _CheckinScreenState extends State<CheckinScreen>
     return false;
   }
 
-  bool _checkSafetyTrigger() {
+  /// Check if a specific question's response exceeds the safety threshold.
+  bool _isQuestionAboveThreshold(EmaQuestion question) {
+    if (question.safetyTrigger == null) return false;
+    final response = _responses[question.id];
+    if (response == null || response is! double) return false;
+
+    final threshold = (question.safetyTrigger!['threshold'] as num).toDouble();
+    final inverted = question.safetyTrigger!['inverted'] == true;
+
+    if (inverted) {
+      return response < threshold; // e.g., ability_safe < 30 = dangerous
+    } else {
+      return response > threshold; // e.g., desire_intensity > 30 = dangerous
+    }
+  }
+
+  /// Check if any trigger question has been answered above threshold.
+  bool _anyTriggerExceeded() {
     if (_config == null) return false;
-    final alert = _config!.safetyAlert;
-    for (final qId in alert.triggerQuestions) {
-      final response = _responses[qId];
-      if (response != null && response is double && response > alert.threshold) {
-        return true;
-      }
+    for (final q in _config!.questions) {
+      if (_isQuestionAboveThreshold(q)) return true;
     }
     return false;
   }
@@ -113,23 +128,20 @@ class _CheckinScreenState extends State<CheckinScreen>
     setState(() {
       _responses[questionId] = value;
       _updateVisibleQuestions();
-
-      // Check if crisis should be triggered
-      if (_checkSafetyTrigger() && !_crisisTriggered) {
-        _crisisTriggered = true;
-        _crisisFlashController.repeat(reverse: true);
-        // Send Twilio page
-        _sendTwilioPage();
-      }
     });
   }
 
   void _advanceToNext() {
-    // Check safety trigger on relevant questions (only once)
-    if (!_safetyAlertDismissed && _checkSafetyTrigger()) {
+    // Check if the current question is a safety trigger that needs confirmation
+    if (!_confirmedYes && !_safetyConfirmationShowing) {
       final currentQ = _visibleQuestions[_currentIndex];
-      if (_config!.safetyAlert.triggerQuestions.contains(currentQ.id)) {
-        setState(() => _safetyAlertShowing = true);
+      if (_isQuestionAboveThreshold(currentQ) &&
+          !_confirmedNoQuestions.contains(currentQ.id)) {
+        // Show safety confirmation for this question
+        setState(() {
+          _safetyConfirmationShowing = true;
+          _currentTriggerQuestionId = currentQ.id;
+        });
         return;
       }
     }
@@ -141,12 +153,40 @@ class _CheckinScreenState extends State<CheckinScreen>
     }
   }
 
-  void _dismissSafetyAlert() {
+  void _onSafetyConfirmationYes() {
     setState(() {
-      _safetyAlertDismissed = true;
-      _safetyAlertShowing = false;
+      _confirmedYes = true;
+      _crisisTriggered = true;
+      _safetyConfirmationShowing = false;
+      _responses['safety_confirmed_danger'] = true;
+      _responses['safety_confirmed_at_question'] = _currentTriggerQuestionId;
+      _responses['safety_confirmation_number'] = _confirmationCount + 1;
     });
-    // Advance after dismissal - use postFrameCallback to ensure Swiper is mounted
+
+    _crisisFlashController.repeat(reverse: true);
+
+    // NOW send the alert — only on confirmed "Yes"
+    _sendSafetyAlert();
+
+    // Show crisis resources dialog
+    _showCrisisDialog();
+  }
+
+  void _onSafetyConfirmationNo() {
+    setState(() {
+      _confirmedNoQuestions.add(_currentTriggerQuestionId!);
+      _confirmationCount++;
+      _safetyConfirmationShowing = false;
+      _currentTriggerQuestionId = null;
+
+      // Track the crisis state for post-resources screen (but don't alert)
+      if (_anyTriggerExceeded()) {
+        _crisisTriggered = true;
+        _crisisFlashController.repeat(reverse: true);
+      }
+    });
+
+    // Continue to next question
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (_currentIndex < _visibleQuestions.length - 1) {
@@ -157,9 +197,8 @@ class _CheckinScreenState extends State<CheckinScreen>
     });
   }
 
-  Future<void> _sendTwilioPage() async {
+  Future<void> _sendSafetyAlert() async {
     try {
-      // Write safety alert to Firestore (triggers Cloud Function for Twilio)
       final alertId = const Uuid().v4();
       await FirebaseFirestore.instance
           .collection('participants')
@@ -171,6 +210,9 @@ class _CheckinScreenState extends State<CheckinScreen>
         'sessionId': widget.sessionId,
         'responses': _responses.map((k, v) => MapEntry(k, v?.toString())),
         'triggeredAt': FieldValue.serverTimestamp(),
+        'confirmedDanger': true,
+        'confirmationNumber': _confirmationCount + 1,
+        'triggerQuestion': _currentTriggerQuestionId,
         'pageTarget': '3143979832',
         'handled': false,
       });
@@ -181,7 +223,7 @@ class _CheckinScreenState extends State<CheckinScreen>
   }
 
   Future<void> _submitCheckin() async {
-    final now = DateTime.now();  // Local time for participant
+    final now = DateTime.now();
     final checkinId = const Uuid().v4();
 
     final companion = EmaResponsesCompanion(
@@ -197,7 +239,6 @@ class _CheckinScreenState extends State<CheckinScreen>
     await widget.database.insertEmaResponse(companion);
     print('[CheckIn] Saved EMA response: $checkinId (${_responses.length} answers)');
 
-    // Show post-check-in resources if concerning responses were given
     if (_crisisTriggered) {
       setState(() => _showPostResources = true);
     } else {
@@ -227,8 +268,8 @@ class _CheckinScreenState extends State<CheckinScreen>
       return _buildPostResourcesScreen();
     }
 
-    if (_safetyAlertShowing) {
-      return _buildSafetyAlertScreen();
+    if (_safetyConfirmationShowing) {
+      return _buildSafetyConfirmationScreen();
     }
 
     return Scaffold(
@@ -254,14 +295,12 @@ class _CheckinScreenState extends State<CheckinScreen>
           onPressed: _showExitConfirmation,
         ),
         actions: [
-          // Crisis button - always visible, flashes when triggered
           _buildCrisisButton(),
         ],
       ),
       body: SafeArea(
         child: Column(
           children: [
-            // Progress bar
             LinearProgressIndicator(
               value: _visibleQuestions.isEmpty
                   ? 0
@@ -270,7 +309,6 @@ class _CheckinScreenState extends State<CheckinScreen>
               color: const Color(0xFF4A6CF7),
               minHeight: 4,
             ),
-            // Progress text
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 6),
               child: Text(
@@ -280,7 +318,6 @@ class _CheckinScreenState extends State<CheckinScreen>
                     ),
               ),
             ),
-            // Swipeable question cards
             Expanded(
               child: Swiper(
                 controller: _swiperController,
@@ -305,7 +342,6 @@ class _CheckinScreenState extends State<CheckinScreen>
 
   Widget _buildCrisisButton() {
     if (!_crisisTriggered) {
-      // Normal state - subtle crisis button
       return IconButton(
         icon: const Icon(Icons.health_and_safety_outlined),
         onPressed: _showCrisisResources,
@@ -313,7 +349,6 @@ class _CheckinScreenState extends State<CheckinScreen>
       );
     }
 
-    // Flashing state
     return AnimatedBuilder(
       animation: _crisisFlashAnimation,
       builder: (context, child) {
@@ -559,9 +594,10 @@ class _CheckinScreenState extends State<CheckinScreen>
     );
   }
 
-  // --- Safety Alert Screen ---
-  Widget _buildSafetyAlertScreen() {
+  // --- Safety Confirmation Screen ---
+  Widget _buildSafetyConfirmationScreen() {
     final alert = _config!.safetyAlert;
+    final promptText = alert.getConfirmationPrompt(_confirmationCount);
 
     return Scaffold(
       appBar: AppBar(
@@ -579,31 +615,73 @@ class _CheckinScreenState extends State<CheckinScreen>
               Icon(Icons.warning_amber_rounded, size: 64, color: Colors.red[700]),
               const SizedBox(height: 24),
               Text(
-                alert.questionText,
+                promptText,
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      height: 1.4,
+                      height: 1.5,
+                      fontSize: 17,
                     ),
               ),
-              const SizedBox(height: 32),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _buildChoiceButton('Yes', false, () {
-                    _responses['safety_alert_response'] = true;
-                    _showCrisisDialog();
-                  }),
-                  _buildChoiceButton('No', false, () {
-                    _responses['safety_alert_response'] = false;
-                    _dismissSafetyAlert();
-                  }),
-                ],
+              const SizedBox(height: 40),
+
+              // "Yes" button — Red, prominent, deliberate
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _onSafetyConfirmationYes,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[700],
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 3,
+                  ),
+                  child: const Text(
+                    'Yes, I am in immediate danger\nof harming myself',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
               ),
+              const SizedBox(height: 16),
+
+              // "No" button — Blue outline, deliberate
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: OutlinedButton(
+                  onPressed: _onSafetyConfirmationNo,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF1565C0),
+                    side: const BorderSide(color: Color(0xFF1565C0), width: 2),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    'No, I am not in immediate danger\nof harming myself',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ),
+
               const SizedBox(height: 32),
               const Divider(),
               const SizedBox(height: 16),
               Text(
                 'If you are in a crisis, please report to your nearest Emergency Room, call 988, or text the Crisis Text Line.',
+                textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: Colors.grey[700],
                       height: 1.4,
@@ -634,7 +712,8 @@ class _CheckinScreenState extends State<CheckinScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'If you are in a crisis, please report to your nearest Emergency Room, call 988 (Suicide & Crisis Lifeline), or text the Crisis Text Line.',
+              'The study team has been notified and will follow up with you. '
+              'If you are in immediate danger, please contact one of these resources now.',
               style: TextStyle(height: 1.4),
             ),
             const SizedBox(height: 16),
@@ -650,7 +729,15 @@ class _CheckinScreenState extends State<CheckinScreen>
           TextButton(
             onPressed: () {
               Navigator.of(dialogContext).pop();
-              _dismissSafetyAlert();
+              // Continue to next question after crisis dialog
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                if (_currentIndex < _visibleQuestions.length - 1) {
+                  _swiperController.next();
+                } else {
+                  _submitCheckin();
+                }
+              });
             },
             child: const Text('Continue check-in'),
           ),
