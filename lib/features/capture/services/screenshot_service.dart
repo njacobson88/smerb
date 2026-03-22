@@ -22,10 +22,16 @@ class ScreenshotService {
   InAppWebViewController? _controller;
   bool _isCapturing = false;
   String _currentPlatform = 'unknown';
+  bool _diskSpacePaused = false;
 
   // HTML change tracking
   String? _lastHtmlHash;
   String? _lastHtmlCaptureId;
+
+  // Disk space limits
+  static const int maxLocalStorageMb = 2048; // 2GB cap
+  int _capturesSinceLastCheck = 0;
+  static const int _diskCheckInterval = 60; // Check every 60 captures (~1 min)
 
   ScreenshotService({
     required this.database,
@@ -62,9 +68,52 @@ class ScreenshotService {
     print('[ScreenshotService] Stopped screenshot capture');
   }
 
+  /// Check disk usage of local data directories.
+  /// Returns total size in bytes, or -1 if check fails.
+  static Future<int> getLocalStorageBytes() async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      int totalBytes = 0;
+
+      for (final dirName in ['screenshots', 'html']) {
+        final dir = Directory('${directory.path}/$dirName');
+        if (await dir.exists()) {
+          await for (final entity in dir.list(recursive: true, followLinks: false)) {
+            if (entity is File) {
+              totalBytes += await entity.length();
+            }
+          }
+        }
+      }
+      return totalBytes;
+    } catch (e) {
+      return -1;
+    }
+  }
+
+  /// Get local storage usage in MB (for display/monitoring)
+  static Future<double> getLocalStorageMb() async {
+    final bytes = await getLocalStorageBytes();
+    if (bytes < 0) return -1;
+    return bytes / (1024 * 1024);
+  }
+
   /// Capture a screenshot and save if it's different from the last one
   Future<void> _captureScreenshot() async {
     if (_isCapturing || _controller == null) return;
+    if (_diskSpacePaused) return;
+
+    // Periodically check disk space
+    _capturesSinceLastCheck++;
+    if (_capturesSinceLastCheck >= _diskCheckInterval) {
+      _capturesSinceLastCheck = 0;
+      final usageMb = await getLocalStorageMb();
+      if (usageMb > 0 && usageMb >= maxLocalStorageMb) {
+        _diskSpacePaused = true;
+        print('[ScreenshotService] PAUSED: Local storage at ${usageMb.toStringAsFixed(0)}MB (limit: ${maxLocalStorageMb}MB)');
+        return;
+      }
+    }
 
     _isCapturing = true;
 
