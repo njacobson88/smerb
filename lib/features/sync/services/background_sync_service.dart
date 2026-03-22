@@ -195,11 +195,17 @@ class BackgroundSyncService {
         ocrBatchSize: 25,
       );
 
+      final bytesUploaded = results['bytesUploaded'] ?? 0;
+      final bytesStr = bytesUploaded > 1024 * 1024
+          ? '${(bytesUploaded / (1024 * 1024)).toStringAsFixed(1)}MB'
+          : '${(bytesUploaded / 1024).toStringAsFixed(0)}KB';
+
       print('[BackgroundSync] Synced ${results['events']} events, '
           '${results['ocrResults']} OCR, '
           '${results['htmlCaptures']} HTML captures, '
           '${results['htmlStatusLogs']} HTML status logs, '
-          '${results['emaResponses']} EMA responses');
+          '${results['emaResponses']} EMA responses '
+          '($bytesStr uploaded)');
 
     } catch (e) {
       print('[BackgroundSync] Firebase sync error: $e');

@@ -15,8 +15,12 @@ class UploadService {
   bool _isSyncingHtml = false;
   bool _isSyncingEma = false;
 
-  // Track screenshots uploaded for syncAll return value
+  // Track upload stats
   int _screenshotsUploaded = 0;
+  int _totalBytesUploaded = 0;
+
+  /// Total bytes uploaded in the current/last sync cycle
+  int get totalBytesUploaded => _totalBytesUploaded;
 
   UploadService({
     required this.database,
@@ -203,8 +207,9 @@ class UploadService {
       );
 
       final downloadUrl = await snapshot.ref.getDownloadURL();
+      _totalBytesUploaded += snapshot.totalBytes ?? 0;
 
-      print('[UploadService] Uploaded screenshot: $storagePath');
+      print('[UploadService] Uploaded screenshot: $storagePath (${snapshot.totalBytes ?? 0} bytes)');
 
       // Delete local file after confirmed upload
       try {
@@ -575,8 +580,9 @@ class UploadService {
   }
 
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
-    // Reset screenshot counter
+    // Reset counters
     _screenshotsUploaded = 0;
+    _totalBytesUploaded = 0;
 
     // Sync events first (includes OCR data for screenshots)
     final eventsSynced = await syncEvents(batchSize: eventBatchSize);
@@ -600,6 +606,7 @@ class UploadService {
       'htmlCaptures': htmlCapturesSynced,
       'htmlStatusLogs': htmlStatusLogsSynced,
       'emaResponses': emaSynced,
+      'bytesUploaded': _totalBytesUploaded,
     };
   }
 
