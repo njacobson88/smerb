@@ -138,8 +138,8 @@ class ScreenshotService {
       final filename = 'screenshot_$timestamp.jpg'; // Changed to .jpg
       final filePath = '${screenshotsDir.path}/$filename';
 
-      // Compress to JPEG (quality 85 = excellent quality, ~75% size reduction)
-      final compressedBytes = await _compressToJpeg(screenshot, quality: 85);
+      // Downscale from Retina resolution and compress to JPEG
+      final compressedBytes = await _compressToJpeg(screenshot, quality: 70);
 
       // Save screenshot to file
       final file = File(filePath);
@@ -176,24 +176,31 @@ class ScreenshotService {
     }
   }
 
-  /// Compress PNG screenshot to JPEG format
-  Future<Uint8List> _compressToJpeg(Uint8List pngBytes, {int quality = 85}) async {
+  /// Downscale and compress PNG screenshot to JPEG format.
+  /// Retina displays capture at 2-3x resolution — we downscale to a max
+  /// width of 750px (roughly 1x phone width) which is sufficient for
+  /// research content analysis while cutting file size significantly.
+  static const int _maxScreenshotWidth = 750;
+
+  Future<Uint8List> _compressToJpeg(Uint8List pngBytes, {int quality = 70}) async {
     try {
-      // Decode PNG
       final image = img.decodeImage(pngBytes);
       if (image == null) {
         print('[ScreenshotService] Failed to decode PNG, using original');
         return pngBytes;
       }
 
-      // Encode as JPEG with specified quality (1-100)
-      // Quality 85 provides excellent visual quality with significant size reduction
-      final jpegBytes = img.encodeJpg(image, quality: quality);
+      // Downscale if wider than target (preserves aspect ratio)
+      img.Image processed = image;
+      if (image.width > _maxScreenshotWidth) {
+        processed = img.copyResize(image, width: _maxScreenshotWidth);
+      }
 
+      final jpegBytes = img.encodeJpg(processed, quality: quality);
       return Uint8List.fromList(jpegBytes);
     } catch (e) {
       print('[ScreenshotService] Error compressing to JPEG: $e');
-      return pngBytes; // Fallback to original PNG
+      return pngBytes;
     }
   }
 
