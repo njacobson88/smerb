@@ -51,6 +51,9 @@ class ScreenshotService {
   String? _lastHtmlHash;
   String? _lastHtmlCaptureId;
 
+  // Capture interval — 3 seconds balances data resolution vs storage/performance
+  static const int captureIntervalSeconds = 3;
+
   // Disk space limits
   static const int maxLocalStorageMb = 2048; // 2GB cap
   int _capturesSinceLastCheck = 0;
@@ -67,8 +70,7 @@ class ScreenshotService {
     _controller = controller;
     _currentPlatform = platform;
 
-    // Capture every 1 second
-    _captureTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _captureTimer = Timer.periodic(Duration(seconds: captureIntervalSeconds), (_) {
       _captureScreenshot();
     });
 
