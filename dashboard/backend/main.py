@@ -3182,6 +3182,514 @@ def initialize_admin(request: Request):
 
 
 # ============================================================================
+# On-Call Roster & Escalation System
+# ============================================================================
+
+ONCALL_COLLECTION = "oncall_roster"
+SAFETY_EVENTS_COLLECTION = "safety_events"
+FOLLOWUP_COLLECTION = "followup_schedule"
+
+# Escalation timing (in minutes)
+ESCALATION_PRIMARY_TIMEOUT = 15  # Primary on-call has 15 min to respond
+ESCALATION_BACKUP_TIMEOUT = 15   # Backup has 15 min before PI is paged
+
+
+class OnCallUpdate(BaseModel):
+    role: str  # "primary", "backup", "pi"
+    name: str
+    email: str
+    phone: Optional[str] = None
+
+
+class DispositionLog(BaseModel):
+    safety_event_id: str
+    disposition: str  # "contacted_safe", "contacted_needs_support", "unable_to_reach", "false_alarm", "escalated_988", "escalated_er"
+    notes: Optional[str] = None
+    outreach_method: Optional[str] = None  # "phone_call", "sms", "in_person"
+    participant_response: Optional[str] = None
+
+
+class FollowUpLog(BaseModel):
+    followup_id: str
+    status: str  # "completed", "unable_to_reach", "rescheduled", "cancelled"
+    notes: Optional[str] = None
+    outreach_method: Optional[str] = None
+
+
+@app.get("/api/oncall/roster")
+@limiter.limit("30/minute")
+def get_oncall_roster(request: Request, user: dict = Depends(verify_firebase_token)):
+    """Get the current on-call roster."""
+    try:
+        roster = {}
+        for doc in db.collection(ONCALL_COLLECTION).stream():
+            data = doc.to_dict()
+            roster[doc.id] = {
+                "role": doc.id,
+                "name": data.get("name"),
+                "email": data.get("email"),
+                "phone": data.get("phone"),
+                "updatedAt": data.get("updatedAt").isoformat() if data.get("updatedAt") else None,
+                "updatedBy": data.get("updatedBy"),
+            }
+        return {"roster": roster}
+    except Exception as e:
+        logger.error(f"Failed to get on-call roster: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/oncall/roster")
+@limiter.limit("20/minute")
+def update_oncall_roster(request: Request, body: OnCallUpdate, user: dict = Depends(verify_admin_token)):
+    """Update an on-call roster position (admin only)."""
+    try:
+        if body.role not in ("primary", "backup", "pi"):
+            raise HTTPException(status_code=400, detail="Role must be primary, backup, or pi")
+
+        db.collection(ONCALL_COLLECTION).document(body.role).set({
+            "name": body.name,
+            "email": body.email,
+            "phone": body.phone,
+            "updatedAt": datetime.utcnow(),
+            "updatedBy": user.get("email"),
+        })
+
+        logger.info(f"On-call roster updated: {body.role} = {body.name} by {user.get('email')}")
+        return {"message": f"On-call {body.role} updated to {body.name}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update on-call roster: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Safety Event Audit Trail & Disposition Logging
+# ============================================================================
+
+@app.post("/api/safety-events/{event_id}/disposition")
+@limiter.limit("30/minute")
+def log_disposition(
+    request: Request,
+    event_id: str,
+    body: DispositionLog,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Log a disposition for a safety event (any team member).
+    This is the primary way on-call staff acknowledge and document their response.
+    Stops escalation timer when logged.
+    """
+    try:
+        event_ref = db.collection(SAFETY_EVENTS_COLLECTION).document(event_id)
+        event_doc = event_ref.get()
+
+        if not event_doc.exists:
+            # Create the safety event document if it doesn't exist yet
+            event_ref.set({
+                "createdAt": datetime.utcnow(),
+                "source": "manual",
+            })
+
+        # Add disposition to the audit trail
+        disposition_id = str(uuid.uuid4())
+        event_ref.collection("audit_trail").document(disposition_id).set({
+            "type": "disposition",
+            "disposition": body.disposition,
+            "notes": body.notes,
+            "outreachMethod": body.outreach_method,
+            "participantResponse": body.participant_response,
+            "loggedBy": user.get("email"),
+            "loggedAt": datetime.utcnow(),
+        })
+
+        # Update the event's status
+        event_ref.update({
+            "currentDisposition": body.disposition,
+            "lastRespondedBy": user.get("email"),
+            "lastRespondedAt": datetime.utcnow(),
+            "escalationStopped": True,
+        })
+
+        # Calculate time-to-human-contact if this is the first disposition
+        if not event_doc.exists or not event_doc.to_dict().get("firstResponseAt"):
+            created_at = event_doc.to_dict().get("createdAt") if event_doc.exists else datetime.utcnow()
+            if created_at and hasattr(created_at, 'timestamp'):
+                response_time_seconds = (datetime.utcnow() - datetime.fromtimestamp(created_at.timestamp())).total_seconds()
+            else:
+                response_time_seconds = 0
+
+            event_ref.update({
+                "firstResponseAt": datetime.utcnow(),
+                "timeToHumanContactSeconds": response_time_seconds,
+            })
+
+        logger.info(f"Disposition logged for safety event {event_id}: {body.disposition} by {user.get('email')}")
+
+        # Check if adverse event threshold is met
+        adverse_dispositions = ["escalated_988", "escalated_er", "contacted_needs_support"]
+        if body.disposition in adverse_dispositions:
+            event_ref.update({"adverseEventFlag": True})
+
+        return {
+            "message": "Disposition logged",
+            "dispositionId": disposition_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to log disposition: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/safety-events/{event_id}/audit-trail")
+@limiter.limit("30/minute")
+def get_audit_trail(
+    request: Request,
+    event_id: str,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Get the full audit trail for a safety event."""
+    try:
+        event_ref = db.collection(SAFETY_EVENTS_COLLECTION).document(event_id)
+        event_doc = event_ref.get()
+
+        if not event_doc.exists:
+            raise HTTPException(status_code=404, detail="Safety event not found")
+
+        event_data = event_doc.to_dict()
+
+        # Get all audit trail entries
+        trail = []
+        for doc in event_ref.collection("audit_trail").order_by("loggedAt").stream():
+            entry = doc.to_dict()
+            entry["id"] = doc.id
+            if entry.get("loggedAt") and hasattr(entry["loggedAt"], "isoformat"):
+                entry["loggedAt"] = entry["loggedAt"].isoformat()
+            elif entry.get("loggedAt") and hasattr(entry["loggedAt"], "timestamp"):
+                entry["loggedAt"] = datetime.fromtimestamp(entry["loggedAt"].timestamp()).isoformat()
+            trail.append(entry)
+
+        return {
+            "eventId": event_id,
+            "event": {
+                "currentDisposition": event_data.get("currentDisposition"),
+                "adverseEventFlag": event_data.get("adverseEventFlag", False),
+                "timeToHumanContactSeconds": event_data.get("timeToHumanContactSeconds"),
+                "escalationStopped": event_data.get("escalationStopped", False),
+                "firstResponseAt": event_data.get("firstResponseAt").isoformat() if event_data.get("firstResponseAt") and hasattr(event_data.get("firstResponseAt"), "isoformat") else None,
+            },
+            "auditTrail": trail,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get audit trail: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/safety-events/active")
+@limiter.limit("30/minute")
+def get_active_safety_events(request: Request, user: dict = Depends(verify_firebase_token)):
+    """Get all active (unresolved) safety events for the dashboard."""
+    try:
+        events = []
+        # Get events that haven't been resolved
+        query = db.collection(SAFETY_EVENTS_COLLECTION).order_by(
+            "createdAt", direction=firestore.Query.DESCENDING
+        ).limit(100)
+
+        for doc in query.stream():
+            data = doc.to_dict()
+            created_at = data.get("createdAt")
+            if created_at and hasattr(created_at, "timestamp"):
+                created_at = datetime.fromtimestamp(created_at.timestamp())
+
+            events.append({
+                "id": doc.id,
+                "participantId": data.get("participantId"),
+                "alertType": data.get("alertType"),
+                "currentDisposition": data.get("currentDisposition"),
+                "adverseEventFlag": data.get("adverseEventFlag", False),
+                "escalationStopped": data.get("escalationStopped", False),
+                "timeToHumanContactSeconds": data.get("timeToHumanContactSeconds"),
+                "createdAt": created_at.isoformat() if created_at else None,
+                "lastRespondedBy": data.get("lastRespondedBy"),
+            })
+
+        return {"events": events}
+    except Exception as e:
+        logger.error(f"Failed to get active safety events: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# DSMB / IRB Reporting Export
+# ============================================================================
+
+@app.get("/api/admin/safety-report")
+@limiter.limit("10/minute")
+def generate_safety_report(
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    user: dict = Depends(verify_admin_token),
+):
+    """
+    Generate a safety report for DSMB/IRB review (admin only).
+    Includes all safety events, audit trails, response times, and dispositions.
+    """
+    try:
+        query = db.collection(SAFETY_EVENTS_COLLECTION).order_by(
+            "createdAt", direction=firestore.Query.DESCENDING
+        )
+
+        events = []
+        for doc in query.stream():
+            data = doc.to_dict()
+            created_at = data.get("createdAt")
+            if created_at and hasattr(created_at, "timestamp"):
+                created_at = datetime.fromtimestamp(created_at.timestamp())
+
+            # Apply date filters
+            if start_date and created_at:
+                if created_at.strftime("%Y-%m-%d") < start_date:
+                    continue
+            if end_date and created_at:
+                if created_at.strftime("%Y-%m-%d") > end_date:
+                    continue
+
+            # Get audit trail
+            trail = []
+            for trail_doc in doc.reference.collection("audit_trail").order_by("loggedAt").stream():
+                entry = trail_doc.to_dict()
+                if entry.get("loggedAt") and hasattr(entry["loggedAt"], "timestamp"):
+                    entry["loggedAt"] = datetime.fromtimestamp(entry["loggedAt"].timestamp()).isoformat()
+                trail.append(entry)
+
+            # Get follow-ups
+            followups = []
+            for fu_doc in db.collection(FOLLOWUP_COLLECTION).where(
+                "safetyEventId", "==", doc.id
+            ).order_by("scheduledAt").stream():
+                fu = fu_doc.to_dict()
+                if fu.get("scheduledAt") and hasattr(fu["scheduledAt"], "timestamp"):
+                    fu["scheduledAt"] = datetime.fromtimestamp(fu["scheduledAt"].timestamp()).isoformat()
+                if fu.get("completedAt") and hasattr(fu["completedAt"], "timestamp"):
+                    fu["completedAt"] = datetime.fromtimestamp(fu["completedAt"].timestamp()).isoformat()
+                followups.append(fu)
+
+            events.append({
+                "eventId": doc.id,
+                "participantId": data.get("participantId"),
+                "alertType": data.get("alertType"),
+                "createdAt": created_at.isoformat() if created_at else None,
+                "currentDisposition": data.get("currentDisposition"),
+                "adverseEventFlag": data.get("adverseEventFlag", False),
+                "timeToHumanContactSeconds": data.get("timeToHumanContactSeconds"),
+                "firstResponseAt": data.get("firstResponseAt").isoformat() if data.get("firstResponseAt") and hasattr(data.get("firstResponseAt"), "isoformat") else None,
+                "auditTrail": trail,
+                "followUps": followups,
+            })
+
+        # Summary statistics
+        total_events = len(events)
+        adverse_events = sum(1 for e in events if e.get("adverseEventFlag"))
+        avg_response_time = 0
+        response_times = [e["timeToHumanContactSeconds"] for e in events if e.get("timeToHumanContactSeconds")]
+        if response_times:
+            avg_response_time = sum(response_times) / len(response_times)
+
+        return {
+            "reportGeneratedAt": datetime.utcnow().isoformat() + "Z",
+            "reportGeneratedBy": user.get("email"),
+            "dateRange": {"start": start_date, "end": end_date},
+            "summary": {
+                "totalSafetyEvents": total_events,
+                "adverseEvents": adverse_events,
+                "averageResponseTimeSeconds": round(avg_response_time, 1),
+                "eventsWithDisposition": sum(1 for e in events if e.get("currentDisposition")),
+                "eventsWithoutDisposition": sum(1 for e in events if not e.get("currentDisposition")),
+            },
+            "events": events,
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate safety report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Automated Follow-Up Schedule (24h / 48h / 72h / 7d)
+# ============================================================================
+
+FOLLOWUP_INTERVALS_HOURS = [24, 48, 72, 168]  # 24h, 48h, 72h, 7 days
+
+
+@app.post("/api/safety-events/{event_id}/create-followups")
+@limiter.limit("20/minute")
+def create_followup_schedule(
+    request: Request,
+    event_id: str,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Create automated follow-up schedule for a safety event.
+    Generates follow-ups at 24h, 48h, 72h, and 7 days after the event.
+    """
+    try:
+        event_ref = db.collection(SAFETY_EVENTS_COLLECTION).document(event_id)
+        event_doc = event_ref.get()
+
+        if not event_doc.exists:
+            raise HTTPException(status_code=404, detail="Safety event not found")
+
+        event_data = event_doc.to_dict()
+        created_at = event_data.get("createdAt")
+        if created_at and hasattr(created_at, "timestamp"):
+            created_at = datetime.fromtimestamp(created_at.timestamp())
+        else:
+            created_at = datetime.utcnow()
+
+        # Check if follow-ups already exist
+        existing = list(db.collection(FOLLOWUP_COLLECTION).where(
+            "safetyEventId", "==", event_id
+        ).limit(1).stream())
+        if existing:
+            return {"message": "Follow-ups already created for this event", "status": "already_exists"}
+
+        followups_created = []
+        for hours in FOLLOWUP_INTERVALS_HOURS:
+            followup_id = str(uuid.uuid4())
+            scheduled_at = created_at + timedelta(hours=hours)
+
+            label = f"{hours}h" if hours < 168 else "7d"
+
+            db.collection(FOLLOWUP_COLLECTION).document(followup_id).set({
+                "safetyEventId": event_id,
+                "participantId": event_data.get("participantId"),
+                "scheduledAt": scheduled_at,
+                "intervalHours": hours,
+                "label": label,
+                "status": "pending",
+                "createdBy": user.get("email"),
+                "createdAt": datetime.utcnow(),
+                "completedAt": None,
+                "completedBy": None,
+                "notes": None,
+                "outreachMethod": None,
+            })
+
+            followups_created.append({
+                "id": followup_id,
+                "scheduledAt": scheduled_at.isoformat() + "Z",
+                "label": label,
+            })
+
+        # Log to audit trail
+        event_ref.collection("audit_trail").document(str(uuid.uuid4())).set({
+            "type": "followup_schedule_created",
+            "followupCount": len(followups_created),
+            "loggedBy": user.get("email"),
+            "loggedAt": datetime.utcnow(),
+        })
+
+        logger.info(f"Created {len(followups_created)} follow-ups for safety event {event_id}")
+        return {
+            "message": f"Created {len(followups_created)} follow-ups",
+            "followups": followups_created,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create follow-up schedule: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/followups/upcoming")
+@limiter.limit("30/minute")
+def get_upcoming_followups(request: Request, user: dict = Depends(verify_firebase_token)):
+    """Get all upcoming (pending) follow-ups for the dashboard."""
+    try:
+        followups = []
+        query = db.collection(FOLLOWUP_COLLECTION).where(
+            "status", "==", "pending"
+        ).order_by("scheduledAt").limit(100)
+
+        for doc in query.stream():
+            data = doc.to_dict()
+            scheduled_at = data.get("scheduledAt")
+            if scheduled_at and hasattr(scheduled_at, "timestamp"):
+                scheduled_at = datetime.fromtimestamp(scheduled_at.timestamp())
+
+            is_overdue = scheduled_at and scheduled_at < datetime.utcnow() if scheduled_at else False
+
+            followups.append({
+                "id": doc.id,
+                "safetyEventId": data.get("safetyEventId"),
+                "participantId": data.get("participantId"),
+                "scheduledAt": scheduled_at.isoformat() + "Z" if scheduled_at else None,
+                "label": data.get("label"),
+                "status": data.get("status"),
+                "isOverdue": is_overdue,
+            })
+
+        return {"followups": followups}
+    except Exception as e:
+        logger.error(f"Failed to get upcoming follow-ups: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/followups/{followup_id}/complete")
+@limiter.limit("30/minute")
+def complete_followup(
+    request: Request,
+    followup_id: str,
+    body: FollowUpLog,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Mark a follow-up as completed with notes."""
+    try:
+        fu_ref = db.collection(FOLLOWUP_COLLECTION).document(followup_id)
+        fu_doc = fu_ref.get()
+
+        if not fu_doc.exists:
+            raise HTTPException(status_code=404, detail="Follow-up not found")
+
+        fu_data = fu_doc.to_dict()
+
+        fu_ref.update({
+            "status": body.status,
+            "completedAt": datetime.utcnow(),
+            "completedBy": user.get("email"),
+            "notes": body.notes,
+            "outreachMethod": body.outreach_method,
+        })
+
+        # Log to safety event audit trail
+        safety_event_id = fu_data.get("safetyEventId")
+        if safety_event_id:
+            db.collection(SAFETY_EVENTS_COLLECTION).document(safety_event_id).collection(
+                "audit_trail"
+            ).document(str(uuid.uuid4())).set({
+                "type": "followup_completed",
+                "followupId": followup_id,
+                "followupLabel": fu_data.get("label"),
+                "status": body.status,
+                "notes": body.notes,
+                "loggedBy": user.get("email"),
+                "loggedAt": datetime.utcnow(),
+            })
+
+        logger.info(f"Follow-up {followup_id} completed: {body.status} by {user.get('email')}")
+        return {"message": "Follow-up completed", "status": body.status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to complete follow-up: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # REDCap Integration - Automated Participant ID Generation
 # ============================================================================
 
