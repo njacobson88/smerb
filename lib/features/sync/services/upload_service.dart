@@ -364,8 +364,10 @@ class UploadService {
     final storagePath = 'html/${capture.participantId}/${capture.sessionId}/$filename';
 
     final ref = _storage.ref().child(storagePath);
+    final isGzipped = capture.filePath.endsWith('.gz');
     final metadata = SettableMetadata(
-      contentType: 'text/html',
+      contentType: isGzipped ? 'application/gzip' : 'text/html',
+      contentEncoding: isGzipped ? 'gzip' : null,
       customMetadata: {
         'eventId': capture.eventId,
         'sessionId': capture.sessionId,

@@ -250,9 +250,10 @@ class ScreenshotService {
         }
 
         final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final htmlFilePath = '${htmlDir.path}/page_$timestamp.html';
+        final htmlFilePath = '${htmlDir.path}/page_$timestamp.html.gz';
         final htmlFile = File(htmlFilePath);
-        await htmlFile.writeAsString(html);
+        final compressed = gzip.encode(utf8.encode(html));
+        await htmlFile.writeAsBytes(compressed);
 
         final captureId = const Uuid().v4();
 
