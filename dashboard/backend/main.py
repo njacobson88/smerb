@@ -117,7 +117,11 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
     """Middleware to restrict access to Dartmouth IP ranges only."""
     # Allow scheduler and REDCap endpoints to bypass IP check
     # (these use their own authentication mechanisms)
-    if request.url.path in ("/api/scheduler/refresh-cache", "/api/redcap/data-entry-trigger"):
+    if request.url.path in (
+        "/api/scheduler/refresh-cache",
+        "/api/redcap/data-entry-trigger",
+        "/api/twilio/call-response",
+    ):
         return await call_next(request)
 
     # Get client IP (handle proxies)
@@ -3687,6 +3691,152 @@ def complete_followup(
     except Exception as e:
         logger.error(f"Failed to complete follow-up: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Twilio Call Response Webhook (IVR handler)
+# ============================================================================
+
+from fastapi import Form as FastAPIForm
+
+
+@app.post("/api/twilio/call-response")
+async def twilio_call_response(
+    request: Request,
+    participantId: str = Query(None),
+):
+    """
+    Twilio webhook for handling IVR responses during safety calls.
+    Press 1 = Safe / accidental (stops escalation)
+    Press 2 = Connect to study team (transfers to primary on-call)
+    Press 9 = Connect to 988 Suicide & Crisis Lifeline (warm handoff)
+    """
+    try:
+        # Parse Twilio's POST form data
+        form_data = await request.form()
+        digits = form_data.get("Digits", "")
+        call_sid = form_data.get("CallSid", "")
+
+        logger.info(f"[Twilio IVR] Participant {participantId} pressed: {digits}, CallSid: {call_sid}")
+
+        # Find the safety event for this participant
+        events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+            .where("participantId", "==", participantId)
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .limit(1).stream())
+
+        event_ref = events[0].reference if events else None
+
+        if digits == "1":
+            # Safe / accidental press
+            if event_ref:
+                event_ref.update({
+                    "currentDisposition": "false_alarm",
+                    "escalationStopped": True,
+                    "lastRespondedAt": datetime.utcnow(),
+                })
+                event_ref.collection("audit_trail").doc().set({
+                    "type": "participant_ivr_response",
+                    "response": "safe_accidental",
+                    "digits": "1",
+                    "callSid": call_sid,
+                    "loggedBy": "system",
+                    "loggedAt": datetime.utcnow(),
+                })
+
+            twiml = (
+                '<Response>'
+                '<Say voice="alice">Thank you. We are glad you are safe. '
+                'If you need support at any time, please call 988. Goodbye.</Say>'
+                '</Response>'
+            )
+
+        elif digits == "2":
+            # Connect to study team
+            roster = {}
+            for doc in db.collection(ONCALL_COLLECTION).stream():
+                roster[doc.id] = doc.data()
+
+            primary = roster.get("primary", {})
+            primary_phone = primary.get("phone")
+
+            if event_ref:
+                event_ref.collection("audit_trail").doc().set({
+                    "type": "participant_ivr_response",
+                    "response": "connect_team",
+                    "digits": "2",
+                    "callSid": call_sid,
+                    "transferTo": primary.get("name"),
+                    "loggedBy": "system",
+                    "loggedAt": datetime.utcnow(),
+                })
+
+            if primary_phone:
+                twiml = (
+                    '<Response>'
+                    '<Say voice="alice">Connecting you to a member of our study team now.</Say>'
+                    f'<Dial timeout="30">+1{primary_phone}</Dial>'
+                    '<Say voice="alice">We were unable to connect you. '
+                    'Please call 988 if you need immediate support. Goodbye.</Say>'
+                    '</Response>'
+                )
+            else:
+                twiml = (
+                    '<Response>'
+                    '<Say voice="alice">We are unable to connect you at this time. '
+                    'A team member will call you back shortly. '
+                    'If you need immediate help, please call 988. Goodbye.</Say>'
+                    '</Response>'
+                )
+
+        elif digits == "9":
+            # 988 warm handoff
+            if event_ref:
+                event_ref.update({
+                    "currentDisposition": "escalated_988",
+                    "adverseEventFlag": True,
+                })
+                event_ref.collection("audit_trail").doc().set({
+                    "type": "participant_ivr_response",
+                    "response": "connect_988",
+                    "digits": "9",
+                    "callSid": call_sid,
+                    "loggedBy": "system",
+                    "loggedAt": datetime.utcnow(),
+                })
+
+            # Warm handoff: brief context message then connect to 988
+            twiml = (
+                '<Response>'
+                '<Say voice="alice">Connecting you to the 988 Suicide and Crisis Lifeline now. '
+                'Please stay on the line.</Say>'
+                '<Dial timeout="60">988</Dial>'
+                '<Say voice="alice">If you were disconnected, please call 988 directly. Goodbye.</Say>'
+                '</Response>'
+            )
+
+        else:
+            # Unrecognized input — replay options
+            twiml = (
+                '<Response>'
+                '<Gather numDigits="1" action="https://socialscope-dashboard-api-436153481478.us-central1.run.app'
+                f'/api/twilio/call-response?participantId={participantId}" method="POST" timeout="15">'
+                '<Say voice="alice">Sorry, we did not understand your response. '
+                'Press 1 if you are safe. Press 2 to speak with the study team. '
+                'Press 9 to connect to the 988 crisis lifeline.</Say>'
+                '</Gather>'
+                '<Say voice="alice">We did not receive a response. A team member will follow up shortly.</Say>'
+                '</Response>'
+            )
+
+        return Response(content=twiml, media_type="application/xml")
+
+    except Exception as e:
+        logger.error(f"[Twilio IVR] Error: {e}", exc_info=True)
+        return Response(
+            content='<Response><Say>An error occurred. Please call 988 if you need help.</Say></Response>',
+            media_type="application/xml",
+        )
 
 
 # ============================================================================
