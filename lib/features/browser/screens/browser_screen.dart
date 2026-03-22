@@ -10,6 +10,7 @@ import '../../../features/debug/screens/debug_screen.dart';
 import '../../../features/checkin/screens/checkin_screen.dart';
 import '../../../features/checkin/services/checkin_service.dart';
 import '../../../features/settings/screens/settings_screen.dart';
+import '../../../features/safety/screens/safety_plan_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   final CaptureService captureService;
@@ -193,6 +194,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _reload() {
     _controller?.reload();
+  }
+
+  void _openSafetyPlan() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SafetyPlanScreen(
+          participantId: widget.captureService.participantId,
+        ),
+      ),
+    );
   }
 
   void _openSettings() {
@@ -552,6 +564,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     icon: const Icon(Icons.refresh),
                     onPressed: _reload,
                     tooltip: 'Reload',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.health_and_safety),
+                    onPressed: _openSafetyPlan,
+                    tooltip: 'Safety Plan',
                   ),
                   IconButton(
                     icon: const Icon(Icons.settings),
