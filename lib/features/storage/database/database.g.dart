@@ -62,6 +62,14 @@ class $EventsTable extends Events with TableInfo<$EventsTable, Event> {
       defaultConstraints:
           GeneratedColumn.constraintIsAlways('CHECK ("synced" IN (0, 1))'),
       defaultValue: const Constant(false));
+  static const VerificationMeta _syncRetryCountMeta =
+      const VerificationMeta('syncRetryCount');
+  @override
+  late final GeneratedColumn<int> syncRetryCount = GeneratedColumn<int>(
+      'sync_retry_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
   static const VerificationMeta _createdAtMeta =
       const VerificationMeta('createdAt');
   @override
@@ -81,6 +89,7 @@ class $EventsTable extends Events with TableInfo<$EventsTable, Event> {
         url,
         data,
         synced,
+        syncRetryCount,
         createdAt
       ];
   @override
@@ -144,6 +153,12 @@ class $EventsTable extends Events with TableInfo<$EventsTable, Event> {
       context.handle(_syncedMeta,
           synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta));
     }
+    if (data.containsKey('sync_retry_count')) {
+      context.handle(
+          _syncRetryCountMeta,
+          syncRetryCount.isAcceptableOrUnknown(
+              data['sync_retry_count']!, _syncRetryCountMeta));
+    }
     if (data.containsKey('created_at')) {
       context.handle(_createdAtMeta,
           createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta));
@@ -175,6 +190,8 @@ class $EventsTable extends Events with TableInfo<$EventsTable, Event> {
           .read(DriftSqlType.string, data['${effectivePrefix}data'])!,
       synced: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}synced'])!,
+      syncRetryCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}sync_retry_count'])!,
       createdAt: attachedDatabase.typeMapping
           .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
     );
@@ -196,6 +213,7 @@ class Event extends DataClass implements Insertable<Event> {
   final String? url;
   final String data;
   final bool synced;
+  final int syncRetryCount;
   final DateTime createdAt;
   const Event(
       {required this.id,
@@ -207,6 +225,7 @@ class Event extends DataClass implements Insertable<Event> {
       this.url,
       required this.data,
       required this.synced,
+      required this.syncRetryCount,
       required this.createdAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -222,6 +241,7 @@ class Event extends DataClass implements Insertable<Event> {
     }
     map['data'] = Variable<String>(data);
     map['synced'] = Variable<bool>(synced);
+    map['sync_retry_count'] = Variable<int>(syncRetryCount);
     map['created_at'] = Variable<DateTime>(createdAt);
     return map;
   }
@@ -237,6 +257,7 @@ class Event extends DataClass implements Insertable<Event> {
       url: url == null && nullToAbsent ? const Value.absent() : Value(url),
       data: Value(data),
       synced: Value(synced),
+      syncRetryCount: Value(syncRetryCount),
       createdAt: Value(createdAt),
     );
   }
@@ -254,6 +275,7 @@ class Event extends DataClass implements Insertable<Event> {
       url: serializer.fromJson<String?>(json['url']),
       data: serializer.fromJson<String>(json['data']),
       synced: serializer.fromJson<bool>(json['synced']),
+      syncRetryCount: serializer.fromJson<int>(json['syncRetryCount']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
     );
   }
@@ -270,6 +292,7 @@ class Event extends DataClass implements Insertable<Event> {
       'url': serializer.toJson<String?>(url),
       'data': serializer.toJson<String>(data),
       'synced': serializer.toJson<bool>(synced),
+      'syncRetryCount': serializer.toJson<int>(syncRetryCount),
       'createdAt': serializer.toJson<DateTime>(createdAt),
     };
   }
@@ -284,6 +307,7 @@ class Event extends DataClass implements Insertable<Event> {
           Value<String?> url = const Value.absent(),
           String? data,
           bool? synced,
+          int? syncRetryCount,
           DateTime? createdAt}) =>
       Event(
         id: id ?? this.id,
@@ -295,6 +319,7 @@ class Event extends DataClass implements Insertable<Event> {
         url: url.present ? url.value : this.url,
         data: data ?? this.data,
         synced: synced ?? this.synced,
+        syncRetryCount: syncRetryCount ?? this.syncRetryCount,
         createdAt: createdAt ?? this.createdAt,
       );
   @override
@@ -309,6 +334,7 @@ class Event extends DataClass implements Insertable<Event> {
           ..write('url: $url, ')
           ..write('data: $data, ')
           ..write('synced: $synced, ')
+          ..write('syncRetryCount: $syncRetryCount, ')
           ..write('createdAt: $createdAt')
           ..write(')'))
         .toString();
@@ -316,7 +342,7 @@ class Event extends DataClass implements Insertable<Event> {
 
   @override
   int get hashCode => Object.hash(id, sessionId, participantId, eventType,
-      timestamp, platform, url, data, synced, createdAt);
+      timestamp, platform, url, data, synced, syncRetryCount, createdAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -330,6 +356,7 @@ class Event extends DataClass implements Insertable<Event> {
           other.url == this.url &&
           other.data == this.data &&
           other.synced == this.synced &&
+          other.syncRetryCount == this.syncRetryCount &&
           other.createdAt == this.createdAt);
 }
 
@@ -343,6 +370,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
   final Value<String?> url;
   final Value<String> data;
   final Value<bool> synced;
+  final Value<int> syncRetryCount;
   final Value<DateTime> createdAt;
   final Value<int> rowid;
   const EventsCompanion({
@@ -355,6 +383,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
     this.url = const Value.absent(),
     this.data = const Value.absent(),
     this.synced = const Value.absent(),
+    this.syncRetryCount = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -368,6 +397,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
     this.url = const Value.absent(),
     required String data,
     this.synced = const Value.absent(),
+    this.syncRetryCount = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
@@ -387,6 +417,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
     Expression<String>? url,
     Expression<String>? data,
     Expression<bool>? synced,
+    Expression<int>? syncRetryCount,
     Expression<DateTime>? createdAt,
     Expression<int>? rowid,
   }) {
@@ -400,6 +431,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
       if (url != null) 'url': url,
       if (data != null) 'data': data,
       if (synced != null) 'synced': synced,
+      if (syncRetryCount != null) 'sync_retry_count': syncRetryCount,
       if (createdAt != null) 'created_at': createdAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -415,6 +447,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
       Value<String?>? url,
       Value<String>? data,
       Value<bool>? synced,
+      Value<int>? syncRetryCount,
       Value<DateTime>? createdAt,
       Value<int>? rowid}) {
     return EventsCompanion(
@@ -427,6 +460,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
       url: url ?? this.url,
       data: data ?? this.data,
       synced: synced ?? this.synced,
+      syncRetryCount: syncRetryCount ?? this.syncRetryCount,
       createdAt: createdAt ?? this.createdAt,
       rowid: rowid ?? this.rowid,
     );
@@ -462,6 +496,9 @@ class EventsCompanion extends UpdateCompanion<Event> {
     if (synced.present) {
       map['synced'] = Variable<bool>(synced.value);
     }
+    if (syncRetryCount.present) {
+      map['sync_retry_count'] = Variable<int>(syncRetryCount.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -483,6 +520,7 @@ class EventsCompanion extends UpdateCompanion<Event> {
           ..write('url: $url, ')
           ..write('data: $data, ')
           ..write('synced: $synced, ')
+          ..write('syncRetryCount: $syncRetryCount, ')
           ..write('createdAt: $createdAt, ')
           ..write('rowid: $rowid')
           ..write(')'))

@@ -48,14 +48,16 @@ class UploadService {
         print('[UploadService] Processing batch of ${unsyncedEvents.length} events');
 
         final syncedIds = <String>[];
+        final failedIds = <String>[];
 
         for (final event in unsyncedEvents) {
           try {
             await _uploadEvent(event);
             syncedIds.add(event.id);
           } catch (e) {
-            print('[UploadService] Failed to sync event ${event.id}: $e');
-            // Continue with other events even if one fails
+            print('[UploadService] Failed to sync event ${event.id} '
+                '(retry ${event.syncRetryCount + 1}/${AppDatabase.maxSyncRetries}): $e');
+            failedIds.add(event.id);
           }
         }
 
@@ -64,6 +66,12 @@ class UploadService {
           await database.markEventsAsSynced(syncedIds);
           totalSynced += syncedIds.length;
           print('[UploadService] Marked ${syncedIds.length} events as synced');
+        }
+
+        // Increment retry count for failed events
+        if (failedIds.isNotEmpty) {
+          await database.incrementSyncRetryCount(failedIds);
+          print('[UploadService] Incremented retry count for ${failedIds.length} failed events');
         }
 
       } while (unsyncedEvents.length == batchSize);

@@ -21,6 +21,7 @@ class Events extends Table {
   TextColumn get url => text().nullable()();
   TextColumn get data => text()(); // JSON string
   BoolColumn get synced => boolean().withDefault(const Constant(false))();
+  IntColumn get syncRetryCount => integer().withDefault(const Constant(0))();
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
 
   @override
@@ -115,7 +116,9 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
+
+  static const int maxSyncRetries = 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -130,6 +133,9 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 4) {
         await m.createTable(emaResponses);
+      }
+      if (from < 5) {
+        await m.addColumn(events, events.syncRetryCount);
       }
     },
   );
@@ -153,9 +159,12 @@ class AppDatabase extends _$AppDatabase {
     return (select(events)..where((e) => e.eventType.equals(type))).get();
   }
 
-  /// Get unsynced events
+  /// Get unsynced events (excludes events that exceeded max retry count)
   Future<List<Event>> getUnsyncedEvents({int? limit}) {
-    final query = select(events)..where((e) => e.synced.equals(false));
+    final query = select(events)
+      ..where((e) =>
+          e.synced.equals(false) &
+          e.syncRetryCount.isSmallerThanValue(maxSyncRetries));
     if (limit != null) {
       query.limit(limit);
     }
@@ -166,6 +175,16 @@ class AppDatabase extends _$AppDatabase {
   Future<int> markEventsAsSynced(List<String> eventIds) {
     return (update(events)..where((e) => e.id.isIn(eventIds)))
         .write(const EventsCompanion(synced: Value(true)));
+  }
+
+  /// Increment sync retry count for failed events
+  Future<void> incrementSyncRetryCount(List<String> eventIds) async {
+    for (final id in eventIds) {
+      await customStatement(
+        'UPDATE events SET sync_retry_count = sync_retry_count + 1 WHERE id = ?',
+        [id],
+      );
+    }
   }
 
   /// Get event count
