@@ -229,19 +229,58 @@ class UploadService {
 
         final syncedIds = <String>[];
 
+        // Batch OCR updates (up to 500 per Firestore batch)
+        WriteBatch? batch;
+        int batchCount = 0;
+        const maxBatchSize = 450; // Leave margin below Firestore's 500 limit
+
         for (final result in unsyncedResults) {
           try {
-            await _uploadOcrResult(result);
+            batch ??= _firestore.batch();
+            final docRef = _firestore
+                .collection('participants')
+                .doc(result.participantId)
+                .collection('events')
+                .doc(result.eventId);
+
+            batch.update(docRef, {
+              'ocr': {
+                'extractedText': result.extractedText,
+                'wordCount': result.wordCount,
+                'processingTimeMs': result.processingTimeMs,
+                'processedAt': Timestamp.fromDate(result.processedAt),
+                'capturedAt': Timestamp.fromDate(result.capturedAt),
+              },
+              'ocrSyncedAt': FieldValue.serverTimestamp(),
+            });
             syncedIds.add(result.id);
+            batchCount++;
+
+            // Commit batch when it reaches the limit
+            if (batchCount >= maxBatchSize) {
+              await batch.commit();
+              batch = null;
+              batchCount = 0;
+            }
           } catch (e) {
-            print('[UploadService] Failed to sync OCR result ${result.id}: $e');
+            print('[UploadService] Failed to add OCR result ${result.id} to batch: $e');
+          }
+        }
+
+        // Commit remaining batch
+        if (batch != null && batchCount > 0) {
+          try {
+            await batch.commit();
+          } catch (e) {
+            print('[UploadService] Failed to commit OCR batch: $e');
+            syncedIds.clear(); // Don't mark as synced if batch failed
           }
         }
 
         if (syncedIds.isNotEmpty) {
           await database.markOcrResultsAsSynced(syncedIds);
           totalSynced += syncedIds.length;
-          print('[UploadService] Marked ${syncedIds.length} OCR results as synced');
+          print('[UploadService] Batch-synced ${syncedIds.length} OCR results');
         }
 
       } while (unsyncedResults.length == batchSize);
@@ -257,29 +296,7 @@ class UploadService {
     }
   }
 
-  /// Upload a single OCR result to Firebase (updates existing event document)
-  Future<void> _uploadOcrResult(OcrResult result) async {
-    final ocrData = {
-      'ocr': {
-        'extractedText': result.extractedText,
-        'wordCount': result.wordCount,
-        'processingTimeMs': result.processingTimeMs,
-        'processedAt': Timestamp.fromDate(result.processedAt),
-        'capturedAt': Timestamp.fromDate(result.capturedAt),
-      },
-      'ocrSyncedAt': FieldValue.serverTimestamp(),
-    };
-
-    // Update the existing event document
-    await _firestore
-        .collection('participants')
-        .doc(result.participantId)
-        .collection('events')
-        .doc(result.eventId)
-        .update(ocrData);
-
-    print('[UploadService] Updated event with OCR: ${result.eventId}');
-  }
+  // OCR results are now batch-synced in syncOcrResults() above
 
   /// Sync HTML captures to Firebase (uploads HTML files and updates event docs)
   /// Returns the number of HTML captures synced
@@ -396,19 +413,58 @@ class UploadService {
 
         final syncedIds = <String>[];
 
+        // Batch HTML status log updates
+        WriteBatch? batch;
+        int batchCount = 0;
+        const maxBatchSize = 450;
+
         for (final log in unsyncedLogs) {
           try {
-            await _uploadHtmlStatusLog(log);
+            batch ??= _firestore.batch();
+            final docRef = _firestore
+                .collection('participants')
+                .doc(log.participantId)
+                .collection('events')
+                .doc(log.eventId);
+
+            final updates = <String, dynamic>{
+              'html.changed': log.htmlChanged,
+              'html.hash': log.htmlHash,
+              'html.capturedAt': Timestamp.fromDate(log.capturedAt),
+              'htmlSyncedAt': FieldValue.serverTimestamp(),
+            };
+            if (log.htmlCaptureId != null) {
+              updates['html.htmlCaptureId'] = log.htmlCaptureId;
+            }
+
+            batch.update(docRef, updates);
             syncedIds.add(log.id);
+            batchCount++;
+
+            if (batchCount >= maxBatchSize) {
+              await batch.commit();
+              batch = null;
+              batchCount = 0;
+            }
           } catch (e) {
-            print('[UploadService] Failed to sync HTML status log ${log.id}: $e');
+            print('[UploadService] Failed to add HTML status log ${log.id} to batch: $e');
+          }
+        }
+
+        // Commit remaining batch
+        if (batch != null && batchCount > 0) {
+          try {
+            await batch.commit();
+          } catch (e) {
+            print('[UploadService] Failed to commit HTML status log batch: $e');
+            syncedIds.clear();
           }
         }
 
         if (syncedIds.isNotEmpty) {
           await database.markHtmlStatusLogsSynced(syncedIds);
           totalSynced += syncedIds.length;
-          print('[UploadService] Marked ${syncedIds.length} HTML status logs as synced');
+          print('[UploadService] Batch-synced ${syncedIds.length} HTML status logs');
         }
 
       } while (unsyncedLogs.length == batchSize);
@@ -422,29 +478,7 @@ class UploadService {
     }
   }
 
-  /// Upload a single HTML status log to Firebase (updates existing event document)
-  /// Uses dot notation to avoid overwriting storageUrl/charCount from capture sync
-  Future<void> _uploadHtmlStatusLog(HtmlStatusLog log) async {
-    final updates = <String, dynamic>{
-      'html.changed': log.htmlChanged,
-      'html.hash': log.htmlHash,
-      'html.capturedAt': Timestamp.fromDate(log.capturedAt),
-      'htmlSyncedAt': FieldValue.serverTimestamp(),
-    };
-
-    if (log.htmlCaptureId != null) {
-      updates['html.htmlCaptureId'] = log.htmlCaptureId;
-    }
-
-    await _firestore
-        .collection('participants')
-        .doc(log.participantId)
-        .collection('events')
-        .doc(log.eventId)
-        .update(updates);
-
-    print('[UploadService] Updated event with HTML status: ${log.eventId} (changed: ${log.htmlChanged})');
-  }
+  // HTML status logs are now batch-synced in syncHtmlStatusLogs() above
 
   /// Sync all data (events + OCR results + HTML) efficiently
   /// Returns a map with counts of synced items
