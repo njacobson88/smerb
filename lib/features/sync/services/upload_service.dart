@@ -196,8 +196,12 @@ class UploadService {
 
       print('[UploadService] Uploaded screenshot: $storagePath');
 
-      // Optionally delete local file after successful upload
-      // await file.delete();
+      // Delete local file after confirmed upload
+      try {
+        await file.delete();
+      } catch (e) {
+        print('[UploadService] Warning: could not delete local screenshot: $e');
+      }
 
       return downloadUrl;
     } catch (e) {
@@ -396,6 +400,13 @@ class UploadService {
     });
 
     print('[UploadService] Uploaded HTML capture: $storagePath');
+
+    // Delete local file after confirmed upload
+    try {
+      await file.delete();
+    } catch (e) {
+      print('[UploadService] Warning: could not delete local HTML file: $e');
+    }
   }
 
   /// Sync HTML status logs to Firebase (updates event docs with HTML status)
