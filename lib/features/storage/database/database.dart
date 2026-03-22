@@ -425,6 +425,56 @@ class AppDatabase extends _$AppDatabase {
       createdAt: DateTime.fromMillisecondsSinceEpoch((row.data['created_at'] as int) * 1000),
     )).toList();
   }
+
+  // ==========================================================================
+  // DATA RETENTION
+  // ==========================================================================
+
+  /// Prune synced local data older than [retentionDays] to prevent
+  /// unbounded database growth. Only deletes rows that have been
+  /// successfully synced. Returns total rows deleted.
+  Future<int> pruneOldSyncedData({int retentionDays = 7}) async {
+    final cutoff = DateTime.now().subtract(Duration(days: retentionDays));
+    int totalDeleted = 0;
+
+    // Prune synced events
+    final eventsDeleted = await (delete(events)
+          ..where((e) => e.synced.equals(true) & e.createdAt.isSmallerThanValue(cutoff)))
+        .go();
+    totalDeleted += eventsDeleted;
+
+    // Prune synced HTML status logs (fastest-growing table: 1 row/sec)
+    final htmlLogsDeleted = await (delete(htmlStatusLogs)
+          ..where((h) => h.synced.equals(true) & h.capturedAt.isSmallerThanValue(cutoff)))
+        .go();
+    totalDeleted += htmlLogsDeleted;
+
+    // Prune synced HTML captures
+    final htmlCapturesDeleted = await (delete(htmlCaptures)
+          ..where((h) => h.synced.equals(true) & h.capturedAt.isSmallerThanValue(cutoff)))
+        .go();
+    totalDeleted += htmlCapturesDeleted;
+
+    // Prune synced OCR results
+    final ocrDeleted = await (delete(ocrResults)
+          ..where((o) => o.synced.equals(true) & o.processedAt.isSmallerThanValue(cutoff)))
+        .go();
+    totalDeleted += ocrDeleted;
+
+    // Prune synced EMA responses
+    final emaDeleted = await (delete(emaResponses)
+          ..where((e) => e.synced.equals(true) & e.completedAt.isSmallerThanValue(cutoff)))
+        .go();
+    totalDeleted += emaDeleted;
+
+    if (totalDeleted > 0) {
+      print('[Database] Pruned $totalDeleted synced rows older than $retentionDays days '
+          '(events: $eventsDeleted, htmlLogs: $htmlLogsDeleted, htmlCaptures: $htmlCapturesDeleted, '
+          'ocr: $ocrDeleted, ema: $emaDeleted)');
+    }
+
+    return totalDeleted;
+  }
 }
 
 // ============================================================================

@@ -16,9 +16,13 @@ class BackgroundSyncService {
   bool _isSyncing = false;
   bool _isProcessingOcr = false;
   bool _isRunning = false;
+  int _syncCycleCount = 0;
 
   // Sync interval
   static const Duration syncInterval = Duration(seconds: 30);
+
+  // Run data retention every ~120 cycles (~1 hour)
+  static const int _retentionInterval = 120;
 
   // Callbacks for status updates
   void Function(SyncStatus)? onSyncStatusChanged;
@@ -111,6 +115,16 @@ class BackgroundSyncService {
         print('[BackgroundSync] No network connectivity, skipping Firebase sync');
       } else {
         await _syncToFirebase();
+      }
+
+      // Step 3: Periodically prune old synced data (~hourly)
+      _syncCycleCount++;
+      if (_syncCycleCount >= _retentionInterval) {
+        _syncCycleCount = 0;
+        final pruned = await database.pruneOldSyncedData(retentionDays: 7);
+        if (pruned > 0) {
+          print('[BackgroundSync] Pruned $pruned old synced rows');
+        }
       }
 
       // Update status
