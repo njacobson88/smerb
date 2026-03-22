@@ -962,23 +962,115 @@ class _CheckinScreenState extends State<CheckinScreen>
     }
   }
 
+  /// Check if any responses so far exceed safety thresholds
+  bool _hasHighRiskResponses() {
+    if (_config == null) return false;
+    for (final q in _config!.questions) {
+      if (_isQuestionAboveThreshold(q)) return true;
+    }
+    return false;
+  }
+
+  /// Send a fallback safety alert when check-in is abandoned with high-risk responses.
+  /// This catches cases where the participant exits before reaching the confirmation.
+  Future<void> _sendFallbackAlert() async {
+    try {
+      final alertId = const Uuid().v4();
+
+      // Identify which questions triggered
+      final triggerQuestions = <String>[];
+      for (final q in _config!.questions) {
+        if (_isQuestionAboveThreshold(q)) {
+          triggerQuestions.add(q.id);
+        }
+      }
+
+      await FirebaseFirestore.instance
+          .collection('participants')
+          .doc(widget.participantId)
+          .collection('safety_alerts')
+          .doc(alertId)
+          .set({
+        'participantId': widget.participantId,
+        'sessionId': widget.sessionId,
+        'responses': _responses.map((k, v) => MapEntry(k, v?.toString())),
+        'triggeredAt': FieldValue.serverTimestamp(),
+        'alertType': 'incomplete_checkin_fallback',
+        'triggerQuestions': triggerQuestions,
+        'completedQuestionCount': _currentIndex + 1,
+        'totalQuestionCount': _visibleQuestions.length,
+        'confirmedDanger': null, // Never reached confirmation
+        'handled': false,
+        'pageTarget': '3143979832',
+      });
+      print('[CheckIn] Fallback safety alert sent for abandoned check-in: $alertId');
+    } catch (e) {
+      print('[CheckIn] Error sending fallback safety alert: $e');
+    }
+  }
+
+  /// Save partial check-in responses even when exiting early
+  Future<void> _savePartialCheckin() async {
+    if (_responses.isEmpty) return;
+
+    final now = DateTime.now();
+    final checkinId = const Uuid().v4();
+
+    final companion = EmaResponsesCompanion(
+      id: drift.Value(checkinId),
+      participantId: drift.Value(widget.participantId),
+      sessionId: drift.Value(widget.sessionId),
+      responses: drift.Value(jsonEncode({
+        ..._responses,
+        '_partial': true,
+        '_exitedAtQuestion': _currentIndex,
+        '_totalQuestions': _visibleQuestions.length,
+      })),
+      startedAt: drift.Value(_startedAt!),
+      completedAt: drift.Value(now),
+      selfInitiated: drift.Value(widget.selfInitiated),
+    );
+
+    await widget.database.insertEmaResponse(companion);
+    print('[CheckIn] Saved partial EMA response: $checkinId (${_responses.length} answers, exited at ${_currentIndex + 1}/${_visibleQuestions.length})');
+  }
+
   void _showExitConfirmation() {
+    final hasRisk = _hasHighRiskResponses();
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text('Exit check-in?'),
-        content: const Text('Your responses will not be saved.'),
+        content: Text(
+          hasRisk
+            ? 'Based on some of your responses, we want to make sure you\'re safe. '
+              'If you exit now, your responses will be saved and the study team may follow up.'
+            : 'Your responses will not be saved.',
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Continue'),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Continue check-in'),
           ),
           TextButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              Navigator.of(this.context).pop(false);
+            onPressed: () async {
+              Navigator.of(dialogContext).pop();
+
+              // If high-risk responses were given, save partial data and alert
+              if (hasRisk) {
+                await _savePartialCheckin();
+                await _sendFallbackAlert();
+              }
+
+              if (mounted) {
+                Navigator.of(this.context).pop(false);
+              }
             },
-            child: const Text('Exit'),
+            child: Text(
+              'Exit',
+              style: TextStyle(color: hasRisk ? Colors.red : null),
+            ),
           ),
         ],
       ),
