@@ -105,6 +105,10 @@ class UploadService {
       storageUrl = await _uploadScreenshot(event, eventData);
       if (storageUrl != null) {
         _screenshotsUploaded++;
+      } else {
+        // Screenshot file missing or upload failed — don't mark as synced
+        // so it can be retried (up to maxSyncRetries)
+        throw Exception('Screenshot upload failed for event ${event.id} — file missing or upload error');
       }
 
       // Get OCR result if available
