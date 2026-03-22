@@ -52,6 +52,9 @@ dependencies:
   # HTTP for Cloud Function calls
   http: ^1.2.0
 
+  # Network connectivity checking
+  connectivity_plus: ^6.0.0
+
   # OCR - On-device text recognition
 
   # Firebase

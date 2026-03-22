@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:isolate';
 import 'package:flutter/foundation.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../storage/database/database.dart';
 import '../../ocr/services/ocr_service.dart';
 import 'upload_service.dart';
@@ -73,6 +73,21 @@ class BackgroundSyncService {
     _isRunning = false;
   }
 
+  /// Check if the device has network connectivity
+  Future<bool> _hasNetworkConnectivity() async {
+    try {
+      final results = await Connectivity().checkConnectivity();
+      final connected = results.any((r) =>
+          r == ConnectivityResult.wifi ||
+          r == ConnectivityResult.mobile ||
+          r == ConnectivityResult.ethernet);
+      return connected;
+    } catch (e) {
+      // If we can't check, assume connected and let uploads fail naturally
+      return true;
+    }
+  }
+
   /// Run a single sync cycle (OCR + upload)
   Future<void> _runSyncCycle() async {
     if (_isSyncing) {
@@ -84,11 +99,19 @@ class BackgroundSyncService {
     _updateStatus(SyncStatus.syncing());
 
     try {
+      // Step 0: Check network connectivity before attempting uploads
+      final hasNetwork = await _hasNetworkConnectivity();
+
       // Step 1: Process any pending OCR (runs async, non-blocking)
+      // OCR is local-only, doesn't need network
       await _processOcrInBackground();
 
-      // Step 2: Sync to Firebase (runs async, non-blocking)
-      await _syncToFirebase();
+      // Step 2: Sync to Firebase (only if online)
+      if (!hasNetwork) {
+        print('[BackgroundSync] No network connectivity, skipping Firebase sync');
+      } else {
+        await _syncToFirebase();
+      }
 
       // Update status
       final syncStatus = await uploadService.getSyncStatus();
