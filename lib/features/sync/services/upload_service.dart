@@ -54,7 +54,73 @@ class UploadService {
         final syncedIds = <String>[];
         final failedIds = <String>[];
 
-        for (final event in unsyncedEvents) {
+        // Separate screenshot events (need file upload) from others (can batch)
+        final screenshotEvents = unsyncedEvents.where((e) => e.eventType == 'screenshot').toList();
+        final otherEvents = unsyncedEvents.where((e) => e.eventType != 'screenshot').toList();
+
+        // Batch-upload non-screenshot events via WriteBatch
+        if (otherEvents.isNotEmpty) {
+          WriteBatch? batch;
+          int batchCount = 0;
+          const maxBatch = 450;
+
+          for (final event in otherEvents) {
+            try {
+              batch ??= _firestore.batch();
+              final docRef = _firestore
+                  .collection('participants')
+                  .doc(event.participantId)
+                  .collection('events')
+                  .doc(event.id);
+
+              Map<String, dynamic> eventData;
+              try {
+                eventData = jsonDecode(event.data) as Map<String, dynamic>;
+              } catch (_) {
+                eventData = {'raw': event.data};
+              }
+
+              batch.set(docRef, {
+                'id': event.id,
+                'sessionId': event.sessionId,
+                'participantId': event.participantId,
+                'eventType': event.eventType,
+                'timestamp': Timestamp.fromDate(event.timestamp),
+                'platform': event.platform,
+                'url': event.url,
+                'data': eventData,
+                'createdAt': Timestamp.fromDate(event.createdAt),
+                'syncedAt': FieldValue.serverTimestamp(),
+              });
+
+              syncedIds.add(event.id);
+              batchCount++;
+
+              if (batchCount >= maxBatch) {
+                await batch.commit();
+                batch = null;
+                batchCount = 0;
+              }
+            } catch (e) {
+              print('[UploadService] Failed to batch event ${event.id}: $e');
+              failedIds.add(event.id);
+            }
+          }
+
+          if (batch != null && batchCount > 0) {
+            try {
+              await batch.commit();
+            } catch (e) {
+              print('[UploadService] Failed to commit event batch: $e');
+              // Move batch items from synced to failed
+              syncedIds.removeWhere((id) => otherEvents.any((ev) => ev.id == id));
+              failedIds.addAll(otherEvents.map((e) => e.id));
+            }
+          }
+        }
+
+        // Upload screenshot events individually (each needs a file upload)
+        for (final event in screenshotEvents) {
           try {
             await _uploadEvent(event);
             syncedIds.add(event.id);
