@@ -311,21 +311,13 @@ class AppDatabase extends _$AppDatabase {
 
   /// Get pending OCR count (screenshot events without OCR results)
   Future<int> getPendingOcrCount() async {
-    // Get all screenshot event IDs
-    final screenshotEvents = await (select(events)
-          ..where((e) => e.eventType.equals('screenshot')))
-        .get();
-
-    if (screenshotEvents.isEmpty) return 0;
-
-    // Get OCR results for those events
-    final eventIds = screenshotEvents.map((e) => e.id).toList();
-    final ocrResultsList = await (select(ocrResults)
-          ..where((o) => o.eventId.isIn(eventIds)))
-        .get();
-
-    final processedIds = ocrResultsList.map((o) => o.eventId).toSet();
-    return eventIds.where((id) => !processedIds.contains(id)).length;
+    final result = await customSelect(
+      'SELECT COUNT(*) AS c FROM events e '
+      'LEFT JOIN ocr_results o ON e.id = o.event_id '
+      'WHERE e.event_type = ? AND o.id IS NULL',
+      variables: [Variable.withString('screenshot')],
+    ).getSingle();
+    return result.data['c'] as int;
   }
 
   // ==========================================================================
@@ -409,30 +401,29 @@ class AppDatabase extends _$AppDatabase {
 
   /// Get screenshot events pending OCR processing
   Future<List<Event>> getScreenshotsPendingOcr({int? limit}) async {
-    // Get all screenshot events
-    final screenshotEvents = await (select(events)
-          ..where((e) => e.eventType.equals('screenshot')))
-        .get();
+    final limitClause = limit != null ? 'LIMIT $limit' : '';
+    final rows = await customSelect(
+      'SELECT e.* FROM events e '
+      'LEFT JOIN ocr_results o ON e.id = o.event_id '
+      'WHERE e.event_type = ? AND o.id IS NULL '
+      'ORDER BY e.timestamp ASC $limitClause',
+      variables: [Variable.withString('screenshot')],
+      readsFrom: {events, ocrResults},
+    ).get();
 
-    if (screenshotEvents.isEmpty) return [];
-
-    // Get already processed event IDs
-    final eventIds = screenshotEvents.map((e) => e.id).toList();
-    final ocrResultsList = await (select(ocrResults)
-          ..where((o) => o.eventId.isIn(eventIds)))
-        .get();
-
-    final processedIds = ocrResultsList.map((o) => o.eventId).toSet();
-
-    // Filter to unprocessed
-    final pending = screenshotEvents
-        .where((e) => !processedIds.contains(e.id))
-        .toList();
-
-    if (limit != null && pending.length > limit) {
-      return pending.sublist(0, limit);
-    }
-    return pending;
+    return rows.map((row) => Event(
+      id: row.data['id'] as String,
+      sessionId: row.data['session_id'] as String,
+      participantId: row.data['participant_id'] as String,
+      eventType: row.data['event_type'] as String,
+      timestamp: DateTime.fromMillisecondsSinceEpoch((row.data['timestamp'] as int) * 1000),
+      platform: row.data['platform'] as String,
+      url: row.data['url'] as String?,
+      data: row.data['data'] as String,
+      synced: (row.data['synced'] as int) == 1,
+      syncRetryCount: row.data['sync_retry_count'] as int,
+      createdAt: DateTime.fromMillisecondsSinceEpoch((row.data['created_at'] as int) * 1000),
+    )).toList();
   }
 }
 
