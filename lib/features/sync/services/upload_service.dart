@@ -191,8 +191,18 @@ class UploadService {
         },
       );
 
-      final uploadTask = await ref.putFile(file, metadata);
-      final downloadUrl = await uploadTask.ref.getDownloadURL();
+      final uploadTask = ref.putFile(file, metadata);
+
+      // Add timeout to prevent hanging uploads (30 seconds per file)
+      final snapshot = await uploadTask.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          uploadTask.cancel();
+          throw Exception('Screenshot upload timed out after 30s');
+        },
+      );
+
+      final downloadUrl = await snapshot.ref.getDownloadURL();
 
       print('[UploadService] Uploaded screenshot: $storagePath');
 
@@ -380,8 +390,15 @@ class UploadService {
       },
     );
 
-    final uploadTask = await ref.putFile(file, metadata);
-    final downloadUrl = await uploadTask.ref.getDownloadURL();
+    final uploadTask = ref.putFile(file, metadata);
+    final snapshot = await uploadTask.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () {
+        uploadTask.cancel();
+        throw Exception('HTML upload timed out after 30s');
+      },
+    );
+    final downloadUrl = await snapshot.ref.getDownloadURL();
 
     // Update the event document with HTML data using dot notation
     // to avoid overwriting fields set by status log sync
