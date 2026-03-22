@@ -180,12 +180,14 @@ class AppDatabase extends _$AppDatabase {
     return (select(events)..where((e) => e.eventType.equals(type))).get();
   }
 
-  /// Get unsynced events (excludes events that exceeded max retry count)
+  /// Get unsynced events (excludes events that exceeded max retry count).
+  /// Ordered newest-first so recent data syncs before old backlog.
   Future<List<Event>> getUnsyncedEvents({int? limit}) {
     final query = select(events)
       ..where((e) =>
           e.synced.equals(false) &
-          e.syncRetryCount.isSmallerThanValue(maxSyncRetries));
+          e.syncRetryCount.isSmallerThanValue(maxSyncRetries))
+      ..orderBy([(e) => OrderingTerm.desc(e.timestamp)]);
     if (limit != null) {
       query.limit(limit);
     }
