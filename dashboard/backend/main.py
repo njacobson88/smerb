@@ -2435,8 +2435,8 @@ def estimate_export(
             event = event_doc.to_dict()
             if event.get("eventType") == "screenshot" or event.get("type") == "screenshot":
                 screenshot_count += 1
-                # Estimate ~200KB per screenshot
-                total_screenshot_size += 200 * 1024
+                # Estimate ~60KB per screenshot (750px width, JPEG quality 70)
+                total_screenshot_size += 60 * 1024
 
         # Count EMAs and alerts
         ema_count = len(list(participant_ref.collection("ema_responses").limit(500).stream()))
