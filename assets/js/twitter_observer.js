@@ -286,6 +286,7 @@
     }
   }
 
+  let mutationDebounceTimer = null;
   const mutationObserver = new MutationObserver((mutations) => {
     let hasNewContent = false;
 
@@ -298,7 +299,12 @@
     });
 
     if (hasNewContent) {
-      observeNewContent();
+      // Debounce to avoid excessive DOM queries on rapid mutations
+      if (mutationDebounceTimer) clearTimeout(mutationDebounceTimer);
+      mutationDebounceTimer = setTimeout(() => {
+        observeNewContent();
+        mutationDebounceTimer = null;
+      }, 200);
     }
   });
 
