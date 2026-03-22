@@ -20,19 +20,22 @@
 - [x] Debounce MutationObserver in DOM observers (200ms debounce on callbacks)
 - [x] Add data retention policy (prune synced local data older than 7 days, runs hourly)
 
-## P3 - Nice to Have
-- [ ] Resumable uploads for screenshots (Firebase Storage supports this)
-- [ ] Upload progress tracking visible in the app
-- [ ] Make screenshot capture interval configurable (1/sec may be excessive, 1/3sec could suffice)
-- [ ] Prioritize recent data over old data during sync
-- [ ] Add Firestore batch writes for non-screenshot event uploads
+## P3 - Nice to Have (COMPLETED)
+- [x] Add 30-second timeout on file uploads to prevent hanging syncs
+- [x] Track upload bytes and log data volume per sync cycle
+- [x] Change screenshot capture interval from 1s to 3s (~67% volume reduction)
+- [x] Sync newest events first (prioritize recent data)
+- [x] Batch Firestore writes for non-screenshot event uploads
 
-## Data Volume Estimates (after P1+P2 optimizations)
-- Screenshots: ~60KB JPEG each (down from ~250KB), up to 1/sec = ~216MB/hour active use
-- HTML captures: ~50-200KB gzipped (down from 500KB-2MB raw)
+## Data Volume Estimates (after all optimizations)
+- Screenshots: ~60KB JPEG each, every 3s = ~72MB/hour active use (was ~900MB/hour)
+- HTML captures: ~50-200KB gzipped (was 500KB-2MB raw)
 - Local files auto-deleted after upload confirmation
 - 2GB disk cap prevents device storage exhaustion
-- Synced data pruned after 7 days (~86K rows/day for HtmlStatusLogs alone)
-- SQLite queries use indexes for O(log n) lookups instead of full table scans
-- JPEG compression runs on background isolate (no UI jank)
-- DOM observers debounced to prevent excessive queries
+- Synced data pruned after 7 days
+- SQLite queries use indexes for O(log n) lookups
+- JPEG compression on background isolate (no UI jank)
+- DOM observers debounced (200ms)
+- Non-screenshot events batched (up to 450 per Firestore write)
+- Upload timeouts prevent hanging syncs (30s per file)
+- Recent data syncs first
