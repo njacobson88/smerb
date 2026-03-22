@@ -13,12 +13,12 @@
 - [x] Delete local files after confirmed upload (screenshots + HTML)
 - [x] Add disk space monitoring (2GB cap, pauses capture when exceeded)
 
-## P2 - Performance (prevents degradation over time)
-- [ ] Move JPEG compression to a Dart isolate (use compute() to offload from main thread)
-- [ ] Add SQLite indexes on Events(synced, eventType, participantId)
-- [ ] Fix getScreenshotsPendingOcr to use SQL LEFT JOIN instead of loading all into memory
-- [ ] Debounce MutationObserver in DOM observers (200ms debounce on callbacks)
-- [ ] Add data retention policy (prune synced local data older than N days)
+## P2 - Performance (COMPLETED)
+- [x] Move JPEG compression to a Dart isolate (compute() offloads from main thread)
+- [x] Add SQLite indexes on Events(synced, eventType, participantId) + all synced columns
+- [x] Fix getScreenshotsPendingOcr to use SQL LEFT JOIN instead of loading all into memory
+- [x] Debounce MutationObserver in DOM observers (200ms debounce on callbacks)
+- [x] Add data retention policy (prune synced local data older than 7 days, runs hourly)
 
 ## P3 - Nice to Have
 - [ ] Resumable uploads for screenshots (Firebase Storage supports this)
@@ -27,10 +27,12 @@
 - [ ] Prioritize recent data over old data during sync
 - [ ] Add Firestore batch writes for non-screenshot event uploads
 
-## Data Volume Estimates (after P1 optimizations)
+## Data Volume Estimates (after P1+P2 optimizations)
 - Screenshots: ~60KB JPEG each (down from ~250KB), up to 1/sec = ~216MB/hour active use
 - HTML captures: ~50-200KB gzipped (down from 500KB-2MB raw)
 - Local files auto-deleted after upload confirmation
 - 2GB disk cap prevents device storage exhaustion
-- HtmlStatusLogs: 1 row/sec in SQLite (fastest-growing table)
-- OCR results: full extracted text stored unbounded in SQLite
+- Synced data pruned after 7 days (~86K rows/day for HtmlStatusLogs alone)
+- SQLite queries use indexes for O(log n) lookups instead of full table scans
+- JPEG compression runs on background isolate (no UI jank)
+- DOM observers debounced to prevent excessive queries
