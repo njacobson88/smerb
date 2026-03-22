@@ -11,6 +11,29 @@ import 'package:image/image.dart' as img;
 import '../../storage/database/database.dart';
 import 'package:drift/drift.dart' as drift;
 
+/// Top-level function for isolate-based JPEG compression.
+/// Must be top-level (not a method) for compute() to work.
+Uint8List _compressToJpegIsolate(Map<String, dynamic> params) {
+  final pngBytes = params['pngBytes'] as Uint8List;
+  final quality = params['quality'] as int;
+  final maxWidth = params['maxWidth'] as int;
+
+  try {
+    final image = img.decodeImage(pngBytes);
+    if (image == null) return pngBytes;
+
+    img.Image processed = image;
+    if (image.width > maxWidth) {
+      processed = img.copyResize(image, width: maxWidth);
+    }
+
+    final jpegBytes = img.encodeJpg(processed, quality: quality);
+    return Uint8List.fromList(jpegBytes);
+  } catch (_) {
+    return pngBytes;
+  }
+}
+
 /// Service that captures screenshots every second and saves them if they've changed
 class ScreenshotService {
   final AppDatabase database;
@@ -225,28 +248,17 @@ class ScreenshotService {
     }
   }
 
-  /// Downscale and compress PNG screenshot to JPEG format.
-  /// Retina displays capture at 2-3x resolution — we downscale to a max
-  /// width of 750px (roughly 1x phone width) which is sufficient for
-  /// research content analysis while cutting file size significantly.
+  /// Downscale and compress PNG screenshot to JPEG format on a background isolate.
+  /// This prevents UI jank since image decoding/encoding is CPU-intensive.
   static const int _maxScreenshotWidth = 750;
 
   Future<Uint8List> _compressToJpeg(Uint8List pngBytes, {int quality = 70}) async {
     try {
-      final image = img.decodeImage(pngBytes);
-      if (image == null) {
-        print('[ScreenshotService] Failed to decode PNG, using original');
-        return pngBytes;
-      }
-
-      // Downscale if wider than target (preserves aspect ratio)
-      img.Image processed = image;
-      if (image.width > _maxScreenshotWidth) {
-        processed = img.copyResize(image, width: _maxScreenshotWidth);
-      }
-
-      final jpegBytes = img.encodeJpg(processed, quality: quality);
-      return Uint8List.fromList(jpegBytes);
+      return await compute(_compressToJpegIsolate, {
+        'pngBytes': pngBytes,
+        'quality': quality,
+        'maxWidth': _maxScreenshotWidth,
+      });
     } catch (e) {
       print('[ScreenshotService] Error compressing to JPEG: $e');
       return pngBytes;
