@@ -116,13 +116,16 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   static const int maxSyncRetries = 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-    onCreate: (Migrator m) => m.createAll(),
+    onCreate: (Migrator m) async {
+      await m.createAll();
+      await _createIndexes(m);
+    },
     onUpgrade: (Migrator m, int from, int to) async {
       if (from < 2) {
         await m.createTable(ocrResults);
@@ -137,8 +140,26 @@ class AppDatabase extends _$AppDatabase {
       if (from < 5) {
         await m.addColumn(events, events.syncRetryCount);
       }
+      if (from < 6) {
+        await _createIndexes(m);
+      }
     },
   );
+
+  Future<void> _createIndexes(Migrator m) async {
+    // Events: queried by synced status every 30 seconds
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_events_synced ON events (synced, sync_retry_count)');
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_events_type ON events (event_type)');
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_events_participant ON events (participant_id)');
+    // OCR: queried for unsynced results
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_ocr_synced ON ocr_results (synced)');
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_ocr_event ON ocr_results (event_id)');
+    // HTML: queried for unsynced captures and logs
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_html_captures_synced ON html_captures (synced)');
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_html_status_synced ON html_status_logs (synced)');
+    // EMA: queried for unsynced responses
+    await customStatement('CREATE INDEX IF NOT EXISTS idx_ema_synced ON ema_responses (synced)');
+  }
 
   // ==========================================================================
   // EVENT QUERIES
