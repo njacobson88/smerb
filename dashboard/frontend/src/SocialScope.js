@@ -909,6 +909,12 @@ const AlertsScreen = ({ goToParticipantView }) => {
   // Follow-ups state
   const [followups, setFollowups] = useState([]);
 
+  // Disposition logging state
+  const [expandedAlert, setExpandedAlert] = useState(null);
+  const [dispositionForm, setDispositionForm] = useState({ disposition: '', notes: '', outreach_method: '' });
+  const [dispositionSaving, setDispositionSaving] = useState(false);
+  const [dispositionSuccess, setDispositionSuccess] = useState(null);
+
   const fetchAlerts = React.useCallback(async () => {
     setLoading(true);
     try {
@@ -970,6 +976,34 @@ const AlertsScreen = ({ goToParticipantView }) => {
       }
     } catch (e) { /* ignore */ }
     finally { setRosterSaving(false); }
+  };
+
+  const logDisposition = async (alertId) => {
+    if (!dispositionForm.disposition) return;
+    setDispositionSaving(true);
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/safety-events/${alertId}/disposition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          safety_event_id: alertId,
+          disposition: dispositionForm.disposition,
+          notes: dispositionForm.notes,
+          outreach_method: dispositionForm.outreach_method,
+        }),
+      });
+      if (res.ok) {
+        setDispositionSuccess(alertId);
+        setDispositionForm({ disposition: '', notes: '', outreach_method: '' });
+        setTimeout(() => setDispositionSuccess(null), 5000);
+        // Also create follow-ups if it was a real event
+        if (['contacted_safe', 'contacted_needs_support', 'escalated_988', 'escalated_er'].includes(dispositionForm.disposition)) {
+          await authFetch(`${API_BASE_URL}/api/safety-events/${alertId}/create-followups`, { method: 'POST' });
+          fetchFollowups();
+        }
+      }
+    } catch (e) { /* ignore */ }
+    finally { setDispositionSaving(false); }
   };
 
   const startEditRole = (role) => {
@@ -1143,25 +1177,102 @@ const AlertsScreen = ({ goToParticipantView }) => {
           <p className="text-gray-500 text-center py-8">No safety alerts recorded.</p>
         ) : (
           <div className="space-y-3">
-            {alerts.map((alert, idx) => (
-              <div key={idx} className={`flex items-center justify-between p-4 border rounded-lg ${
-                alert.crisis_indicated ? 'bg-red-100 border-red-400' : 'bg-red-50 border-red-200'
-              }`}>
-                <div>
-                  <span className="font-medium text-gray-800">Participant: </span>
-                  <button onClick={() => goToParticipantView(alert.participantId)} className="text-blue-600 hover:underline">
-                    {alert.participantId}
-                  </button>
-                  <span className="text-gray-500 ml-4">{alert.date}</span>
-                  {alert.crisis_indicated && (
-                    <span className="ml-3 px-2 py-0.5 bg-red-600 text-white text-xs font-bold rounded animate-pulse">CRISIS</span>
+            {alerts.map((alert, idx) => {
+              const alertKey = `${alert.participantId}_${alert.date}`;
+              const isExpanded = expandedAlert === alertKey;
+              const wasResolved = dispositionSuccess === alertKey;
+
+              return (
+                <div key={idx} className={`border rounded-lg overflow-hidden ${
+                  alert.crisis_indicated ? 'border-red-400' : 'border-red-200'
+                }`}>
+                  {/* Alert header — clickable to expand */}
+                  <div
+                    onClick={() => setExpandedAlert(isExpanded ? null : alertKey)}
+                    className={`flex items-center justify-between p-4 cursor-pointer hover:bg-red-100 transition-colors ${
+                      alert.crisis_indicated ? 'bg-red-100' : 'bg-red-50'
+                    }`}
+                  >
+                    <div>
+                      <span className="font-medium text-gray-800">Participant: </span>
+                      <button onClick={(e) => { e.stopPropagation(); goToParticipantView(alert.participantId); }} className="text-blue-600 hover:underline">
+                        {alert.participantId}
+                      </button>
+                      <span className="text-gray-500 ml-4">{alert.date}</span>
+                      {alert.crisis_indicated && (
+                        <span className="ml-3 px-2 py-0.5 bg-red-600 text-white text-xs font-bold rounded animate-pulse">CRISIS</span>
+                      )}
+                      {wasResolved && (
+                        <span className="ml-3 px-2 py-0.5 bg-green-600 text-white text-xs font-bold rounded">RESPONDED</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="bg-red-500 text-white px-3 py-1 rounded-full text-sm font-medium">
+                        {alert.count} alert{alert.count > 1 ? 's' : ''}
+                      </span>
+                      <span className="text-gray-400 text-xs">{isExpanded ? '▲' : '▼'}</span>
+                    </div>
+                  </div>
+
+                  {/* Expanded: Disposition logging panel */}
+                  {isExpanded && (
+                    <div className="p-4 bg-white border-t border-red-200">
+                      <h4 className="text-sm font-bold text-gray-700 mb-3">Log Response (stops escalation timer)</h4>
+
+                      <div className="grid grid-cols-3 gap-3 mb-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Disposition</label>
+                          <select value={dispositionForm.disposition}
+                            onChange={e => setDispositionForm(f => ({...f, disposition: e.target.value}))}
+                            className="w-full border rounded px-2 py-1.5 text-sm bg-white">
+                            <option value="">Select...</option>
+                            <option value="contacted_safe">Contacted — Participant is safe</option>
+                            <option value="contacted_needs_support">Contacted — Needs support/referral</option>
+                            <option value="unable_to_reach">Unable to reach participant</option>
+                            <option value="false_alarm">False alarm / Accidental</option>
+                            <option value="escalated_988">Escalated to 988</option>
+                            <option value="escalated_er">Escalated to ER / 911</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Outreach Method</label>
+                          <select value={dispositionForm.outreach_method}
+                            onChange={e => setDispositionForm(f => ({...f, outreach_method: e.target.value}))}
+                            className="w-full border rounded px-2 py-1.5 text-sm bg-white">
+                            <option value="">Select...</option>
+                            <option value="phone_call">Phone call</option>
+                            <option value="sms">SMS</option>
+                            <option value="email">Email</option>
+                            <option value="in_person">In person</option>
+                            <option value="automated_ivr">Automated IVR call</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Notes</label>
+                          <input value={dispositionForm.notes}
+                            onChange={e => setDispositionForm(f => ({...f, notes: e.target.value}))}
+                            placeholder="Brief notes..."
+                            className="w-full border rounded px-2 py-1.5 text-sm" />
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => logDisposition(alertKey)}
+                        disabled={dispositionSaving || !dispositionForm.disposition}
+                        className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded hover:bg-green-700 disabled:opacity-50"
+                      >
+                        {dispositionSaving ? 'Saving...' : 'Log Response & Stop Escalation'}
+                      </button>
+
+                      <p className="text-xs text-gray-400 mt-2">
+                        Logging a response stops the escalation timer (backup/PI won't be paged).
+                        For serious events, follow-up schedule (24h/48h/72h/7d) will be auto-created.
+                      </p>
+                    </div>
                   )}
                 </div>
-                <span className="bg-red-500 text-white px-3 py-1 rounded-full text-sm font-medium">
-                  {alert.count} alert{alert.count > 1 ? 's' : ''}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
