@@ -10,7 +10,11 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'fs';
 
 const PROJECT_ID = 'r01-redditx-suicide';
-const COLLECTION = 'valid_participants';
+const ENVIRONMENT = process.env.ENVIRONMENT || 'prod';
+const PREFIX = ENVIRONMENT === 'dev' ? 'dev_' : '';
+const COLLECTION = `${PREFIX}valid_participants`;
+
+console.log(`Environment: ${ENVIRONMENT}, Collection: ${COLLECTION}`);
 const TOTAL_TEST_USERS = 1000;
 const BATCH_SIZE = 500;
 

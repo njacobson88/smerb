@@ -162,6 +162,98 @@ service cloud.firestore {
     }
 
     // ========================================================================
+    // DEV ENVIRONMENT COLLECTIONS (dev_ prefix)
+    // Mirror the same rules as production collections above.
+    // These are used when ENVIRONMENT=dev to isolate dev data.
+    // ========================================================================
+
+    match /dev_participants/{participantId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if false;
+
+      match /events/{eventId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+      match /ema_responses/{responseId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+      match /safety_alerts/{alertId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+      match /pending_safety_confirmations/{docId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+      match /notification_log/{logId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+      match /safety_plan/{planId} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+
+    match /dev_valid_participants/{participantId} {
+      allow read: if true;
+      allow update: if true;
+      allow create: if false;
+      allow delete: if false;
+    }
+
+    match /dev_dashboard_cache/{cacheId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /dev_export_jobs/{jobId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+    match /dev_dashboard_users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /dev_alert_recipients/{recipientId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /dev_oncall_roster/{roleId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /dev_safety_events/{eventId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+      match /audit_trail/{trailId} {
+        allow read: if isAuthenticated();
+        allow write: if false;
+      }
+    }
+    match /dev_followup_schedule/{followupId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+    match /dev_redcap_mappings/{mappingId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // ========================================================================
     // DEFAULT DENY
     // ========================================================================
 
