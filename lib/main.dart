@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
+import 'core/config/environment_config.dart';
 import 'features/browser/screens/browser_screen.dart';
 import 'features/debug/screens/debug_screen.dart';
 import 'features/storage/database/database.dart';
@@ -52,6 +53,33 @@ class SmerbApp extends StatelessWidget {
         ),
       ),
       home: const AppInitializer(),
+      builder: (context, child) {
+        if (!EnvConfig.isDev) return child!;
+        // Show bright orange DEV banner at the top of the app
+        return Column(
+          children: [
+            Container(
+              color: Colors.orange,
+              width: double.infinity,
+              padding: const EdgeInsets.only(top: 4, bottom: 4),
+              child: const SafeArea(
+                bottom: false,
+                child: Text(
+                  'DEV ENVIRONMENT',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ),
+            ),
+            Expanded(child: child!),
+          ],
+        );
+      },
     );
   }
 }

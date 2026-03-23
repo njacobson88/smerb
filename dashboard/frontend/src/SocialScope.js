@@ -58,6 +58,7 @@ const SocialScope = () => {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [networkBlocked, setNetworkBlocked] = useState(false);
+  const [environment, setEnvironment] = useState(null);
   const [activeTab, setActiveTab] = useState('overall');
   const [selectedParticipant, setSelectedParticipant] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -76,6 +77,14 @@ const SocialScope = () => {
   useEffect(() => {
     setNetworkBlockedHandler(() => setNetworkBlocked(true));
     return () => setNetworkBlockedHandler(null);
+  }, []);
+
+  // Fetch environment for dev banner
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/config/environment`)
+      .then(r => r.json())
+      .then(d => setEnvironment(d.environment))
+      .catch(() => {});
   }, []);
 
   // Handle logout
@@ -163,6 +172,12 @@ const SocialScope = () => {
 
   return (
     <div className="min-h-screen bg-gray-100">
+      {/* Dev Environment Banner */}
+      {environment === 'dev' && (
+        <div className="bg-orange-500 text-white text-center py-2 font-bold text-sm">
+          DEV ENVIRONMENT — Data in dev_ collections
+        </div>
+      )}
       {/* Header */}
       <header className="bg-gradient-to-r from-blue-600 to-purple-600 shadow-lg">
         <nav className="container mx-auto px-4 py-4 flex justify-between items-center">
