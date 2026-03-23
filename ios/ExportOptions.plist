@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Enterprise distribution for side-loading without App Store -->
+    <key>method</key>
+    <string>enterprise</string>
+
+    <!-- Team ID from Apple Developer Enterprise Program -->
+    <key>teamID</key>
+    <string>P733E8R47B</string>
+
+    <!-- Strip Swift symbols for smaller binary -->
+    <key>stripSwiftSymbols</key>
+    <true/>
+
+    <!-- Upload symbols for crash reporting -->
+    <key>uploadSymbols</key>
+    <true/>
+
+    <!-- Provisioning profile mapping -->
+    <!-- Update this with your enterprise provisioning profile name -->
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>com.dartmouth.smerb</key>
+        <string>SocialScope Enterprise Distribution</string>
+    </dict>
+</dict>
+</plist>

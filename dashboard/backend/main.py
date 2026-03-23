@@ -246,6 +246,17 @@ def get_environment():
     }
 
 
+@app.get("/api/install/links")
+def get_install_links():
+    """Return current download links for the app. No auth required (for participants)."""
+    return {
+        "ios_url": os.getenv("IOS_DOWNLOAD_URL", ""),
+        "android_url": os.getenv("ANDROID_DOWNLOAD_URL", ""),
+        "ios_version": os.getenv("IOS_APP_VERSION", "1.0.0"),
+        "android_version": os.getenv("ANDROID_APP_VERSION", "1.0.0"),
+    }
+
+
 @app.get("/api/debug/test-signing")
 def debug_test_signing():
     """Debug endpoint to test signed URL generation."""

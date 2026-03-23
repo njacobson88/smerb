@@ -7,6 +7,7 @@ import ParticipantDetailScreen from './ParticipantDetailScreen';
 import DayDetailScreen from './DayDetailScreen';
 import Login, { auth, signOut, onAuthStateChanged, getIdToken } from './Login';
 import UserManagement from './UserManagement';
+import InstallPage from './InstallPage';
 
 // API Configuration
 // In production, REACT_APP_API_URL should point to the Cloud Run service
@@ -55,6 +56,10 @@ export const authFetch = async (url, options = {}) => {
 };
 
 const SocialScope = () => {
+  // Route /install to the install page (no auth required, for participants)
+  if (window.location.pathname === '/install') {
+    return <InstallPage />;
+  }
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [networkBlocked, setNetworkBlocked] = useState(false);
