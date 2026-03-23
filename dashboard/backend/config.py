@@ -21,6 +21,15 @@ load_dotenv()
 
 # Firebase project ID - must match your Firebase console project
 # REQUIRED: Set via FIREBASE_PROJECT_ID environment variable
+# Environment: "dev" or "prod" (default)
+# Dev mode prefixes all Firestore collections with "dev_"
+ENVIRONMENT = os.getenv("ENVIRONMENT", "prod")
+COLLECTION_PREFIX = "dev_" if ENVIRONMENT == "dev" else ""
+
+def col(name: str) -> str:
+    """Return environment-prefixed Firestore collection name."""
+    return f"{COLLECTION_PREFIX}{name}"
+
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "r01-redditx-suicide")
 
 # Dartmouth IP ranges for whitelisting
