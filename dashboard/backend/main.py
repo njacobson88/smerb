@@ -274,7 +274,10 @@ def get_participant_distribution(
 ):
     """Get distribution info for a participant (email, device type, invite status)."""
     try:
+        # Check both participants and valid_participants collections
         doc = db.collection(config.col("participants")).document(participant_id).get()
+        if not doc.exists:
+            doc = db.collection(config.col("valid_participants")).document(participant_id).get()
         if not doc.exists:
             return {"distribution": None}
 
@@ -303,6 +306,7 @@ def update_participant_distribution(
 ):
     """Update distribution email and/or device type for a participant."""
     try:
+        # Use participants collection with set/merge — creates doc if it doesn't exist yet
         doc_ref = db.collection(config.col("participants")).document(participant_id)
         updates = {}
 
@@ -317,7 +321,7 @@ def update_participant_distribution(
         if updates:
             updates["distributionUpdatedAt"] = datetime.utcnow()
             updates["distributionUpdatedBy"] = user.get("email")
-            doc_ref.update(updates)
+            doc_ref.set(updates, merge=True)
 
         logger.info(f"Distribution updated for {participant_id}: {updates} by {user.get('email')}")
         return {"message": "Distribution info updated", "updates": {k: str(v) for k, v in updates.items()}}
@@ -342,7 +346,9 @@ def send_distribution_invite(
     try:
         doc = db.collection(config.col("participants")).document(participant_id).get()
         if not doc.exists:
-            raise HTTPException(status_code=404, detail="Participant not found")
+            doc = db.collection(config.col("valid_participants")).document(participant_id).get()
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Participant not found in either collection")
 
         data = doc.to_dict()
         email = data.get("distributionEmail")
@@ -385,14 +391,14 @@ def send_distribution_invite(
             # This sends the invite email for the latest release
         )
 
-        # Update participant record
+        # Update participant record (set/merge in case doc doesn't exist yet)
         doc_ref = db.collection(config.col("participants")).document(participant_id)
-        doc_ref.update({
+        doc_ref.set({
             "distributionInviteSentAt": datetime.utcnow(),
             "distributionInviteStatus": "sent",
             "distributionInviteSentBy": user.get("email"),
             "distributionInviteDeviceType": device_type,
-        })
+        }, merge=True)
 
         logger.info(f"Distribution invite sent to {email} ({device_type}) for {participant_id} by {user.get('email')}")
 
