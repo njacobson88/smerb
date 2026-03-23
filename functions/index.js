@@ -241,6 +241,7 @@ exports.onSafetyAlert = onDocumentCreated(
     const alertType = alertData.alertType || "confirmed_danger";
     const isConfirmedDanger = alertData.confirmedDanger === true;
     const isFallback = alertType === "incomplete_checkin_fallback";
+    const isWalkAway = alertType === "unresolved_walkaway";
 
     // ================================================================
     // Step 1: Create safety event for audit trail
@@ -266,9 +267,11 @@ exports.onSafetyAlert = onDocumentCreated(
       try {
         const alertLabel = isConfirmedDanger
           ? "CONFIRMED DANGER"
-          : isFallback
-            ? "INCOMPLETE CHECK-IN (high-risk responses)"
-            : "SAFETY ALERT";
+          : isWalkAway
+            ? "POTENTIAL RISK — Participant walked away from check-in"
+            : isFallback
+              ? "INCOMPLETE CHECK-IN (high-risk responses)"
+              : "SAFETY ALERT";
 
         await sendEmail({
           senderEmail: senderEmailVal,
@@ -317,7 +320,13 @@ exports.onSafetyAlert = onDocumentCreated(
     if (recipients.length > 0) {
       try {
         const client = getTwilioClient();
-        const alertLabel = isConfirmedDanger ? "CONFIRMED DANGER" : isFallback ? "INCOMPLETE CHECK-IN" : "ALERT";
+        const alertLabel = isConfirmedDanger
+          ? "CONFIRMED DANGER"
+          : isWalkAway
+            ? "POTENTIAL RISK (walked away)"
+            : isFallback
+              ? "INCOMPLETE CHECK-IN"
+              : "ALERT";
 
         const smsBody =
           `[SocialScope ${alertLabel}]\n` +
@@ -325,9 +334,11 @@ exports.onSafetyAlert = onDocumentCreated(
           `Time: ${timestamp}\n` +
           (isConfirmedDanger
             ? `Participant CONFIRMED they are in immediate danger.\n`
-            : isFallback
-              ? `Participant gave high-risk responses but exited check-in before confirmation.\n`
-              : `A participant endorsed imminent self-harm risk.\n`) +
+            : isWalkAway
+              ? `POTENTIAL RISK: Participant gave concerning responses then walked away without completing the safety check. They may be in a risk state but this is NOT confirmed. Please follow up.\n`
+              : isFallback
+                ? `Participant gave high-risk responses but exited check-in before confirmation.\n`
+                : `A participant endorsed imminent self-harm risk.\n`) +
           `View: https://socialscope-dashboard.web.app`;
 
         for (const recipient of recipients) {
@@ -555,6 +566,74 @@ exports.checkEscalation = onSchedule(
       }
     } catch (err) {
       console.error("Escalation check error:", err);
+    }
+
+    // ================================================================
+    // Check for unresolved pending safety confirmations (walk-away detection)
+    // If a participant exceeded a threshold but walked away without
+    // answering the yes/no, send a "potential risk" alert after 15 minutes.
+    // ================================================================
+    try {
+      const fifteenMinAgo = new Date(now.getTime() - 15 * 60 * 1000);
+
+      // Get all participants
+      const participantsSnapshot = await admin.firestore()
+        .collection("participants").get();
+
+      for (const participantDoc of participantsSnapshot.docs) {
+        const pid = participantDoc.id;
+
+        // Check for unresolved pending confirmations
+        const pendingSnapshot = await admin.firestore()
+          .collection("participants").doc(pid)
+          .collection("pending_safety_confirmations")
+          .where("resolved", "==", false)
+          .get();
+
+        for (const pendingDoc of pendingSnapshot.docs) {
+          const pending = pendingDoc.data();
+          const exceededAt = pending.thresholdExceededAt?.toDate?.();
+
+          if (!exceededAt || exceededAt > fifteenMinAgo) continue;
+
+          // Already alerted for this one?
+          if (pending.walkAwayAlertSent) continue;
+
+          console.log(`Walk-away detected: participant ${pid}, pending ${pendingDoc.id}, exceeded ${Math.round((now - exceededAt) / 60000)} min ago`);
+
+          // Mark as alerted
+          await pendingDoc.ref.update({
+            walkAwayAlertSent: true,
+            walkAwayAlertAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+
+          // Create a safety alert (potential risk, not confirmed)
+          const alertId = pendingDoc.id + "_walkaway";
+          await admin.firestore()
+            .collection("participants").doc(pid)
+            .collection("safety_alerts").doc(alertId)
+            .set({
+              participantId: pid,
+              sessionId: pending.sessionId,
+              responses: pending.responses || {},
+              triggeredAt: admin.firestore.FieldValue.serverTimestamp(),
+              alertType: "unresolved_walkaway",
+              triggerQuestions: pending.triggerQuestions || [],
+              confirmedDanger: null,
+              handled: false,
+              thresholdExceededAt: pending.thresholdExceededAt,
+              minutesSinceThreshold: Math.round((now - exceededAt) / 60000),
+            });
+
+          console.log(`Walk-away safety alert created for ${pid}: ${alertId}`);
+
+          // The onSafetyAlert trigger will fire and handle notifications,
+          // but with alertType "unresolved_walkaway" the messaging will
+          // clearly indicate this is a potential (not confirmed) crisis.
+        }
+      }
+    } catch (err) {
+      console.error("Walk-away check error:", err);
     }
   }
 );

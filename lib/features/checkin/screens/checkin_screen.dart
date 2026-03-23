@@ -4,6 +4,7 @@ import 'package:card_swiper/card_swiper.dart';
 import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../models/ema_config.dart';
 import '../../storage/database/database.dart';
 import 'package:drift/drift.dart' as drift;
@@ -48,6 +49,11 @@ class _CheckinScreenState extends State<CheckinScreen>
   int _confirmationCount = 0; // How many confirmations shown so far
   final Set<String> _confirmedNoQuestions = {}; // Questions where they said "No"
   bool _confirmedYes = false; // True if they ever said "Yes, I am in immediate danger"
+
+  // Unresolved high-risk tracking (for walk-away detection)
+  DateTime? _firstThresholdExceededAt;
+  bool _confirmationResolved = false; // true once they answer yes/no or complete check-in
+  String? _pendingConfirmationDocId; // Firestore doc for the pending state
 
   @override
   void initState() {
@@ -129,6 +135,70 @@ class _CheckinScreenState extends State<CheckinScreen>
       _responses[questionId] = value;
       _updateVisibleQuestions();
     });
+
+    // Track when a threshold is first exceeded (for walk-away detection)
+    if (_firstThresholdExceededAt == null && _anyTriggerExceeded()) {
+      _firstThresholdExceededAt = DateTime.now();
+      _writePendingConfirmation();
+    }
+  }
+
+  /// Write a "pending_confirmation" document to Firestore so the backend
+  /// knows a participant exceeded a threshold but hasn't confirmed yet.
+  /// If they walk away, the backend can trigger follow-up after 15 minutes.
+  Future<void> _writePendingConfirmation() async {
+    try {
+      final docId = const Uuid().v4();
+      _pendingConfirmationDocId = docId;
+
+      final triggerQuestions = <String>[];
+      for (final q in _config!.questions) {
+        if (_isQuestionAboveThreshold(q)) triggerQuestions.add(q.id);
+      }
+
+      await FirebaseFirestore.instance
+          .collection('participants')
+          .doc(widget.participantId)
+          .collection('pending_safety_confirmations')
+          .doc(docId)
+          .set({
+        'participantId': widget.participantId,
+        'sessionId': widget.sessionId,
+        'thresholdExceededAt': FieldValue.serverTimestamp(),
+        'triggerQuestions': triggerQuestions,
+        'responses': _responses.map((k, v) => MapEntry(k, v?.toString())),
+        'resolved': false,
+        'resolvedAt': null,
+        'resolution': null, // will be "confirmed_danger", "denied_danger", "completed_checkin", "walk_away_alert_sent"
+      }).timeout(const Duration(seconds: 5));
+
+      print('[CheckIn] Pending confirmation written: $docId');
+    } catch (e) {
+      print('[CheckIn] Failed to write pending confirmation: $e');
+    }
+  }
+
+  /// Mark the pending confirmation as resolved (they answered yes/no or completed the check-in)
+  Future<void> _resolvePendingConfirmation(String resolution) async {
+    if (_pendingConfirmationDocId == null) return;
+    _confirmationResolved = true;
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('participants')
+          .doc(widget.participantId)
+          .collection('pending_safety_confirmations')
+          .doc(_pendingConfirmationDocId!)
+          .update({
+        'resolved': true,
+        'resolvedAt': FieldValue.serverTimestamp(),
+        'resolution': resolution,
+      }).timeout(const Duration(seconds: 5));
+
+      print('[CheckIn] Pending confirmation resolved: $resolution');
+    } catch (e) {
+      print('[CheckIn] Failed to resolve pending confirmation: $e');
+    }
   }
 
   void _advanceToNext() {
@@ -171,6 +241,9 @@ class _CheckinScreenState extends State<CheckinScreen>
 
     _crisisFlashController.repeat(reverse: true);
 
+    // Resolve the pending confirmation
+    _resolvePendingConfirmation('confirmed_danger');
+
     // NOW send the alert — only on confirmed "Yes"
     _sendSafetyAlert();
 
@@ -191,6 +264,9 @@ class _CheckinScreenState extends State<CheckinScreen>
         _crisisFlashController.repeat(reverse: true);
       }
     });
+
+    // Resolve the pending confirmation as denied
+    _resolvePendingConfirmation('denied_danger');
 
     // Continue to next question
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -288,6 +364,11 @@ class _CheckinScreenState extends State<CheckinScreen>
     await widget.database.insertEmaResponse(companion);
     print('[CheckIn] Saved EMA response: $checkinId (${_responses.length} answers)');
 
+    // Resolve pending confirmation on successful completion
+    if (_firstThresholdExceededAt != null && !_confirmationResolved) {
+      _resolvePendingConfirmation('completed_checkin');
+    }
+
     if (_crisisTriggered) {
       setState(() => _showPostResources = true);
     } else {
@@ -299,8 +380,67 @@ class _CheckinScreenState extends State<CheckinScreen>
 
   @override
   void dispose() {
+    // If a threshold was exceeded but the user never resolved the confirmation
+    // (they walked away / closed the app), schedule gentle follow-up notifications.
+    // The pending_safety_confirmations doc in Firestore remains unresolved,
+    // and the backend will send a "potential risk" alert after 15 minutes.
+    if (_firstThresholdExceededAt != null && !_confirmationResolved && !_completed) {
+      _scheduleWalkAwayNotifications();
+    }
+
     _crisisFlashController.dispose();
     super.dispose();
+  }
+
+  /// Schedule gentle local notifications at 5 and 10 minutes to nudge
+  /// the participant back to complete the safety check.
+  void _scheduleWalkAwayNotifications() {
+    try {
+      final notifications = FlutterLocalNotificationsPlugin();
+
+      const androidDetails = AndroidNotificationDetails(
+        'safety_followup',
+        'Safety Follow-Up',
+        channelDescription: 'Follow-up notifications for safety checks',
+        importance: Importance.high,
+        priority: Priority.high,
+      );
+      const iosDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      const details = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+      );
+
+      // 5-minute follow-up — gentle and caring
+      notifications.show(
+        9001,
+        'Just checking in',
+        'We noticed you stepped away from your check-in. '
+        'We want to make sure you\'re doing okay. '
+        'Tap here to finish up when you\'re ready.',
+        details,
+      );
+
+      // 10-minute follow-up — slightly more direct but still warm
+      Future.delayed(const Duration(minutes: 5), () {
+        notifications.show(
+          9002,
+          'We care about your well-being',
+          'Your check-in is still waiting for you. '
+          'If you\'re going through a tough time, we\'re here to help. '
+          'You can also call 988 anytime.',
+          details,
+        );
+      });
+
+      print('[CheckIn] Scheduled walk-away follow-up notifications');
+    } catch (e) {
+      print('[CheckIn] Failed to schedule follow-up notifications: $e');
+    }
   }
 
   @override
