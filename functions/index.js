@@ -6,6 +6,17 @@ const nodemailer = require("nodemailer");
 
 admin.initializeApp();
 
+// ============================================================================
+// Environment Configuration (dev/prod)
+// Set ENVIRONMENT=dev when deploying to use dev_ prefixed collections
+// Default is "prod" (no prefix)
+// ============================================================================
+const ENVIRONMENT = process.env.ENVIRONMENT || "prod";
+const PREFIX = ENVIRONMENT === "dev" ? "dev_" : "";
+function col(name) { return `${PREFIX}${name}`; }
+
+console.log(`[Config] Environment: ${ENVIRONMENT}, prefix: '${PREFIX}'`);
+
 // Twilio credentials stored as Firebase secrets
 const twilioAccountSid = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthToken = defineSecret("TWILIO_AUTH_TOKEN");
@@ -47,7 +58,7 @@ function getTwilioClient() {
 // Helper: Create a safety event in the audit trail system
 // ============================================================================
 async function createSafetyEvent(alertData, participantId, alertId) {
-  const eventRef = admin.firestore().collection("safety_events").doc(alertId);
+  const eventRef = admin.firestore().collection(col("safety_events")).doc(alertId);
 
   await eventRef.set({
     participantId,
@@ -81,7 +92,7 @@ async function createSafetyEvent(alertData, participantId, alertId) {
 // ============================================================================
 async function getOnCallRoster() {
   const roster = {};
-  const snapshot = await admin.firestore().collection("oncall_roster").get();
+  const snapshot = await admin.firestore().collection(col("oncall_roster")).get();
   snapshot.forEach((doc) => {
     roster[doc.id] = doc.data();
   });
@@ -94,7 +105,7 @@ async function getOnCallRoster() {
 async function smsParticipant(client, participantId, fromNumber) {
   // Get participant's phone from their profile (if stored)
   const participantDoc = await admin.firestore()
-    .collection("participants").doc(participantId).get();
+    .collection(col("participants")).doc(participantId).get();
 
   if (!participantDoc.exists) return null;
 
@@ -127,7 +138,7 @@ async function smsParticipant(client, participantId, fromNumber) {
 // ============================================================================
 async function callParticipant(client, participantId, fromNumber) {
   const participantDoc = await admin.firestore()
-    .collection("participants").doc(participantId).get();
+    .collection(col("participants")).doc(participantId).get();
 
   if (!participantDoc.exists) return null;
 
@@ -175,7 +186,7 @@ async function callParticipant(client, participantId, fromNumber) {
 async function contactEmergencyContact(client, participantId, fromNumber) {
   // Get emergency contact from participant's safety plan in Firestore
   const participantDoc = await admin.firestore()
-    .collection("participants").doc(participantId).get();
+    .collection(col("participants")).doc(participantId).get();
 
   if (!participantDoc.exists) return null;
 
@@ -214,9 +225,10 @@ async function contactEmergencyContact(client, participantId, fromNumber) {
 // ============================================================================
 // Main Safety Alert Trigger
 // ============================================================================
-exports.onSafetyAlert = onDocumentCreated(
+const safetyAlertFnName = ENVIRONMENT === "dev" ? "dev_onSafetyAlert" : "onSafetyAlert";
+exports[safetyAlertFnName] = onDocumentCreated(
   {
-    document: "participants/{participantId}/safety_alerts/{alertId}",
+    document: `${col("participants")}/{participantId}/safety_alerts/{alertId}`,
     secrets: [
       twilioAccountSid, twilioAuthToken, twilioFromNumber,
       slackChannelEmail, alertSenderEmail, alertSenderPassword,
@@ -302,7 +314,7 @@ exports.onSafetyAlert = onDocumentCreated(
     // Step 3: Notify on-call team via SMS
     // ================================================================
     const recipientsSnapshot = await admin.firestore()
-      .collection("alert_recipients").get();
+      .collection(col("alert_recipients")).get();
 
     const recipients = [];
     recipientsSnapshot.forEach((doc) => {
@@ -415,7 +427,7 @@ exports.onSafetyAlert = onDocumentCreated(
     if (isConfirmedDanger && senderEmailVal && senderPass) {
       try {
         const participantDoc = await admin.firestore()
-          .collection("participants").doc(participantId).get();
+          .collection(col("participants")).doc(participantId).get();
         const participantEmail = participantDoc.exists
           ? participantDoc.data().email
           : null;
@@ -486,7 +498,8 @@ exports.onSafetyAlert = onDocumentCreated(
 // Escalation Scheduler: Check for unresponded safety events
 // Runs every 5 minutes to check if on-call has responded
 // ============================================================================
-exports.checkEscalation = onSchedule(
+const escalationFnName = ENVIRONMENT === "dev" ? "dev_checkEscalation" : "checkEscalation";
+exports[escalationFnName] = onSchedule(
   {
     schedule: "every 5 minutes",
     secrets: [twilioAccountSid, twilioAuthToken, twilioFromNumber],
@@ -499,7 +512,7 @@ exports.checkEscalation = onSchedule(
 
       // Find safety events that haven't been responded to
       const eventsSnapshot = await admin.firestore()
-        .collection("safety_events")
+        .collection(col("safety_events"))
         .where("escalationStopped", "==", false)
         .where("currentDisposition", "==", null)
         .get();
@@ -578,14 +591,14 @@ exports.checkEscalation = onSchedule(
 
       // Get all participants
       const participantsSnapshot = await admin.firestore()
-        .collection("participants").get();
+        .collection(col("participants")).get();
 
       for (const participantDoc of participantsSnapshot.docs) {
         const pid = participantDoc.id;
 
         // Check for unresolved pending confirmations
         const pendingSnapshot = await admin.firestore()
-          .collection("participants").doc(pid)
+          .collection(col("participants")).doc(pid)
           .collection("pending_safety_confirmations")
           .where("resolved", "==", false)
           .get();
@@ -610,7 +623,7 @@ exports.checkEscalation = onSchedule(
           // Create a safety alert (potential risk, not confirmed)
           const alertId = pendingDoc.id + "_walkaway";
           await admin.firestore()
-            .collection("participants").doc(pid)
+            .collection(col("participants")).doc(pid)
             .collection("safety_alerts").doc(alertId)
             .set({
               participantId: pid,
