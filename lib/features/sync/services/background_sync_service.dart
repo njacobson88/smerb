@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../storage/database/database.dart';
 import '../../ocr/services/ocr_service.dart';

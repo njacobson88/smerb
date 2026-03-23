@@ -213,7 +213,7 @@ class _CheckinScreenState extends State<CheckinScreen>
         'confirmedDanger': true,
         'confirmationNumber': _confirmationCount + 1,
         'triggerQuestion': _currentTriggerQuestionId,
-        'pageTarget': '3143979832',
+        // Recipients managed via alert_recipients Firestore collection
         'handled': false,
       });
       print('[CheckIn] Safety alert written to Firestore: $alertId');
@@ -1001,7 +1001,7 @@ class _CheckinScreenState extends State<CheckinScreen>
         'totalQuestionCount': _visibleQuestions.length,
         'confirmedDanger': null, // Never reached confirmation
         'handled': false,
-        'pageTarget': '3143979832',
+        // Recipients managed via alert_recipients Firestore collection
       });
       print('[CheckIn] Fallback safety alert sent for abandoned check-in: $alertId');
     } catch (e) {
