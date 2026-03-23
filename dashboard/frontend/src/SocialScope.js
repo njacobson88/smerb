@@ -899,38 +899,75 @@ const AlertsScreen = ({ goToParticipantView }) => {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [cacheInfo, setCacheInfo] = useState(null);
 
+  // On-call roster state
+  const [roster, setRoster] = useState({});
+  const [rosterEditing, setRosterEditing] = useState(null);
+  const [rosterForm, setRosterForm] = useState({ name: '', email: '', phone: '' });
+  const [rosterSaving, setRosterSaving] = useState(false);
+
+  // Follow-ups state
+  const [followups, setFollowups] = useState([]);
+
   const fetchAlerts = React.useCallback(async () => {
     setLoading(true);
     try {
-      // Use dedicated cached safety-alerts endpoint for fast response
       const response = await authFetch(`${API_BASE_URL}/api/safety-alerts`);
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         throw new Error(errData.detail || 'Failed to fetch alerts');
       }
-
       const data = await response.json();
       setAlerts(data.alerts || []);
-      setCacheInfo({
-        fromCache: data.fromCache,
-        refreshedAt: data.refreshedAt,
-      });
+      setCacheInfo({ fromCache: data.fromCache, refreshedAt: data.refreshedAt });
       setLastUpdated(new Date());
       setError(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { setError(err.message); } finally { setLoading(false); }
+  }, []);
+
+  const fetchRoster = React.useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/oncall/roster`);
+      if (res.ok) { const data = await res.json(); setRoster(data.roster || {}); }
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  const fetchFollowups = React.useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/followups/upcoming`);
+      if (res.ok) { const data = await res.json(); setFollowups(data.followups || []); }
+    } catch (e) { /* ignore */ }
   }, []);
 
   React.useEffect(() => {
     fetchAlerts();
-
-    // Auto-refresh every 2 minutes for near real-time safety alert monitoring
+    fetchRoster();
+    fetchFollowups();
     const interval = setInterval(fetchAlerts, 2 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [fetchAlerts]);
+  }, [fetchAlerts, fetchRoster, fetchFollowups]);
+
+  const saveRosterRole = async (role) => {
+    setRosterSaving(true);
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/oncall/roster`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, ...rosterForm }),
+      });
+      if (res.ok) {
+        await fetchRoster();
+        setRosterEditing(null);
+        setRosterForm({ name: '', email: '', phone: '' });
+      }
+    } catch (e) { /* ignore */ }
+    finally { setRosterSaving(false); }
+  };
+
+  const startEditRole = (role) => {
+    const current = roster[role] || {};
+    setRosterForm({ name: current.name || '', email: current.email || '', phone: current.phone || '' });
+    setRosterEditing(role);
+  };
 
   if (loading && alerts.length === 0) {
     return (
@@ -940,89 +977,161 @@ const AlertsScreen = ({ goToParticipantView }) => {
     );
   }
 
-  if (error && alerts.length === 0) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-700">
-        Error loading alerts: {error}
-      </div>
-    );
-  }
-
   return (
-    <div className="bg-white rounded-lg shadow-md p-6">
-      <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center">
-        <AlertTriangle className="mr-2 text-red-500" size={24} />
-        Safety Alerts
-      </h2>
+    <div className="space-y-6">
 
-      {/* Data Freshness Banner */}
-      <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-        <div className="flex items-center justify-between">
-          <div>
-            <strong>Auto-refreshing every 2 minutes</strong> for near real-time monitoring.
-            {cacheInfo?.fromCache && cacheInfo.refreshedAt && (
-              <span className="ml-2">
-                Cache updated: {new Date(cacheInfo.refreshedAt).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true })} EST
-              </span>
-            )}
-            {lastUpdated && (
-              <span className="ml-2 text-red-600">
-                (Loaded: {lastUpdated.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })} EST)
-              </span>
-            )}
-            {loading && <span className="ml-2 text-red-600 animate-pulse">(Refreshing...)</span>}
-          </div>
-          <button
-            onClick={fetchAlerts}
-            disabled={loading}
-            className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-xs flex items-center"
-          >
-            {loading && <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full mr-1"></div>}
-            Refresh Now
-          </button>
-        </div>
-      </div>
+      {/* On-Call Roster */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-3 flex items-center">
+          <Clock className="mr-2 text-blue-500" size={20} />
+          On-Call Roster
+        </h2>
+        <p className="text-gray-500 text-xs mb-3">
+          When a safety alert fires, primary on-call is paged first. If no response in 15 min, backup is paged. After 30 min, PI is paged.
+        </p>
+        <div className="grid grid-cols-3 gap-4">
+          {['primary', 'backup', 'pi'].map((role) => {
+            const person = roster[role];
+            const isEditing = rosterEditing === role;
+            const labels = { primary: 'Primary On-Call', backup: 'Backup On-Call', pi: 'PI (Escalation)' };
+            const colors = { primary: 'border-blue-400 bg-blue-50', backup: 'border-amber-400 bg-amber-50', pi: 'border-red-400 bg-red-50' };
 
-      <p className="text-gray-600 text-sm mb-4">
-        SMS notifications are sent immediately when safety alerts are triggered.
-        Configure recipients in the Users tab.
-      </p>
-
-      {alerts.length === 0 ? (
-        <p className="text-gray-500 text-center py-8">No safety alerts recorded.</p>
-      ) : (
-        <div className="space-y-3">
-          {alerts.map((alert, idx) => (
-            <div
-              key={idx}
-              className={`flex items-center justify-between p-4 border rounded-lg ${
-                alert.crisis_indicated
-                  ? 'bg-red-100 border-red-400'
-                  : 'bg-red-50 border-red-200'
-              }`}
-            >
-              <div>
-                <span className="font-medium text-gray-800">Participant: </span>
-                <button
-                  onClick={() => goToParticipantView(alert.participantId)}
-                  className="text-blue-600 hover:underline"
-                >
-                  {alert.participantId}
-                </button>
-                <span className="text-gray-500 ml-4">{alert.date}</span>
-                {alert.crisis_indicated && (
-                  <span className="ml-3 px-2 py-0.5 bg-red-600 text-white text-xs font-bold rounded animate-pulse">
-                    CRISIS
-                  </span>
+            return (
+              <div key={role} className={`border-2 rounded-lg p-4 ${colors[role]}`}>
+                <div className="text-xs font-bold text-gray-500 uppercase mb-2">{labels[role]}</div>
+                {isEditing ? (
+                  <div className="space-y-2">
+                    <input value={rosterForm.name} onChange={e => setRosterForm(f => ({...f, name: e.target.value}))}
+                      placeholder="Name" className="w-full border rounded px-2 py-1 text-sm" />
+                    <input value={rosterForm.email} onChange={e => setRosterForm(f => ({...f, email: e.target.value}))}
+                      placeholder="Email" className="w-full border rounded px-2 py-1 text-sm" />
+                    <input value={rosterForm.phone} onChange={e => setRosterForm(f => ({...f, phone: e.target.value}))}
+                      placeholder="Phone (10 digits)" className="w-full border rounded px-2 py-1 text-sm" />
+                    <div className="flex gap-2">
+                      <button onClick={() => saveRosterRole(role)} disabled={rosterSaving}
+                        className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 disabled:opacity-50">
+                        {rosterSaving ? 'Saving...' : 'Save'}
+                      </button>
+                      <button onClick={() => setRosterEditing(null)}
+                        className="px-3 py-1 bg-gray-300 text-gray-700 text-xs rounded hover:bg-gray-400">Cancel</button>
+                    </div>
+                  </div>
+                ) : person ? (
+                  <div>
+                    <div className="font-semibold text-gray-800">{person.name}</div>
+                    <div className="text-xs text-gray-600">{person.email}</div>
+                    {person.phone && <div className="text-xs text-gray-600">{person.phone}</div>}
+                    <button onClick={() => startEditRole(role)}
+                      className="mt-2 text-xs text-blue-600 hover:text-blue-800">Edit</button>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="text-gray-400 text-sm italic">Not assigned</div>
+                    <button onClick={() => startEditRole(role)}
+                      className="mt-2 text-xs text-blue-600 hover:text-blue-800">Assign</button>
+                  </div>
                 )}
               </div>
-              <span className="bg-red-500 text-white px-3 py-1 rounded-full text-sm font-medium">
-                {alert.count} alert{alert.count > 1 ? 's' : ''}
-              </span>
-            </div>
-          ))}
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Upcoming Follow-ups */}
+      {followups.length > 0 && (
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h2 className="text-lg font-bold text-gray-800 mb-3 flex items-center">
+            <Clock className="mr-2 text-amber-500" size={20} />
+            Upcoming Follow-ups ({followups.length})
+          </h2>
+          <div className="space-y-2">
+            {followups.map((fu, idx) => {
+              const scheduledDate = fu.scheduledAt ? new Date(fu.scheduledAt) : null;
+              return (
+                <div key={idx} className={`flex items-center justify-between p-3 border rounded-lg ${fu.isOverdue ? 'bg-red-50 border-red-300' : 'bg-amber-50 border-amber-200'}`}>
+                  <div>
+                    <span className="font-medium">{fu.label} follow-up</span>
+                    <span className="mx-2">—</span>
+                    <button onClick={() => goToParticipantView(fu.participantId)} className="text-blue-600 hover:underline">
+                      {fu.participantId}
+                    </button>
+                    {fu.isOverdue && <span className="ml-2 px-2 py-0.5 bg-red-600 text-white text-xs font-bold rounded">OVERDUE</span>}
+                  </div>
+                  <div className="text-sm text-gray-500">
+                    {scheduledDate ? scheduledDate.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Unknown'}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
+
+      {/* Safety Alerts */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center">
+          <AlertTriangle className="mr-2 text-red-500" size={24} />
+          Safety Alerts
+        </h2>
+
+        {/* Data Freshness Banner */}
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+          <div className="flex items-center justify-between">
+            <div>
+              <strong>Auto-refreshing every 2 minutes</strong> for near real-time monitoring.
+              {cacheInfo?.fromCache && cacheInfo.refreshedAt && (
+                <span className="ml-2">
+                  Cache updated: {new Date(cacheInfo.refreshedAt).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true })} EST
+                </span>
+              )}
+              {lastUpdated && (
+                <span className="ml-2 text-red-600">
+                  (Loaded: {lastUpdated.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })} EST)
+                </span>
+              )}
+              {loading && <span className="ml-2 text-red-600 animate-pulse">(Refreshing...)</span>}
+            </div>
+            <button onClick={fetchAlerts} disabled={loading}
+              className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-xs flex items-center">
+              {loading && <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full mr-1"></div>}
+              Refresh Now
+            </button>
+          </div>
+        </div>
+
+        <p className="text-gray-600 text-sm mb-4">
+          SMS notifications are sent immediately when safety alerts are triggered.
+          Configure recipients in the Users tab.
+        </p>
+
+        {error && alerts.length === 0 ? (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-700">Error: {error}</div>
+        ) : alerts.length === 0 ? (
+          <p className="text-gray-500 text-center py-8">No safety alerts recorded.</p>
+        ) : (
+          <div className="space-y-3">
+            {alerts.map((alert, idx) => (
+              <div key={idx} className={`flex items-center justify-between p-4 border rounded-lg ${
+                alert.crisis_indicated ? 'bg-red-100 border-red-400' : 'bg-red-50 border-red-200'
+              }`}>
+                <div>
+                  <span className="font-medium text-gray-800">Participant: </span>
+                  <button onClick={() => goToParticipantView(alert.participantId)} className="text-blue-600 hover:underline">
+                    {alert.participantId}
+                  </button>
+                  <span className="text-gray-500 ml-4">{alert.date}</span>
+                  {alert.crisis_indicated && (
+                    <span className="ml-3 px-2 py-0.5 bg-red-600 text-white text-xs font-bold rounded animate-pulse">CRISIS</span>
+                  )}
+                </div>
+                <span className="bg-red-500 text-white px-3 py-1 rounded-full text-sm font-medium">
+                  {alert.count} alert{alert.count > 1 ? 's' : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
