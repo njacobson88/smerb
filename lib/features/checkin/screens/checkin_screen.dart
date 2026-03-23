@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:card_swiper/card_swiper.dart';
@@ -54,6 +55,11 @@ class _CheckinScreenState extends State<CheckinScreen>
   DateTime? _firstThresholdExceededAt;
   bool _confirmationResolved = false; // true once they answer yes/no or complete check-in
   String? _pendingConfirmationDocId; // Firestore doc for the pending state
+
+  // Walk-away notification IDs (so we can cancel them if resolved)
+  static const int _notifId5Min = 9001;
+  static const int _notifId10Min = 9002;
+  Timer? _tenMinNotifTimer;
 
   @override
   void initState() {
@@ -183,6 +189,9 @@ class _CheckinScreenState extends State<CheckinScreen>
     if (_pendingConfirmationDocId == null) return;
     _confirmationResolved = true;
 
+    // Cancel any pending walk-away notifications
+    _cancelWalkAwayNotifications();
+
     try {
       await FirebaseFirestore.instance
           .collection('participants')
@@ -198,6 +207,48 @@ class _CheckinScreenState extends State<CheckinScreen>
       print('[CheckIn] Pending confirmation resolved: $resolution');
     } catch (e) {
       print('[CheckIn] Failed to resolve pending confirmation: $e');
+    }
+  }
+
+  /// Cancel any scheduled walk-away notifications and log the cancellation
+  void _cancelWalkAwayNotifications() {
+    try {
+      _tenMinNotifTimer?.cancel();
+      _tenMinNotifTimer = null;
+
+      final notifications = FlutterLocalNotificationsPlugin();
+      notifications.cancel(_notifId5Min);
+      notifications.cancel(_notifId10Min);
+
+      // Log the cancellation
+      _logNotificationEvent('walk_away_notifications_cancelled', {
+        'reason': 'confirmation_resolved',
+      });
+
+      print('[CheckIn] Walk-away notifications cancelled');
+    } catch (e) {
+      print('[CheckIn] Error cancelling notifications: $e');
+    }
+  }
+
+  /// Log a notification event to Firestore for audit trail
+  Future<void> _logNotificationEvent(String eventType, Map<String, dynamic> data) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('participants')
+          .doc(widget.participantId)
+          .collection('notification_log')
+          .doc(const Uuid().v4())
+          .set({
+        'participantId': widget.participantId,
+        'sessionId': widget.sessionId,
+        'eventType': eventType,
+        'data': data,
+        'timestamp': FieldValue.serverTimestamp(),
+        'localTime': DateTime.now().toIso8601String(),
+      }).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      print('[CheckIn] Failed to log notification event: $e');
     }
   }
 
@@ -386,6 +437,9 @@ class _CheckinScreenState extends State<CheckinScreen>
     // and the backend will send a "potential risk" alert after 15 minutes.
     if (_firstThresholdExceededAt != null && !_confirmationResolved && !_completed) {
       _scheduleWalkAwayNotifications();
+    } else {
+      // If resolved normally, ensure any scheduled notifications are cleaned up
+      _tenMinNotifTimer?.cancel();
     }
 
     _crisisFlashController.dispose();
@@ -394,6 +448,7 @@ class _CheckinScreenState extends State<CheckinScreen>
 
   /// Schedule gentle local notifications at 5 and 10 minutes to nudge
   /// the participant back to complete the safety check.
+  /// Logs each notification to Firestore for audit trail.
   void _scheduleWalkAwayNotifications() {
     try {
       final notifications = FlutterLocalNotificationsPlugin();
@@ -415,9 +470,18 @@ class _CheckinScreenState extends State<CheckinScreen>
         iOS: iosDetails,
       );
 
+      // Collect which trigger questions were exceeded for the log
+      final exceededQuestions = <String>[];
+      if (_config != null) {
+        for (final q in _config!.questions) {
+          if (_isQuestionAboveThreshold(q)) exceededQuestions.add(q.id);
+        }
+      }
+
       // 5-minute follow-up — gentle and caring
+      final scheduledAt5 = DateTime.now().add(const Duration(minutes: 5));
       notifications.show(
-        9001,
+        _notifId5Min,
         'Just checking in',
         'We noticed you stepped away from your check-in. '
         'We want to make sure you\'re doing okay. '
@@ -425,19 +489,54 @@ class _CheckinScreenState extends State<CheckinScreen>
         details,
       );
 
-      // 10-minute follow-up — slightly more direct but still warm
-      Future.delayed(const Duration(minutes: 5), () {
+      _logNotificationEvent('walk_away_notification_scheduled', {
+        'notificationId': _notifId5Min,
+        'delayMinutes': 5,
+        'scheduledDeliveryTime': scheduledAt5.toIso8601String(),
+        'triggerQuestions': exceededQuestions,
+        'title': 'Just checking in',
+      });
+
+      // 10-minute follow-up — use Timer so we can cancel it
+      final scheduledAt10 = DateTime.now().add(const Duration(minutes: 10));
+      _tenMinNotifTimer = Timer(const Duration(minutes: 5), () {
         notifications.show(
-          9002,
+          _notifId10Min,
           'Checking in again',
           'We want to make sure you\'re doing alright. '
           'Completing your check-in helps us know. '
           'If you need to talk to someone, call or text 988.',
           details,
         );
+
+        _logNotificationEvent('walk_away_notification_delivered', {
+          'notificationId': _notifId10Min,
+          'delayMinutes': 10,
+          'deliveredAt': DateTime.now().toIso8601String(),
+          'triggerQuestions': exceededQuestions,
+          'title': 'Checking in again',
+        });
       });
 
-      print('[CheckIn] Scheduled walk-away follow-up notifications');
+      _logNotificationEvent('walk_away_notification_scheduled', {
+        'notificationId': _notifId10Min,
+        'delayMinutes': 10,
+        'scheduledDeliveryTime': scheduledAt10.toIso8601String(),
+        'triggerQuestions': exceededQuestions,
+        'title': 'Checking in again',
+      });
+
+      // Log the 5-min as delivered (it fires immediately via show())
+      _logNotificationEvent('walk_away_notification_delivered', {
+        'notificationId': _notifId5Min,
+        'delayMinutes': 5,
+        'deliveredAt': DateTime.now().toIso8601String(),
+        'triggerQuestions': exceededQuestions,
+        'title': 'Just checking in',
+      });
+
+      print('[CheckIn] Scheduled walk-away follow-up notifications '
+          '(triggers: ${exceededQuestions.join(", ")})');
     } catch (e) {
       print('[CheckIn] Failed to schedule follow-up notifications: $e');
     }
