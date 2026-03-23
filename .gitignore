@@ -60,6 +60,11 @@ node_modules/
 .env
 *.env.local
 
+# Android signing keys
+android/key.properties
+android/*.jks
+android/*.keystore
+
 # Python virtual environments
 venv/
 .venv/
