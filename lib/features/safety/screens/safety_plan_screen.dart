@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../core/config/environment_config.dart';
 
 /// Displays the participant's personalized crisis safety plan.
 /// Data is loaded from Firestore (populated during onboarding from REDCap).
@@ -30,7 +31,7 @@ class _SafetyPlanScreenState extends State<SafetyPlanScreen> {
   Future<void> _loadSafetyPlan() async {
     try {
       final doc = await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('safety_plan')
           .doc('current')

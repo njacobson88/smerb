@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import '../../../core/config/environment_config.dart';
 import '../../storage/database/database.dart';
 
 /// Service that syncs local data to Firebase
@@ -68,7 +69,7 @@ class UploadService {
             try {
               batch ??= _firestore.batch();
               final docRef = _firestore
-                  .collection('participants')
+                  .collection(EnvConfig.col('participants'))
                   .doc(event.participantId)
                   .collection('events')
                   .doc(event.id);
@@ -220,7 +221,7 @@ class UploadService {
     // Upload to Firestore
     // Structure: participants/{participantId}/events/{eventId}
     await _firestore
-        .collection('participants')
+        .collection(EnvConfig.col('participants'))
         .doc(event.participantId)
         .collection('events')
         .doc(event.id)
@@ -323,7 +324,7 @@ class UploadService {
           try {
             batch ??= _firestore.batch();
             final docRef = _firestore
-                .collection('participants')
+                .collection(EnvConfig.col('participants'))
                 .doc(result.participantId)
                 .collection('events')
                 .doc(result.eventId);
@@ -474,7 +475,7 @@ class UploadService {
     // Update the event document with HTML data using dot notation
     // to avoid overwriting fields set by status log sync
     await _firestore
-        .collection('participants')
+        .collection(EnvConfig.col('participants'))
         .doc(capture.participantId)
         .collection('events')
         .doc(capture.eventId)
@@ -523,7 +524,7 @@ class UploadService {
           try {
             batch ??= _firestore.batch();
             final docRef = _firestore
-                .collection('participants')
+                .collection(EnvConfig.col('participants'))
                 .doc(log.participantId)
                 .collection('events')
                 .doc(log.eventId);
@@ -603,7 +604,7 @@ class UploadService {
           }
 
           await _firestore
-              .collection('participants')
+              .collection(EnvConfig.col('participants'))
               .doc(alert.participantId)
               .collection('safety_alerts')
               .doc(alert.id)
@@ -682,7 +683,7 @@ class UploadService {
 
   Future<void> _uploadEmaResponse(EmaResponse response) async {
     final docRef = _firestore
-        .collection('participants')
+        .collection(EnvConfig.col('participants'))
         .doc(response.participantId)
         .collection('ema_responses')
         .doc(response.id);
@@ -770,7 +771,7 @@ class UploadService {
     required DateTime enrolledAt,
   }) async {
     try {
-      await _firestore.collection('participants').doc(participantId).set({
+      await _firestore.collection(EnvConfig.col('participants')).doc(participantId).set({
         'participantId': participantId,
         'visitorId': visitorId,
         'enrolledAt': Timestamp.fromDate(enrolledAt),

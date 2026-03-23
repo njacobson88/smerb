@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:uuid/uuid.dart';
 import 'package:timezone/timezone.dart' as tz;
+import '../../../core/config/environment_config.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import '../../storage/database/database.dart';
 
@@ -138,7 +139,7 @@ class CheckinService {
     if (participantId == null) return;
     try {
       await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(participantId!)
           .collection('notification_log')
           .doc(const Uuid().v4())

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../../core/config/environment_config.dart';
 
 /// Model for participant data
 class Participant {
@@ -98,7 +99,7 @@ class ValidationResult {
 /// Service for managing participant data
 class ParticipantService {
   static const String _participantKey = 'smerb_participant';
-  static const String _validParticipantsCollection = 'valid_participants';
+  static String get _validParticipantsCollection => EnvConfig.col('valid_participants');
 
   SharedPreferences? _prefs;
   final FirebaseFirestore _firestore;

@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import '../../../core/config/environment_config.dart';
 import '../models/ema_config.dart';
 import '../../storage/database/database.dart';
 import 'package:drift/drift.dart' as drift;
@@ -163,7 +164,7 @@ class _CheckinScreenState extends State<CheckinScreen>
       }
 
       await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('pending_safety_confirmations')
           .doc(docId)
@@ -194,7 +195,7 @@ class _CheckinScreenState extends State<CheckinScreen>
 
     try {
       await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('pending_safety_confirmations')
           .doc(_pendingConfirmationDocId!)
@@ -235,7 +236,7 @@ class _CheckinScreenState extends State<CheckinScreen>
   Future<void> _logNotificationEvent(String eventType, Map<String, dynamic> data) async {
     try {
       await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('notification_log')
           .doc(const Uuid().v4())
@@ -359,7 +360,7 @@ class _CheckinScreenState extends State<CheckinScreen>
     bool firestoreSuccess = false;
     try {
       await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('safety_alerts')
           .doc(alertId)
@@ -1297,7 +1298,7 @@ class _CheckinScreenState extends State<CheckinScreen>
     // Step 2: Attempt immediate Firestore write
     try {
       await FirebaseFirestore.instance
-          .collection('participants')
+          .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('safety_alerts')
           .doc(alertId)
