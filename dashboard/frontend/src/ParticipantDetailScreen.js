@@ -76,6 +76,15 @@ const ParticipantDetailScreen = ({
   const [distSuccess, setDistSuccess] = useState(null);
   const [showDistPanel, setShowDistPanel] = useState(false);
 
+  // Compliance notification state
+  const [complianceData, setComplianceData] = useState(null);
+  const [showCompliancePanel, setShowCompliancePanel] = useState(false);
+  const [notifCategory, setNotifCategory] = useState('ema');
+  const [notifPreview, setNotifPreview] = useState(null);
+  const [notifDelivery, setNotifDelivery] = useState(['email']);
+  const [notifSending, setNotifSending] = useState(false);
+  const [notifResult, setNotifResult] = useState(null);
+
   // Find current index in participant list
   const currentIndex = participantList?.indexOf(currentParticipantId) ?? -1;
 
@@ -191,6 +200,52 @@ const ParticipantDetailScreen = ({
   useEffect(() => {
     if (currentParticipantId) fetchDistribution();
   }, [currentParticipantId, fetchDistribution]);
+
+  // Fetch compliance data
+  const fetchCompliance = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/compliance/${currentParticipantId}?days=3`);
+      if (res.ok) setComplianceData(await res.json());
+    } catch (e) { /* ignore */ }
+  }, [currentParticipantId]);
+
+  useEffect(() => {
+    if (currentParticipantId) fetchCompliance();
+  }, [currentParticipantId, fetchCompliance]);
+
+  const previewNotification = async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/compliance/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participant_id: currentParticipantId, category: notifCategory }),
+      });
+      if (res.ok) setNotifPreview(await res.json());
+    } catch (e) { /* ignore */ }
+  };
+
+  const sendNotification = async () => {
+    setNotifSending(true); setNotifResult(null);
+    try {
+      const payload = {
+        participant_id: currentParticipantId,
+        category: notifCategory,
+        delivery_methods: notifDelivery,
+      };
+      if (notifPreview?.templateIndex !== undefined) {
+        payload.template_index = notifPreview.templateIndex;
+      }
+      const res = await authFetch(`${API_BASE_URL}/api/compliance/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      setNotifResult(res.ok ? { success: true, ...data } : { success: false, error: data.detail });
+      if (res.ok) fetchCompliance();
+    } catch (e) { setNotifResult({ success: false, error: e.message }); }
+    finally { setNotifSending(false); }
+  };
 
   const saveDistribution = async () => {
     setDistSaving(true); setDistError(null); setDistSuccess(null);
@@ -656,6 +711,98 @@ const ParticipantDetailScreen = ({
                   {distSending ? 'Sending...' : `Send ${distDeviceType ? distDeviceType.toUpperCase() : ''} Invite`}
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Compliance Badge + Notification Panel */}
+          {complianceData && (
+            <div className="flex items-center gap-3 mb-4">
+              {/* Compliance badge */}
+              {complianceData.threeDay?.needs_notification && (
+                <span className="px-3 py-1 bg-amber-500 text-white text-xs font-bold rounded-full animate-pulse"
+                  title="Low compliance — consider sending a notification">
+                  ⚠ Low Compliance ({complianceData.threeDay.compliance_pct}%)
+                </span>
+              )}
+              {complianceData.weekly && (
+                <span className={`px-2 py-1 text-xs font-medium rounded ${
+                  complianceData.weekly.level === 'high' ? 'bg-green-100 text-green-800' :
+                  complianceData.weekly.level === 'medium' ? 'bg-blue-100 text-blue-800' :
+                  'bg-amber-100 text-amber-800'
+                }`}>
+                  {complianceData.weekly.emoji} Weekly: {complianceData.weekly.compliance_pct}%
+                </span>
+              )}
+              <button onClick={() => { setShowCompliancePanel(!showCompliancePanel); if (!showCompliancePanel) previewNotification(); }}
+                className="text-xs text-purple-600 hover:text-purple-800 font-medium">
+                {showCompliancePanel ? 'Hide' : 'Send'} Notification
+              </button>
+            </div>
+          )}
+
+          {showCompliancePanel && (
+            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4">
+              <h3 className="text-sm font-semibold text-purple-800 mb-3">Send Compliance Notification</h3>
+
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+                  <select value={notifCategory} onChange={e => { setNotifCategory(e.target.value); setNotifPreview(null); }}
+                    className="w-full border rounded px-2 py-1.5 text-sm bg-white">
+                    <option value="ema">EMA Low Compliance</option>
+                    <option value="screenshots">Screenshot Low Compliance</option>
+                    <option value="weekly">Weekly Report</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Delivery</label>
+                  <div className="flex gap-2">
+                    <label className="flex items-center text-xs">
+                      <input type="checkbox" checked={notifDelivery.includes('email')}
+                        onChange={e => setNotifDelivery(d => e.target.checked ? [...d, 'email'] : d.filter(x => x !== 'email'))}
+                        className="mr-1" /> Email
+                    </label>
+                    <label className="flex items-center text-xs">
+                      <input type="checkbox" checked={notifDelivery.includes('push')}
+                        onChange={e => setNotifDelivery(d => e.target.checked ? [...d, 'push'] : d.filter(x => x !== 'push'))}
+                        className="mr-1" /> Push
+                    </label>
+                  </div>
+                </div>
+                <div>
+                  <button onClick={previewNotification}
+                    className="mt-4 px-3 py-1.5 bg-purple-100 text-purple-700 text-xs rounded hover:bg-purple-200">
+                    🔄 New Variant
+                  </button>
+                </div>
+              </div>
+
+              {/* Preview */}
+              {notifPreview && (
+                <div className="bg-white border rounded p-3 mb-3 text-sm">
+                  <div className="font-semibold text-gray-800 mb-1">{notifPreview.subject}</div>
+                  <div className="text-gray-600 whitespace-pre-wrap text-xs max-h-40 overflow-y-auto">{notifPreview.body}</div>
+                </div>
+              )}
+
+              {/* Result */}
+              {notifResult && (
+                <div className={`text-xs mb-2 p-2 rounded ${notifResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                  {notifResult.success ? `Sent: ${notifResult.subject}` : `Error: ${notifResult.error}`}
+                </div>
+              )}
+
+              {/* Notification history */}
+              {complianceData?.notificationHistory?.length > 0 && (
+                <div className="text-xs text-gray-500 mb-2">
+                  Last sent: {new Date(complianceData.notificationHistory[0].sentAt).toLocaleDateString()} by {complianceData.notificationHistory[0].sentBy}
+                </div>
+              )}
+
+              <button onClick={sendNotification} disabled={notifSending || !notifPreview}
+                className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded hover:bg-purple-700 disabled:opacity-50">
+                {notifSending ? 'Sending...' : 'Send This Notification'}
+              </button>
             </div>
           )}
 
