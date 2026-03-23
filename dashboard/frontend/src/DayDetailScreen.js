@@ -664,6 +664,88 @@ const DayDetailScreen = ({
             </div>
           </div>
 
+          {/* Notification Log */}
+          {dayData.notification_log?.length > 0 && (
+            <div className="bg-white rounded-lg shadow p-6">
+              <h2 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
+                <Clock size={20} className="mr-2 text-indigo-600" />
+                Notification Log ({dayData.notification_log.length})
+              </h2>
+              <div className="space-y-2">
+                {dayData.notification_log.map((notif, idx) => {
+                  const isWalkAway = notif.eventType?.includes('walk_away');
+                  const isEma = notif.eventType?.includes('ema_');
+                  const isCancelled = notif.eventType?.includes('cancelled');
+
+                  let bgColor = 'bg-gray-50 border-gray-200';
+                  let icon = '📋';
+                  if (isWalkAway && isCancelled) {
+                    bgColor = 'bg-green-50 border-green-200';
+                    icon = '✅';
+                  } else if (isWalkAway) {
+                    bgColor = 'bg-amber-50 border-amber-200';
+                    icon = '⚠️';
+                  } else if (isEma) {
+                    bgColor = 'bg-blue-50 border-blue-200';
+                    icon = '🔔';
+                  }
+
+                  const typeLabels = {
+                    'ema_notification_scheduled': 'EMA Notification Scheduled',
+                    'ema_notification_tapped': 'EMA Notification Tapped',
+                    'ema_checkin_window_completed': 'Check-in Window Completed',
+                    'walk_away_notification_scheduled': 'Safety Follow-Up Scheduled',
+                    'walk_away_notification_delivered': 'Safety Follow-Up Delivered',
+                    'walk_away_notifications_cancelled': 'Safety Follow-Up Cancelled',
+                  };
+
+                  return (
+                    <div key={idx} className={`border rounded p-3 ${bgColor}`}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center text-sm">
+                          <span className="mr-2">{icon}</span>
+                          <span className="font-medium text-gray-800">
+                            {typeLabels[notif.eventType] || notif.eventType}
+                          </span>
+                        </div>
+                        <span className="text-xs text-gray-500">{notif.time}</span>
+                      </div>
+                      {notif.data && Object.keys(notif.data).length > 0 && (
+                        <div className="mt-2 text-xs text-gray-600 grid grid-cols-2 gap-x-4 gap-y-1">
+                          {notif.data.windowIndex !== undefined && (
+                            <div>Window: {notif.data.windowIndex}</div>
+                          )}
+                          {notif.data.scheduledFor && (
+                            <div>Scheduled: {new Date(notif.data.scheduledFor).toLocaleTimeString()}</div>
+                          )}
+                          {notif.data.scheduledDeliveryTime && (
+                            <div>Delivery: {new Date(notif.data.scheduledDeliveryTime).toLocaleTimeString()}</div>
+                          )}
+                          {notif.data.deliveredAt && (
+                            <div>Delivered: {new Date(notif.data.deliveredAt).toLocaleTimeString()}</div>
+                          )}
+                          {notif.data.triggerQuestions && (
+                            <div className="col-span-2">Triggers: {
+                              Array.isArray(notif.data.triggerQuestions)
+                                ? notif.data.triggerQuestions.join(', ')
+                                : notif.data.triggerQuestions
+                            }</div>
+                          )}
+                          {notif.data.reason && (
+                            <div>Reason: {notif.data.reason}</div>
+                          )}
+                          {notif.data.title && (
+                            <div className="col-span-2 italic">"{notif.data.title}"</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Screenshot Timeline with Preview */}
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold text-gray-800 mb-4">Screenshot Timeline</h2>

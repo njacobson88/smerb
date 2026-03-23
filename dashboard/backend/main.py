@@ -1926,6 +1926,33 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
         except Exception as e:
             logger.warning(f"Error fetching safety alerts for day: {e}")
 
+        # Get notification log for this day
+        notification_log = []
+        try:
+            notif_ref = participant_ref.collection("notification_log")
+            notif_query = notif_ref.where(
+                "timestamp", ">=", target_date
+            ).where(
+                "timestamp", "<", next_date
+            ).order_by("timestamp")
+
+            for notif_doc in notif_query.stream():
+                notif = notif_doc.to_dict()
+                notif_ts = notif.get("timestamp")
+                if hasattr(notif_ts, 'timestamp'):
+                    notif_ts = datetime.fromtimestamp(notif_ts.timestamp())
+
+                notification_log.append({
+                    "id": notif_doc.id,
+                    "eventType": notif.get("eventType"),
+                    "timestamp": notif_ts.isoformat() if notif_ts else None,
+                    "time": notif_ts.strftime("%I:%M %p") if notif_ts else None,
+                    "localTime": notif.get("localTime"),
+                    "data": notif.get("data", {}),
+                })
+        except Exception as e:
+            logger.warning(f"Error fetching notification log for day: {e}")
+
         # Build hourly activity for charts (keyed by hour integer 0-23)
         hourly_activity = {}
         for hour in range(24):
@@ -2000,6 +2027,7 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
             "events": events[:100],  # Limit to 100 events for performance
             "checkins": checkins,
             "safety_alerts": safety_alerts,
+            "notification_log": notification_log,
             "sample_screenshots_by_hour": sample_screenshots_by_hour,
             "sample_screenshots": day_sample_screenshots,
         }
@@ -2277,6 +2305,22 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
             except Exception as e:
                 logger.debug(f"Silently handled exception in safety alert export: {e}")
+
+            # Export notification log (bundled with EMA data at Level 1)
+            try:
+                notif_ref = participant_ref.collection("notification_log")
+                notif_data = []
+                for notif_doc in notif_ref.order_by("timestamp").stream():
+                    notif = notif_doc.to_dict()
+                    for ts_field in ["timestamp"]:
+                        ts_val = notif.get(ts_field)
+                        if ts_val and hasattr(ts_val, 'timestamp'):
+                            notif[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+                    notif_data.append({"id": notif_doc.id, **notif})
+                if notif_data:
+                    zf.writestr("notification_log.json", json.dumps(notif_data, indent=2, default=str))
+            except Exception as e:
+                logger.debug(f"Error exporting notification log: {e}")
 
             # Level 2+: Export events
             if export_level >= 2:
@@ -2766,6 +2810,22 @@ def export_participant_data(
                     zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
             except Exception as e:
                 logger.debug(f"Silently handled exception in safety alert export: {e}")
+
+            # Export notification log (bundled with EMA data at Level 1)
+            try:
+                notif_ref = participant_ref.collection("notification_log")
+                notif_data = []
+                for notif_doc in notif_ref.order_by("timestamp").stream():
+                    notif = notif_doc.to_dict()
+                    for ts_field in ["timestamp"]:
+                        ts_val = notif.get(ts_field)
+                        if ts_val and hasattr(ts_val, 'timestamp'):
+                            notif[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+                    notif_data.append({"id": notif_doc.id, **notif})
+                if notif_data:
+                    zf.writestr("notification_log.json", json.dumps(notif_data, indent=2, default=str))
+            except Exception as e:
+                logger.debug(f"Error exporting notification log: {e}")
 
             # Level 2+: Export events with OCR data
             if export_level >= 2:
