@@ -56,6 +56,10 @@ macos/Pods/
 # Node modules
 node_modules/
 
+# Environment files with secrets
+.env
+*.env.local
+
 # Python virtual environments
 venv/
 .venv/
