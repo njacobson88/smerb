@@ -876,10 +876,50 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
     return alerts
 
 
+def _persist_safety_alerts_to_firestore(alerts):
+    """Write safety alerts cache to Firestore for fast cold-start reads."""
+    try:
+        cache_data = {
+            "alerts": alerts,
+            "updatedAt": datetime.utcnow(),
+            "alertCount": len(alerts),
+        }
+        db.collection(DASHBOARD_CACHE_COLLECTION).document("safety_alerts").set(cache_data)
+    except Exception as e:
+        logger.warning(f"[SafetyAlerts] Failed to persist to Firestore cache: {e}")
+
+
+def _load_safety_alerts_from_firestore():
+    """Load safety alerts from Firestore cache (for cold starts)."""
+    try:
+        doc = db.collection(DASHBOARD_CACHE_COLLECTION).document("safety_alerts").get()
+        if doc.exists:
+            data = doc.to_dict()
+            updated_at = data.get("updatedAt")
+            if updated_at and hasattr(updated_at, "timestamp"):
+                updated_at = datetime.fromtimestamp(updated_at.timestamp())
+            return {
+                "alerts": data.get("alerts", []),
+                "updated_at": updated_at.isoformat() + "Z" if updated_at else None,
+                "status": "ok",
+                "error": None,
+            }
+    except Exception as e:
+        logger.warning(f"[SafetyAlerts] Failed to load from Firestore cache: {e}")
+    return None
+
+
 async def refresh_safety_alert_cache():
     """Background task that refreshes the safety alert cache every 2 minutes."""
     global SAFETY_ALERT_CACHE
     logger.info("[SafetyAlerts] Background refresh loop starting")
+
+    # On startup, try to load from Firestore cache first (fast cold start)
+    cached = await asyncio.get_event_loop().run_in_executor(None, _load_safety_alerts_from_firestore)
+    if cached:
+        async with _safety_alert_lock:
+            SAFETY_ALERT_CACHE.update(cached)
+        logger.info(f"[SafetyAlerts] Loaded {len(cached['alerts'])} alerts from Firestore cache (cold start)")
 
     while not _safety_alert_stop_event.is_set():
         try:
@@ -894,6 +934,10 @@ async def refresh_safety_alert_cache():
                     "status": "ok",
                     "error": None,
                 })
+
+            # Persist to Firestore so next cold start is fast
+            await loop.run_in_executor(None, _persist_safety_alerts_to_firestore, alerts)
+
             logger.info(f"[SafetyAlerts] Cache refreshed: {len(alerts)} alerts")
 
         except Exception as exc:
