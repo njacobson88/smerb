@@ -45,7 +45,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setString('wake_up_time', timeStr);
 
     // Update the checkin service - first window is wake + 4hrs
-    final firstWindowHour = time.hour + 4;
+    final firstWindowHour = (time.hour + 4) % 24;
     final firstWindowStr =
         '${firstWindowHour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
     await widget.checkinService.setFirstWindowTime(firstWindowStr);

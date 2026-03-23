@@ -691,7 +691,10 @@ class UploadService {
       'id': response.id,
       'participantId': response.participantId,
       'sessionId': response.sessionId,
-      'responses': response.responses, // Already JSON string
+      'responses': (() {
+        try { return jsonDecode(response.responses); }
+        catch (_) { return response.responses; }
+      })(),
       'startedAt': Timestamp.fromDate(response.startedAt),
       'completedAt': Timestamp.fromDate(response.completedAt),
       'selfInitiated': response.selfInitiated,

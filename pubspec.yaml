@@ -13,9 +13,6 @@ dependencies:
   # WebView - Using flutter_inappwebview for better OAuth support
   flutter_inappwebview: ^6.0.0
 
-  # State Management
-  flutter_riverpod: ^2.4.0
-
   # Local Database
   drift: ^2.14.0
   sqlite3_flutter_libs: ^0.5.0

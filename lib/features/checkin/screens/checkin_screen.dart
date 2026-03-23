@@ -132,6 +132,12 @@ class _CheckinScreenState extends State<CheckinScreen>
   }
 
   void _advanceToNext() {
+    // Enforce required questions — don't advance if current is unanswered
+    final currentQ = _visibleQuestions[_currentIndex];
+    if (currentQ.required && !_responses.containsKey(currentQ.id)) {
+      return; // Silently block — the UI naturally waits for interaction
+    }
+
     // Check if the current question is a safety trigger that needs confirmation
     if (!_confirmedYes && !_safetyConfirmationShowing) {
       final currentQ = _visibleQuestions[_currentIndex];
@@ -369,6 +375,7 @@ class _CheckinScreenState extends State<CheckinScreen>
                 viewportFraction: 0.88,
                 scale: 0.92,
                 loop: false,
+                physics: const NeverScrollableScrollPhysics(), // Prevent free swiping
                 onIndexChanged: (index) {
                   setState(() => _currentIndex = index);
                 },
