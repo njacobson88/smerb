@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:uuid/uuid.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest_all.dart' as tz;
 import '../../storage/database/database.dart';
@@ -14,6 +16,7 @@ import '../../storage/database/database.dart';
 /// - Tracks which windows have been completed
 class CheckinService {
   final AppDatabase database;
+  String? participantId;
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
 
@@ -123,7 +126,32 @@ class CheckinService {
 
   void _onNotificationTap(NotificationResponse response) {
     print('[CheckIn] Notification tapped: ${response.payload}');
-    // The app will handle opening the check-in screen when notified
+
+    _logEmaNotificationEvent('ema_notification_tapped', {
+      'payload': response.payload,
+      'tappedAt': DateTime.now().toIso8601String(),
+    });
+  }
+
+  /// Log an EMA notification event to Firestore
+  Future<void> _logEmaNotificationEvent(String eventType, Map<String, dynamic> data) async {
+    if (participantId == null) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection('participants')
+          .doc(participantId!)
+          .collection('notification_log')
+          .doc(const Uuid().v4())
+          .set({
+        'participantId': participantId,
+        'eventType': eventType,
+        'data': data,
+        'timestamp': FieldValue.serverTimestamp(),
+        'localTime': DateTime.now().toIso8601String(),
+      }).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      print('[CheckIn] Failed to log EMA notification event: $e');
+    }
   }
 
   void _generateWindows() {
@@ -208,6 +236,14 @@ class CheckinService {
               UILocalNotificationDateInterpretation.absoluteTime,
           payload: jsonEncode({'window': window.index}),
         );
+
+        _logEmaNotificationEvent('ema_notification_scheduled', {
+          'windowIndex': window.index,
+          'scheduledFor': window.start.toIso8601String(),
+          'windowEnd': window.end.toIso8601String(),
+          'title': 'Time for a SocialScope check-in!',
+        });
+
         print('[CheckIn] Scheduled notification for window ${window.index} '
             'at ${window.start}');
       }
@@ -219,6 +255,12 @@ class CheckinService {
     if (windowIndex < _todayWindows.length) {
       _todayWindows[windowIndex].completed = true;
       _checkWindows();
+
+      _logEmaNotificationEvent('ema_checkin_window_completed', {
+        'windowIndex': windowIndex,
+        'completedAt': DateTime.now().toIso8601String(),
+      });
+
       print('[CheckIn] Window $windowIndex marked complete');
     }
   }

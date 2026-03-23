@@ -53,6 +53,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void initState() {
     super.initState();
     _checkinService = CheckinService(database: widget.database);
+    _checkinService.participantId = widget.captureService.participantId;
     _checkinService.initialize();
     _initializeCookies();
     _loadLoginStatus();
