@@ -111,6 +111,28 @@ service cloud.firestore {
                         request.resource.data.participantId == participantId;
         allow delete: if false;  // Safety alerts must be preserved
       }
+
+      // Pending safety confirmations - walk-away detection
+      match /pending_safety_confirmations/{docId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+
+      // Notification log - EMA and safety notification tracking
+      match /notification_log/{logId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if false;
+      }
+
+      // Safety plan - participant's crisis safety plan
+      match /safety_plan/{planId} {
+        allow read: if true;
+        allow write: if false;  // Only Admin SDK populates from REDCap
+      }
     }
 
     // ========================================================================
