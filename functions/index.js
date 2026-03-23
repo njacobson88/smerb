@@ -15,6 +15,10 @@ const ENVIRONMENT = process.env.ENVIRONMENT || "prod";
 const PREFIX = ENVIRONMENT === "dev" ? "dev_" : "";
 function col(name) { return `${PREFIX}${name}`; }
 
+// URLs parameterized for dev/prod
+const BACKEND_URL = process.env.BACKEND_URL || "https://socialscope-dashboard-api-436153481478.us-central1.run.app";
+const DASHBOARD_URL = process.env.DASHBOARD_URL || "${DASHBOARD_URL}";
+
 console.log(`[Config] Environment: ${ENVIRONMENT}, prefix: '${PREFIX}'`);
 
 // Twilio credentials stored as Firebase secrets
@@ -153,7 +157,7 @@ async function callParticipant(client, participantId, fromNumber) {
     // Press 2 = connect to study team
     // Press 9 = connect to 988 Suicide & Crisis Lifeline (warm handoff)
     const twiml = `<Response>
-      <Gather numDigits="1" action="https://socialscope-dashboard-api-436153481478.us-central1.run.app/api/twilio/call-response?participantId=${participantId}" method="POST" timeout="15">
+      <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}" method="POST" timeout="15">
         <Say voice="alice">
           Hello, this is the SocialScope study team calling to check on you
           after your recent check-in. We want to make sure you are safe.
@@ -298,7 +302,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
             (alertData.confirmationNumber ? `Confirmation #: ${alertData.confirmationNumber}\n` : "") +
             (alertData.triggerQuestion ? `Trigger Question: ${alertData.triggerQuestion}\n` : "") +
             `\nA participant endorsed imminent self-harm risk during check-in.\n\n` +
-            `View dashboard: https://socialscope-dashboard.web.app\n` +
+            `View dashboard: ${DASHBOARD_URL}\n` +
             `Alert ID: ${alertId}`,
         });
 
@@ -351,7 +355,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
               : isFallback
                 ? `Participant gave high-risk responses but exited check-in before confirmation.\n`
                 : `A participant endorsed imminent self-harm risk.\n`) +
-          `View: https://socialscope-dashboard.web.app`;
+          `View: ${DASHBOARD_URL}`;
 
         for (const recipient of recipients) {
           try {
@@ -550,7 +554,7 @@ exports[escalationFnName] = onSchedule(
                     `Safety event for participant ${eventData.participantId} ` +
                     `has not been responded to in ${Math.round(minutesSinceCreation)} minutes.\n` +
                     `Please log a disposition immediately.\n` +
-                    `Dashboard: https://socialscope-dashboard.web.app`,
+                    `Dashboard: ${DASHBOARD_URL}`,
               from: fromNumber,
               to: `+1${escalationTarget.phone}`,
             });

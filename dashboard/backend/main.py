@@ -522,7 +522,7 @@ def get_all_participant_ids(enrolled_only: bool = True) -> list:
     participants_info = []
 
     # Check both collections
-    for collection_name in ["participants", "valid_participants"]:
+    for collection_name in [config.col("participants"), config.col("valid_participants")]:
         collection_ref = db.collection(collection_name)
         for doc in collection_ref.stream():
             if doc.id in seen_ids:
@@ -3902,7 +3902,7 @@ async def twilio_call_response(
             # Unrecognized input — replay options
             twiml = (
                 '<Response>'
-                '<Gather numDigits="1" action="https://socialscope-dashboard-api-436153481478.us-central1.run.app'
+                f'<Gather numDigits="1" action="{os.getenv("BACKEND_URL", "https://socialscope-dashboard-api-436153481478.us-central1.run.app")}'
                 f'/api/twilio/call-response?participantId={participantId}" method="POST" timeout="15">'
                 '<Say voice="alice">Sorry, we did not understand your response. '
                 'Press 1 if you are safe. Press 2 to speak with the study team. '
