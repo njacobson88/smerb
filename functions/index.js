@@ -2,7 +2,7 @@ const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
-const nodemailer = require("nodemailer");
+const sgMail = require("@sendgrid/mail");
 
 admin.initializeApp();
 
@@ -26,23 +26,20 @@ const twilioAccountSid = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthToken = defineSecret("TWILIO_AUTH_TOKEN");
 const twilioFromNumber = defineSecret("TWILIO_FROM_NUMBER");
 
-// Slack/email notification config
+// SendGrid + Slack email config
+const sendgridApiKey = defineSecret("SENDGRID_API_KEY");
 const slackChannelEmail = defineSecret("SLACK_CHANNEL_EMAIL");
-const alertSenderEmail = defineSecret("ALERT_SENDER_EMAIL");
-const alertSenderPassword = defineSecret("ALERT_SENDER_PASSWORD");
+const alertSenderEmail = defineSecret("ALERT_SENDER_EMAIL"); // e.g., Social.Media.Wellness@dartmouth.edu
 
 // ============================================================================
-// Helper: Send email (for Slack channel and participant notifications)
+// Helper: Send email via SendGrid (for Slack channel and participant notifications)
 // ============================================================================
-async function sendEmail({ senderEmail, senderPassword, to, subject, body }) {
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: senderEmail, pass: senderPassword },
-  });
+async function sendEmail({ senderEmail, to, subject, body }) {
+  sgMail.setApiKey(sendgridApiKey.value());
 
-  await transporter.sendMail({
-    from: `"SocialScope Study Team" <${senderEmail}>`,
+  await sgMail.send({
     to,
+    from: { email: senderEmail, name: "SocialScope Study Team" },
     subject,
     text: body,
   });
@@ -340,7 +337,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
     document: `${col("participants")}/{participantId}/safety_alerts/{alertId}`,
     secrets: [
       twilioAccountSid, twilioAuthToken, twilioFromNumber,
-      slackChannelEmail, alertSenderEmail, alertSenderPassword,
+      sendgridApiKey, slackChannelEmail, alertSenderEmail,
     ],
   },
   async (event) => {
@@ -382,9 +379,9 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
     const slackEmail = slackChannelEmail.value();
     const senderEmailVal = alertSenderEmail.value();
-    const senderPass = alertSenderPassword.value();
+    const sgKey = sendgridApiKey.value();
 
-    if (slackEmail && senderEmailVal && senderPass) {
+    if (slackEmail && senderEmailVal && sgKey) {
       try {
         const alertLabel = isConfirmedDanger
           ? "CONFIRMED DANGER"
@@ -396,7 +393,6 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
         await sendEmail({
           senderEmail: senderEmailVal,
-          senderPassword: senderPass,
           to: slackEmail,
           subject: `[${alertLabel}] Participant ${participantId}`,
           body:
@@ -607,12 +603,11 @@ exports[safetyAlertFnName] = onDocumentCreated(
         }
 
         // 4c. Email participant
-        if (participantInfo.email && senderEmailVal && senderPass) {
+        if (participantInfo.email && senderEmailVal && sgKey) {
           try {
             await sendEmail({
               senderEmail: senderEmailVal,
-              senderPassword: senderPass,
-              to: participantInfo.email,
+                  to: participantInfo.email,
               subject: "SocialScope Study Team - Checking In",
               body:
                 `Hello,\n\n` +
