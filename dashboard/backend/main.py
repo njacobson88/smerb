@@ -257,6 +257,160 @@ def get_install_links():
     }
 
 
+# ============================================================================
+# App Distribution — Participant Device & Distribution Management
+# ============================================================================
+
+class DistributionUpdate(BaseModel):
+    email: Optional[str] = None
+    device_type: Optional[str] = None  # "ios" or "android"
+    manual_override: Optional[bool] = False  # If true, don't overwrite from REDCap
+
+
+@app.get("/api/participant/{participant_id}/distribution")
+@limiter.limit("30/minute")
+def get_participant_distribution(
+    request: Request, participant_id: str, user: dict = Depends(verify_firebase_token)
+):
+    """Get distribution info for a participant (email, device type, invite status)."""
+    try:
+        doc = db.collection(config.col("participants")).document(participant_id).get()
+        if not doc.exists:
+            return {"distribution": None}
+
+        data = doc.to_dict()
+        return {
+            "distribution": {
+                "email": data.get("distributionEmail"),
+                "deviceType": data.get("deviceType"),
+                "manualOverride": data.get("deviceTypeManualOverride", False),
+                "inviteSentAt": data.get("distributionInviteSentAt").isoformat() if data.get("distributionInviteSentAt") and hasattr(data.get("distributionInviteSentAt"), "isoformat") else data.get("distributionInviteSentAt"),
+                "inviteStatus": data.get("distributionInviteStatus"),
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get distribution info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/participant/{participant_id}/distribution")
+@limiter.limit("20/minute")
+def update_participant_distribution(
+    request: Request,
+    participant_id: str,
+    body: DistributionUpdate,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Update distribution email and/or device type for a participant."""
+    try:
+        doc_ref = db.collection(config.col("participants")).document(participant_id)
+        updates = {}
+
+        if body.email is not None:
+            updates["distributionEmail"] = body.email.strip()
+        if body.device_type is not None:
+            if body.device_type not in ("ios", "android"):
+                raise HTTPException(status_code=400, detail="device_type must be 'ios' or 'android'")
+            updates["deviceType"] = body.device_type
+            if body.manual_override:
+                updates["deviceTypeManualOverride"] = True
+        if updates:
+            updates["distributionUpdatedAt"] = datetime.utcnow()
+            updates["distributionUpdatedBy"] = user.get("email")
+            doc_ref.update(updates)
+
+        logger.info(f"Distribution updated for {participant_id}: {updates} by {user.get('email')}")
+        return {"message": "Distribution info updated", "updates": {k: str(v) for k, v in updates.items()}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update distribution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/participant/{participant_id}/distribution/send-invite")
+@limiter.limit("10/minute")
+def send_distribution_invite(
+    request: Request,
+    participant_id: str,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Send an app distribution invite to a participant.
+    Adds them as a Firebase App Distribution tester and triggers the invite email.
+    """
+    try:
+        doc = db.collection(config.col("participants")).document(participant_id).get()
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Participant not found")
+
+        data = doc.to_dict()
+        email = data.get("distributionEmail")
+        device_type = data.get("deviceType")
+
+        if not email:
+            raise HTTPException(status_code=400, detail="No distribution email set for this participant")
+        if not device_type:
+            raise HTTPException(status_code=400, detail="No device type set for this participant. Please confirm iOS or Android first.")
+
+        # Add tester to Firebase App Distribution via CLI
+        import subprocess
+
+        # Add tester email to the testers group
+        add_result = subprocess.run(
+            ["firebase", "appdistribution:testers:add",
+             "--emails", email,
+             "--group-aliases", "testers",
+             "--project", config.FIREBASE_PROJECT_ID],
+            capture_output=True, text=True, timeout=30
+        )
+
+        if add_result.returncode != 0:
+            logger.error(f"Failed to add tester {email}: {add_result.stderr}")
+            raise HTTPException(status_code=500, detail=f"Failed to add tester: {add_result.stderr}")
+
+        # Determine the correct app ID based on device type
+        if device_type == "ios":
+            app_id = "1:436153481478:ios:4d04d2e6257b0f0d9f8687"
+        else:
+            app_id = "1:436153481478:android:cd39924bcf90a0ab9f8687"
+
+        # Get the latest release and distribute to this tester
+        dist_result = subprocess.run(
+            ["firebase", "appdistribution:distribute",
+             "--app", app_id,
+             "--testers", email,
+             "--project", config.FIREBASE_PROJECT_ID],
+            capture_output=True, text=True, timeout=60,
+            # This sends the invite email for the latest release
+        )
+
+        # Update participant record
+        doc_ref = db.collection(config.col("participants")).document(participant_id)
+        doc_ref.update({
+            "distributionInviteSentAt": datetime.utcnow(),
+            "distributionInviteStatus": "sent",
+            "distributionInviteSentBy": user.get("email"),
+            "distributionInviteDeviceType": device_type,
+        })
+
+        logger.info(f"Distribution invite sent to {email} ({device_type}) for {participant_id} by {user.get('email')}")
+
+        return {
+            "message": f"Invite sent to {email} for {device_type}",
+            "email": email,
+            "deviceType": device_type,
+            "testerAddResult": add_result.stdout.strip() if add_result.returncode == 0 else add_result.stderr.strip(),
+        }
+    except HTTPException:
+        raise
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Firebase CLI timed out")
+    except Exception as e:
+        logger.error(f"Failed to send distribution invite: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/debug/test-signing")
 def debug_test_signing():
     """Debug endpoint to test signed URL generation."""

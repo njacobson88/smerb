@@ -64,6 +64,18 @@ const ParticipantDetailScreen = ({
   const [showInactiveConfirm, setShowInactiveConfirm] = useState(false);
   const [inactiveReason, setInactiveReason] = useState('');
 
+  // App distribution state
+  const [distEmail, setDistEmail] = useState('');
+  const [distDeviceType, setDistDeviceType] = useState('');
+  const [distManualOverride, setDistManualOverride] = useState(false);
+  const [distInviteStatus, setDistInviteStatus] = useState(null);
+  const [distInviteSentAt, setDistInviteSentAt] = useState(null);
+  const [distSaving, setDistSaving] = useState(false);
+  const [distSending, setDistSending] = useState(false);
+  const [distError, setDistError] = useState(null);
+  const [distSuccess, setDistSuccess] = useState(null);
+  const [showDistPanel, setShowDistPanel] = useState(false);
+
   // Find current index in participant list
   const currentIndex = participantList?.indexOf(currentParticipantId) ?? -1;
 
@@ -158,6 +170,58 @@ const ParticipantDetailScreen = ({
       }
     };
   }, []);
+
+  // Fetch distribution info when participant changes
+  const fetchDistribution = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/participant/${currentParticipantId}/distribution`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.distribution) {
+          setDistEmail(data.distribution.email || '');
+          setDistDeviceType(data.distribution.deviceType || '');
+          setDistManualOverride(data.distribution.manualOverride || false);
+          setDistInviteStatus(data.distribution.inviteStatus);
+          setDistInviteSentAt(data.distribution.inviteSentAt);
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }, [currentParticipantId]);
+
+  useEffect(() => {
+    if (currentParticipantId) fetchDistribution();
+  }, [currentParticipantId, fetchDistribution]);
+
+  const saveDistribution = async () => {
+    setDistSaving(true); setDistError(null); setDistSuccess(null);
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/participant/${currentParticipantId}/distribution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: distEmail, device_type: distDeviceType, manual_override: true }),
+      });
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to save'); }
+      setDistSuccess('Saved');
+      setDistManualOverride(true);
+      setTimeout(() => setDistSuccess(null), 3000);
+    } catch (e) { setDistError(e.message); } finally { setDistSaving(false); }
+  };
+
+  const sendInvite = async () => {
+    if (!distDeviceType) { setDistError('Please confirm the device type (iOS or Android) before sending.'); return; }
+    if (!distEmail) { setDistError('Please enter an email address first.'); return; }
+    setDistSending(true); setDistError(null); setDistSuccess(null);
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/participant/${currentParticipantId}/distribution/send-invite`, {
+        method: 'POST',
+      });
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to send'); }
+      const data = await res.json();
+      setDistSuccess(`Invite sent to ${data.email} (${data.deviceType})`);
+      setDistInviteStatus('sent');
+      setDistInviteSentAt(new Date().toISOString());
+    } catch (e) { setDistError(e.message); } finally { setDistSending(false); }
+  };
 
   // Handle data export - show confirmation for Level 3
   const handleExportClick = (level) => {
@@ -502,9 +566,98 @@ const ParticipantDetailScreen = ({
                   <div className="text-red-500 text-xs">{studyStartError}</div>
                 )}
                 <div>Device: {summary.device_model || 'Unknown'} ({summary.os_version || 'Unknown'})</div>
+
+                {/* App Distribution Toggle */}
+                <button
+                  onClick={() => setShowDistPanel(!showDistPanel)}
+                  className="mt-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                >
+                  {showDistPanel ? 'Hide' : 'Show'} App Distribution
+                </button>
               </div>
             )}
           </div>
+
+          {/* App Distribution Panel */}
+          {showDistPanel && (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 mb-4">
+              <h3 className="text-sm font-semibold text-indigo-800 mb-3">App Distribution</h3>
+
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Email for invite</label>
+                  <input
+                    type="email"
+                    value={distEmail}
+                    onChange={(e) => setDistEmail(e.target.value)}
+                    placeholder="participant@email.com"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                  <p className="text-xs text-gray-400 mt-0.5">iOS requires a Google-linked email</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Device type
+                    {distManualOverride && <span className="text-amber-600 ml-1">(manually set)</span>}
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setDistDeviceType('ios')}
+                      className={`flex-1 py-1.5 text-sm font-medium rounded border transition-colors ${
+                        distDeviceType === 'ios'
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      iOS
+                    </button>
+                    <button
+                      onClick={() => setDistDeviceType('android')}
+                      className={`flex-1 py-1.5 text-sm font-medium rounded border transition-colors ${
+                        distDeviceType === 'android'
+                          ? 'bg-green-600 text-white border-green-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      Android
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status messages */}
+              {distError && (
+                <div className="text-red-600 text-xs mb-2 bg-red-50 rounded p-2">{distError}</div>
+              )}
+              {distSuccess && (
+                <div className="text-green-600 text-xs mb-2 bg-green-50 rounded p-2">{distSuccess}</div>
+              )}
+              {distInviteStatus === 'sent' && (
+                <div className="text-indigo-600 text-xs mb-2">
+                  Last invite sent: {distInviteSentAt ? new Date(distInviteSentAt).toLocaleString() : 'Unknown'}
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="flex gap-2">
+                <button
+                  onClick={saveDistribution}
+                  disabled={distSaving}
+                  className="flex items-center px-3 py-1.5 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 disabled:opacity-50"
+                >
+                  <Save size={14} className="mr-1" />
+                  {distSaving ? 'Saving...' : 'Save'}
+                </button>
+                <button
+                  onClick={sendInvite}
+                  disabled={distSending || !distEmail || !distDeviceType}
+                  className="flex items-center px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {distSending ? 'Sending...' : `Send ${distDeviceType ? distDeviceType.toUpperCase() : ''} Invite`}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="relative">
             <button
