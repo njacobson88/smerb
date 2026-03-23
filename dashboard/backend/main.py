@@ -4328,7 +4328,7 @@ def get_participant_compliance(
         try:
             hist_query = db.collection(NOTIFICATION_HISTORY_COLLECTION).where(
                 "participantId", "==", participant_id
-            ).order_by("sentAt", direction=firestore.Query.DESCENDING).limit(5)
+            ).order_by("sentAt", direction=firestore.Query.DESCENDING).limit(20)
             for doc in hist_query.stream():
                 d = doc.to_dict()
                 sent_at = d.get("sentAt")
@@ -4337,9 +4337,11 @@ def get_participant_compliance(
                 history.append({
                     "id": doc.id,
                     "category": d.get("category"),
+                    "subject": d.get("subject"),
                     "sentAt": sent_at.isoformat() if sent_at else None,
                     "sentBy": d.get("sentBy"),
                     "deliveryMethods": d.get("deliveryMethods"),
+                    "results": d.get("results"),
                 })
         except Exception:
             pass

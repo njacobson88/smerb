@@ -803,17 +803,63 @@ const ParticipantDetailScreen = ({
                 </div>
               )}
 
-              {/* Notification history */}
-              {complianceData?.notificationHistory?.length > 0 && (
-                <div className="text-xs text-gray-500 mb-2">
-                  Last sent: {new Date(complianceData.notificationHistory[0].sentAt).toLocaleDateString()} by {complianceData.notificationHistory[0].sentBy}
-                </div>
-              )}
-
               <button onClick={sendNotification} disabled={notifSending || !notifPreview}
                 className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded hover:bg-purple-700 disabled:opacity-50">
                 {notifSending ? 'Sending...' : 'Send This Notification'}
               </button>
+
+              {/* Communication History */}
+              <div className="mt-4 pt-3 border-t border-purple-200">
+                <h4 className="text-xs font-bold text-purple-700 mb-2">
+                  Communication History
+                  {complianceData?.notificationHistory?.length > 0 &&
+                    ` (${complianceData.notificationHistory.length})`}
+                </h4>
+                {(!complianceData?.notificationHistory || complianceData.notificationHistory.length === 0) ? (
+                  <div className="text-xs text-gray-400 italic">No notifications sent yet</div>
+                ) : (
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {complianceData.notificationHistory.map((notif, idx) => {
+                      const categoryLabels = { ema: 'EMA Compliance', screenshots: 'Screenshot Compliance', weekly: 'Weekly Report' };
+                      const categoryColors = { ema: 'bg-blue-100 text-blue-700', screenshots: 'bg-orange-100 text-orange-700', weekly: 'bg-green-100 text-green-700' };
+                      const sentDate = notif.sentAt ? new Date(notif.sentAt) : null;
+                      const daysAgo = sentDate ? Math.floor((Date.now() - sentDate.getTime()) / (1000 * 60 * 60 * 24)) : null;
+
+                      return (
+                        <div key={idx} className="bg-white border border-purple-100 rounded p-2">
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center gap-2">
+                              <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${categoryColors[notif.category] || 'bg-gray-100 text-gray-700'}`}>
+                                {categoryLabels[notif.category] || notif.category}
+                              </span>
+                              {notif.deliveryMethods?.map((m, i) => (
+                                <span key={i} className="text-[10px] text-gray-400">
+                                  {m === 'email' ? '📧' : m === 'push' ? '📱' : m}
+                                </span>
+                              ))}
+                            </div>
+                            <span className="text-[10px] text-gray-400">
+                              {sentDate ? (
+                                daysAgo === 0 ? 'Today' :
+                                daysAgo === 1 ? 'Yesterday' :
+                                `${daysAgo}d ago`
+                              ) : ''}
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-700 font-medium truncate" title={notif.subject}>
+                            {notif.subject || 'No subject'}
+                          </div>
+                          <div className="text-[10px] text-gray-400 mt-0.5">
+                            {sentDate ? sentDate.toLocaleString('en-US', {
+                              month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+                            }) : ''} — by {notif.sentBy || 'unknown'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
