@@ -227,6 +227,111 @@ async function contactEmergencyContact(client, participantId, fromNumber) {
 }
 
 // ============================================================================
+// Helper: Get participant info (phone, email, emergency contacts, name)
+// Checks both the participants collection and redcap_mappings
+// ============================================================================
+async function getParticipantInfo(participantId) {
+  const info = { phone: null, email: null, name: null, emergencyContacts: [], redcapId: null };
+
+  // Check participants collection
+  const pDoc = await admin.firestore().collection(col("participants")).doc(participantId).get();
+  if (pDoc.exists) {
+    const data = pDoc.data();
+    info.phone = data.phone || data.phoneNumber;
+    info.email = data.email;
+    info.name = data.name || data.participantName;
+    info.emergencyContacts = data.emergencyContacts || [];
+    if (data.emergencyContactPhone) {
+      info.emergencyContacts.push({
+        name: data.emergencyContactName || "Emergency Contact",
+        phone: data.emergencyContactPhone,
+      });
+    }
+  }
+
+  // Check valid_participants for REDCap link
+  const vDoc = await admin.firestore().collection(col("valid_participants")).doc(participantId).get();
+  if (vDoc.exists) {
+    info.redcapId = vDoc.data().redcap_record_id;
+  }
+
+  // Check redcap_mappings for reverse lookup
+  if (!info.redcapId) {
+    const mappings = await admin.firestore().collection(col("redcap_mappings"))
+      .where("app_participant_id", "==", participantId).limit(1).get();
+    if (!mappings.empty) {
+      info.redcapId = mappings.docs[0].id;
+    }
+  }
+
+  return info;
+}
+
+// ============================================================================
+// Helper: Notify emergency contacts via SMS and call
+// ============================================================================
+async function notifyEmergencyContacts(client, participantId, participantInfo, fromNumber, safetyEventRef) {
+  const results = [];
+
+  for (const contact of (participantInfo.emergencyContacts || [])) {
+    if (!contact.phone) continue;
+
+    const participantName = participantInfo.name || `Study participant ${participantId}`;
+    const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
+
+    // SMS first
+    try {
+      const smsResult = await client.messages.create({
+        body: `This is the SocialScope research study team at Dartmouth College. ` +
+              `${participantName} has designated you (${contact.name}) as an emergency contact ` +
+              `and has indicated they are currently experiencing a mental health crisis. ` +
+              `We encourage you to reach out to them to provide support. ` +
+              `If you believe they are in immediate danger, please call 911. ` +
+              `You can also call the 988 Suicide & Crisis Lifeline.`,
+        from: fromNumber,
+        to: contactPhone,
+      });
+      results.push({ name: contact.name, phone: contact.phone, smsSid: smsResult.sid, type: "sms" });
+    } catch (err) {
+      results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "sms" });
+    }
+
+    // Voice call with voicemail
+    try {
+      const callResult = await client.calls.create({
+        twiml: `<Response><Say voice="alice">` +
+          `Hello ${contact.name}. This is the SocialScope research study team at Dartmouth College. ` +
+          `${participantName} has designated you as an emergency contact and has indicated ` +
+          `they are currently experiencing a mental health crisis. ` +
+          `We encourage you to proactively reach out to them to provide support. ` +
+          `If you believe they are in immediate danger, please call 911. ` +
+          `Thank you.</Say></Response>`,
+        from: fromNumber,
+        to: contactPhone,
+        timeout: 30,
+      });
+      results.push({ name: contact.name, phone: contact.phone, callSid: callResult.sid, type: "call" });
+    } catch (err) {
+      results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "call" });
+    }
+
+    // Log to audit trail
+    if (safetyEventRef) {
+      await safetyEventRef.collection("audit_trail").doc().set({
+        type: "emergency_contact_notified",
+        contactName: contact.name,
+        contactPhone: contact.phone,
+        results: results.filter(r => r.phone === contact.phone),
+        loggedBy: "system",
+        loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  return results;
+}
+
+// ============================================================================
 // Main Safety Alert Trigger
 // ============================================================================
 const safetyAlertFnName = ENVIRONMENT === "dev" ? "dev_onSafetyAlert" : "onSafetyAlert";
@@ -316,7 +421,10 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
     // ================================================================
     // Step 3: Notify on-call team via SMS (uses on-call roster)
-    // Primary on-call is notified first. SMS includes reply instructions.
+    // For CONFIRMED DANGER: on-call is NOT paged immediately — automated
+    //   participant outreach (SMS + IVR call) happens first. On-call is
+    //   paged by the escalation scheduler after 15 min if unresolved.
+    // For other alert types (fallback, walk-away): on-call is paged immediately.
     // ================================================================
     const roster = await getOnCallRoster();
     const recipients = [];
@@ -348,7 +456,9 @@ exports[safetyAlertFnName] = onDocumentCreated(
     let smsResults = [];
     let smsErrors = [];
 
-    if (recipients.length > 0) {
+    // For confirmed danger: skip immediate on-call page — automated outreach first
+    // Escalation scheduler will page on-call after 15 min if participant doesn't resolve
+    if (recipients.length > 0 && !isConfirmedDanger) {
       try {
         const client = getTwilioClient();
         const alertLabel = isConfirmedDanger
@@ -403,39 +513,140 @@ exports[safetyAlertFnName] = onDocumentCreated(
     }
 
     // ================================================================
-    // Step 4: Participant outreach (only for confirmed danger)
+    // Step 4: Automated participant outreach (confirmed danger only)
+    //
+    // Sequence:
+    //   4a. SMS participant: "We'll be calling. Reply ERROR or 1 if accidental."
+    //   4b. IVR call: Press 1 = error, Press 2 = crisis (warm handoff 988),
+    //       Press 3 = crisis + notify emergency contacts
+    //   4c. If no resolution from 4a/4b → page on-call with full history
+    //   Emergency contacts notified if press 2 or press 3 in IVR
     // ================================================================
     let participantSmsResult = null;
     let participantCallResult = null;
-    let emergencyContactResult = null;
+    let emergencyContactResults = null;
 
-    if (isConfirmedDanger) {
+    // Get enriched participant info (phone, email, emergency contacts, REDCap ID)
+    const participantInfo = isConfirmedDanger
+      ? await getParticipantInfo(participantId)
+      : null;
+
+    if (isConfirmedDanger && participantInfo) {
       try {
         const client = getTwilioClient();
         const fromNumber = twilioFromNumber.value();
 
-        // SMS participant that team will call
-        participantSmsResult = await smsParticipant(client, participantId, fromNumber);
+        // 4a. SMS participant — includes error acknowledgment option
+        if (participantInfo.phone) {
+          const participantPhone = participantInfo.phone.startsWith("+")
+            ? participantInfo.phone : `+1${participantInfo.phone}`;
+          try {
+            const smsResult = await client.messages.create({
+              body: `This is the SocialScope study team at Dartmouth College. ` +
+                    `Based on your recent check-in, we want to make sure you're safe. ` +
+                    `A member of our team will be calling you shortly.\n\n` +
+                    `If this was an error, reply ERROR or 1.\n\n` +
+                    `If you are in immediate danger, please call 988.`,
+              from: fromNumber,
+              to: participantPhone,
+            });
+            participantSmsResult = { sid: smsResult.sid, status: smsResult.status, phone: participantInfo.phone };
+          } catch (err) {
+            participantSmsResult = { error: err.message };
+          }
 
-        // Log to audit trail
-        if (safetyEventRef) {
-          await safetyEventRef.collection("audit_trail").doc().set({
-            type: "participant_sms_sent",
-            result: participantSmsResult,
-            loggedBy: "system",
-            loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          if (safetyEventRef) {
+            await safetyEventRef.collection("audit_trail").doc().set({
+              type: "participant_sms_sent",
+              result: participantSmsResult,
+              message: "Initial outreach SMS with ERROR reply option",
+              loggedBy: "system",
+              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+
+          // 4b. IVR call to participant
+          // Press 1 = error/accidental
+          // Press 2 = crisis situation → warm handoff to 988 + notify emergency contacts
+          // Press 3 = crisis + please contact emergency contacts
+          // No answer/no press = unable to reach
+          try {
+            const twiml = `<Response>
+              <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}" method="POST" timeout="15">
+                <Say voice="alice">
+                  Hello. This is the SocialScope study team from Dartmouth College calling about your recent check-in.
+                  We want to make sure you are safe.
+                  Press 1 if you are safe and this was an error or accidental response.
+                  Press 2 if you are experiencing a crisis and would like to be connected to the 988 Suicide and Crisis Lifeline.
+                  Press 3 if you are experiencing a crisis and would also like us to notify your emergency contacts.
+                </Say>
+              </Gather>
+              <Say voice="alice">We did not receive a response. A team member will follow up with you shortly. If you are in danger, please call 988.</Say>
+            </Response>`;
+
+            const call = await client.calls.create({
+              twiml,
+              from: fromNumber,
+              to: participantPhone,
+              timeout: 30,
+            });
+            participantCallResult = { sid: call.sid, status: call.status, phone: participantInfo.phone };
+          } catch (err) {
+            participantCallResult = { error: err.message };
+          }
+
+          if (safetyEventRef) {
+            await safetyEventRef.collection("audit_trail").doc().set({
+              type: "participant_call_initiated",
+              result: participantCallResult,
+              message: "IVR call: 1=error, 2=crisis+988, 3=crisis+emergency contacts",
+              loggedBy: "system",
+              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
         }
 
-        // Initiate call to participant (with IVR: press 1=safe, 2=team, 9=988)
-        participantCallResult = await callParticipant(client, participantId, fromNumber);
+        // 4c. Email participant
+        if (participantInfo.email && senderEmailVal && senderPass) {
+          try {
+            await sendEmail({
+              senderEmail: senderEmailVal,
+              senderPassword: senderPass,
+              to: participantInfo.email,
+              subject: "SocialScope Study Team - Checking In",
+              body:
+                `Hello,\n\n` +
+                `This is the SocialScope study team at Dartmouth College. ` +
+                `Based on your recent check-in, we want to make sure you're safe.\n\n` +
+                `A member of our team will be reaching out to you shortly.\n\n` +
+                `If you are in immediate danger, please:\n` +
+                `- Call 988 (Suicide & Crisis Lifeline)\n` +
+                `- Text HOME to 741741 (Crisis Text Line)\n` +
+                `- Call 911 or go to your nearest emergency room\n\n` +
+                `- SocialScope Study Team, Dartmouth College`,
+            });
 
+            if (safetyEventRef) {
+              await safetyEventRef.collection("audit_trail").doc().set({
+                type: "participant_email_sent",
+                participantEmail: participantInfo.email,
+                loggedBy: "system",
+                loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            console.error("Failed to email participant:", err);
+          }
+        }
+
+        // Store participant info on the safety event for on-call context
         if (safetyEventRef) {
-          await safetyEventRef.collection("audit_trail").doc().set({
-            type: "participant_call_initiated",
-            result: participantCallResult,
-            loggedBy: "system",
-            loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+          await safetyEventRef.update({
+            participantPhone: participantInfo.phone,
+            participantEmail: participantInfo.email,
+            participantName: participantInfo.name,
+            redcapId: participantInfo.redcapId,
+            emergencyContactCount: (participantInfo.emergencyContacts || []).length,
           });
         }
       } catch (err) {
@@ -444,52 +655,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
     }
 
     // ================================================================
-    // Step 5: Email participant (if email available, doesn't need MS Graph yet)
-    // ================================================================
-    if (isConfirmedDanger && senderEmailVal && senderPass) {
-      try {
-        const participantDoc = await admin.firestore()
-          .collection(col("participants")).doc(participantId).get();
-        const participantEmail = participantDoc.exists
-          ? participantDoc.data().email
-          : null;
-
-        if (participantEmail) {
-          await sendEmail({
-            senderEmail: senderEmailVal,
-            senderPassword: senderPass,
-            to: participantEmail,
-            subject: "SocialScope Study Team - Checking In",
-            body:
-              `Hello,\n\n` +
-              `This is the SocialScope study team at Dartmouth College. ` +
-              `Based on your recent check-in, we want to make sure you're safe ` +
-              `and have the support you need.\n\n` +
-              `A member of our team will be reaching out to you shortly.\n\n` +
-              `If you are in immediate danger, please:\n` +
-              `- Call 988 (Suicide & Crisis Lifeline)\n` +
-              `- Text HOME to 741741 (Crisis Text Line)\n` +
-              `- Call 911 or go to your nearest emergency room\n\n` +
-              `Thank you for being part of this study. Your safety is our top priority.\n\n` +
-              `- SocialScope Study Team, Dartmouth College`,
-          });
-
-          if (safetyEventRef) {
-            await safetyEventRef.collection("audit_trail").doc().set({
-              type: "participant_email_sent",
-              participantEmail: participantEmail,
-              loggedBy: "system",
-              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-          }
-        }
-      } catch (err) {
-        console.error("Failed to email participant:", err);
-      }
-    }
-
-    // ================================================================
-    // Step 6: Update alert document with all results
+    // Step 5: Update alert document with all results
     // ================================================================
     await snapshot.ref.update({
       handled: smsResults.length > 0 || slackResult === "sent",
@@ -501,7 +667,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
       slackError,
       participantSmsResult,
       participantCallResult,
-      emergencyContactResult,
+      emergencyContactResults,
       safetyEventId: alertId,
       handledAt: admin.firestore.FieldValue.serverTimestamp(),
     });
