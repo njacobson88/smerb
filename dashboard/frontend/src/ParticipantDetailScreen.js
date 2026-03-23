@@ -205,8 +205,19 @@ const ParticipantDetailScreen = ({
   const fetchCompliance = useCallback(async () => {
     try {
       const res = await authFetch(`${API_BASE_URL}/api/compliance/${currentParticipantId}?days=3`);
-      if (res.ok) setComplianceData(await res.json());
-    } catch (e) { /* ignore */ }
+      if (res.ok) {
+        const data = await res.json();
+        console.log('[Compliance] Data loaded:', data);
+        setComplianceData(data);
+      } else {
+        console.log('[Compliance] Fetch failed:', res.status);
+        // Still show the panel with defaults so the notification UI is accessible
+        setComplianceData({ threeDay: { compliance_pct: 0, needs_notification: true, ema_count: 0, ema_expected: 9 }, weekly: null, notificationHistory: [] });
+      }
+    } catch (e) {
+      console.log('[Compliance] Error:', e);
+      setComplianceData({ threeDay: { compliance_pct: 0, needs_notification: true, ema_count: 0, ema_expected: 9 }, weekly: null, notificationHistory: [] });
+    }
   }, [currentParticipantId]);
 
   useEffect(() => {
@@ -715,7 +726,7 @@ const ParticipantDetailScreen = ({
           )}
 
           {/* Compliance Badge + Notification Panel */}
-          {complianceData && (
+          {(complianceData || summary) && (
             <div className="flex items-center gap-3 mb-4">
               {/* Compliance badge */}
               {complianceData.threeDay?.needs_notification && (
