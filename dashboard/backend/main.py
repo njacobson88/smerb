@@ -4288,6 +4288,242 @@ async def twilio_sms_reply(request: Request):
 
 
 # ============================================================================
+# Compliance Notifications — Email + Push
+# ============================================================================
+
+from compliance_notifications import (
+    LOW_COMPLIANCE_TEMPLATES, WEEKLY_REPORT_TEMPLATES, COMPLIANCE_LEVELS,
+    select_template, pipe_template, get_compliance_level,
+    send_compliance_email, send_push_notification,
+    calculate_participant_compliance, calculate_weekly_compliance,
+)
+
+NOTIFICATION_HISTORY_COLLECTION = config.col("notification_history")
+
+
+class SendNotificationRequest(BaseModel):
+    participant_id: str
+    category: str  # "ema", "screenshots", "weekly"
+    template_index: Optional[int] = None  # Specific template, or None for random
+    delivery_methods: List[str] = ["email"]  # "email", "push", or both
+    custom_subject: Optional[str] = None
+    custom_body: Optional[str] = None
+
+
+@app.get("/api/compliance/{participant_id}")
+@limiter.limit("30/minute")
+def get_participant_compliance(
+    request: Request, participant_id: str,
+    days: int = Query(3), user: dict = Depends(verify_firebase_token),
+):
+    """Get compliance stats for a participant."""
+    try:
+        stats = calculate_participant_compliance(participant_id, db, days=days)
+
+        # Also get weekly for the badge
+        weekly = calculate_weekly_compliance(participant_id, db)
+
+        # Check notification history
+        history = []
+        try:
+            hist_query = db.collection(NOTIFICATION_HISTORY_COLLECTION).where(
+                "participantId", "==", participant_id
+            ).order_by("sentAt", direction=firestore.Query.DESCENDING).limit(5)
+            for doc in hist_query.stream():
+                d = doc.to_dict()
+                sent_at = d.get("sentAt")
+                if sent_at and hasattr(sent_at, "timestamp"):
+                    sent_at = datetime.fromtimestamp(sent_at.timestamp())
+                history.append({
+                    "id": doc.id,
+                    "category": d.get("category"),
+                    "sentAt": sent_at.isoformat() if sent_at else None,
+                    "sentBy": d.get("sentBy"),
+                    "deliveryMethods": d.get("deliveryMethods"),
+                })
+        except Exception:
+            pass
+
+        return {
+            "threeDay": stats,
+            "weekly": weekly,
+            "notificationHistory": history,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get compliance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/compliance/templates/{category}")
+@limiter.limit("30/minute")
+def get_notification_templates(
+    request: Request, category: str, user: dict = Depends(verify_firebase_token),
+):
+    """Get available notification templates for a category."""
+    try:
+        if category == "weekly":
+            return {"templates": WEEKLY_REPORT_TEMPLATES, "levels": COMPLIANCE_LEVELS}
+        elif category in LOW_COMPLIANCE_TEMPLATES:
+            return {"templates": LOW_COMPLIANCE_TEMPLATES[category]}
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown category: {category}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/compliance/preview")
+@limiter.limit("30/minute")
+def preview_notification(
+    request: Request, body: SendNotificationRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Preview a notification with variables piped in (without sending)."""
+    try:
+        # Get participant data
+        compliance = calculate_participant_compliance(body.participant_id, db, days=3)
+        weekly = calculate_weekly_compliance(body.participant_id, db)
+
+        # Get participant name from Firestore or REDCap mapping
+        name = "Participant"
+        p_doc = db.collection(config.col("participants")).document(body.participant_id).get()
+        if p_doc.exists:
+            data = p_doc.to_dict()
+            name = data.get("name") or data.get("participantName") or "Participant"
+
+        variables = {
+            "name": name,
+            "participant_id": body.participant_id,
+            **compliance,
+            **weekly,
+        }
+
+        if body.custom_subject and body.custom_body:
+            return {"subject": body.custom_subject, "body": body.custom_body.format(**variables)}
+
+        level = get_compliance_level(weekly["compliance_pct"]) if body.category == "weekly" else None
+        idx, template = select_template(body.category, level=level,
+                                         exclude_indices=[body.template_index] if body.template_index is not None else None)
+
+        if body.template_index is not None:
+            templates = (WEEKLY_REPORT_TEMPLATES.get(level, []) if body.category == "weekly"
+                        else LOW_COMPLIANCE_TEMPLATES.get(body.category, []))
+            if body.template_index < len(templates):
+                template = templates[body.template_index]
+                idx = body.template_index
+
+        piped = pipe_template(template, variables)
+        return {"templateIndex": idx, "subject": piped["subject"], "body": piped["body"], "variables": variables}
+    except Exception as e:
+        logger.error(f"Failed to preview notification: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/compliance/send")
+@limiter.limit("20/minute")
+def send_compliance_notification(
+    request: Request, body: SendNotificationRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Send a compliance notification to a participant (email and/or push)."""
+    try:
+        # Get participant data
+        compliance = calculate_participant_compliance(body.participant_id, db, days=3)
+        weekly = calculate_weekly_compliance(body.participant_id, db)
+
+        # Get participant info
+        name = "Participant"
+        participant_email = None
+        p_doc = db.collection(config.col("participants")).document(body.participant_id).get()
+        if not p_doc.exists:
+            p_doc = db.collection(config.col("valid_participants")).document(body.participant_id).get()
+        if p_doc.exists:
+            data = p_doc.to_dict()
+            name = data.get("name") or data.get("participantName") or "Participant"
+            participant_email = data.get("email") or data.get("distributionEmail")
+
+        variables = {
+            "name": name,
+            "participant_id": body.participant_id,
+            **compliance,
+            **weekly,
+        }
+
+        # Select or use custom template
+        if body.custom_subject and body.custom_body:
+            subject = body.custom_subject.format(**variables)
+            email_body = body.custom_body.format(**variables)
+            template_idx = -1
+        else:
+            level = get_compliance_level(weekly["compliance_pct"]) if body.category == "weekly" else None
+            idx, template = select_template(body.category, level=level)
+            if body.template_index is not None:
+                templates = (WEEKLY_REPORT_TEMPLATES.get(level, []) if body.category == "weekly"
+                            else LOW_COMPLIANCE_TEMPLATES.get(body.category, []))
+                if body.template_index < len(templates):
+                    template = templates[body.template_index]
+                    idx = body.template_index
+            piped = pipe_template(template, variables)
+            subject = piped["subject"]
+            email_body = piped["body"]
+            template_idx = idx
+
+        results = {}
+        sendgrid_key = os.getenv("SENDGRID_API_KEY")
+        sender_email = os.getenv("ALERT_SENDER_EMAIL", "Social.Media.Wellness@dartmouth.edu")
+
+        # Send email
+        if "email" in body.delivery_methods and participant_email and sendgrid_key:
+            results["email"] = send_compliance_email(
+                to_email=participant_email,
+                subject=subject,
+                body=email_body,
+                sendgrid_api_key=sendgrid_key,
+                from_email=sender_email,
+            )
+        elif "email" in body.delivery_methods and not participant_email:
+            results["email"] = {"success": False, "error": "No email address for participant"}
+
+        # Send push notification
+        if "push" in body.delivery_methods:
+            # Use a shorter version for push
+            push_body = email_body[:200] + "..." if len(email_body) > 200 else email_body
+            results["push"] = send_push_notification(
+                participant_id=body.participant_id,
+                title=subject,
+                body=push_body,
+                db=db,
+            )
+
+        # Log to notification history
+        hist_id = str(uuid.uuid4())
+        db.collection(NOTIFICATION_HISTORY_COLLECTION).document(hist_id).set({
+            "participantId": body.participant_id,
+            "category": body.category,
+            "templateIndex": template_idx,
+            "subject": subject,
+            "deliveryMethods": body.delivery_methods,
+            "results": {k: str(v) for k, v in results.items()},
+            "sentAt": datetime.utcnow(),
+            "sentBy": user.get("email"),
+        })
+
+        logger.info(f"Compliance notification sent to {body.participant_id}: {body.category} by {user.get('email')}")
+
+        return {
+            "message": "Notification sent",
+            "subject": subject,
+            "results": results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to send compliance notification: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # REDCap Integration - Automated Participant ID Generation
 # ============================================================================
 
