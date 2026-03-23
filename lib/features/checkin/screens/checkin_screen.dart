@@ -429,10 +429,10 @@ class _CheckinScreenState extends State<CheckinScreen>
       Future.delayed(const Duration(minutes: 5), () {
         notifications.show(
           9002,
-          'We care about your well-being',
-          'Your check-in is still waiting for you. '
-          'If you\'re going through a tough time, we\'re here to help. '
-          'You can also call 988 anytime.',
+          'Checking in again',
+          'We want to make sure you\'re doing alright. '
+          'Completing your check-in helps us know. '
+          'If you need to talk to someone, call or text 988.',
           details,
         );
       });
