@@ -581,6 +581,63 @@ class UploadService {
 
   // HTML status logs are now batch-synced in syncHtmlStatusLogs() above
 
+  /// Sync locally-persisted safety alerts to Firestore.
+  /// These are written locally first to ensure no alert is ever lost.
+  Future<int> syncSafetyAlerts() async {
+    int totalSynced = 0;
+
+    try {
+      final unsyncedAlerts = await database.getUnsyncedSafetyAlerts();
+      if (unsyncedAlerts.isEmpty) return 0;
+
+      print('[UploadService] Syncing ${unsyncedAlerts.length} safety alerts');
+
+      final syncedIds = <String>[];
+      for (final alert in unsyncedAlerts) {
+        try {
+          Map<String, dynamic> responses;
+          try {
+            responses = jsonDecode(alert.responses) as Map<String, dynamic>;
+          } catch (_) {
+            responses = {'raw': alert.responses};
+          }
+
+          await _firestore
+              .collection('participants')
+              .doc(alert.participantId)
+              .collection('safety_alerts')
+              .doc(alert.id)
+              .set({
+            'participantId': alert.participantId,
+            'sessionId': alert.sessionId,
+            'alertType': alert.alertType,
+            'responses': responses,
+            'triggerQuestion': alert.triggerQuestion,
+            'confirmationNumber': alert.confirmationNumber,
+            'confirmedDanger': alert.alertType == 'confirmed_danger',
+            'triggeredAt': Timestamp.fromDate(alert.createdAt),
+            'handled': false,
+            'syncedFromLocal': true,
+          }).timeout(const Duration(seconds: 10));
+
+          syncedIds.add(alert.id);
+          print('[UploadService] Safety alert synced: ${alert.id} (${alert.alertType})');
+        } catch (e) {
+          print('[UploadService] Failed to sync safety alert ${alert.id}: $e');
+        }
+      }
+
+      if (syncedIds.isNotEmpty) {
+        await database.markSafetyAlertsSynced(syncedIds);
+        totalSynced = syncedIds.length;
+      }
+    } catch (e) {
+      print('[UploadService] Safety alert sync error: $e');
+    }
+
+    return totalSynced;
+  }
+
   /// Sync all data (events + OCR results + HTML) efficiently
   /// Returns a map with counts of synced items
   /// Sync EMA check-in responses to Firebase
@@ -665,6 +722,9 @@ class UploadService {
     // Sync EMA check-in responses
     final emaSynced = await syncEmaResponses(batchSize: eventBatchSize);
 
+    // Sync safety alerts (highest priority — these must never be lost)
+    final safetyAlertsSynced = await syncSafetyAlerts();
+
     return {
       'events': eventsSynced,
       'ocrResults': ocrSynced,
@@ -672,6 +732,7 @@ class UploadService {
       'htmlCaptures': htmlCapturesSynced,
       'htmlStatusLogs': htmlStatusLogsSynced,
       'emaResponses': emaSynced,
+      'safetyAlerts': safetyAlertsSynced,
       'bytesUploaded': _totalBytesUploaded,
     };
   }

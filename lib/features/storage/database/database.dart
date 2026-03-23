@@ -90,6 +90,23 @@ class EmaResponses extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// Local Safety Alerts table - persists alerts locally before syncing to Firestore.
+/// Ensures alerts are never lost even if the network is down.
+class LocalSafetyAlerts extends Table {
+  TextColumn get id => text()();
+  TextColumn get participantId => text()();
+  TextColumn get sessionId => text()();
+  TextColumn get alertType => text()(); // "confirmed_danger", "incomplete_checkin_fallback"
+  TextColumn get responses => text()(); // JSON string
+  TextColumn get triggerQuestion => text().nullable()();
+  IntColumn get confirmationNumber => integer().nullable()();
+  DateTimeColumn get createdAt => dateTime()();
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 /// OCR Results table - stores extracted text from screenshots
 class OcrResults extends Table {
   TextColumn get id => text()();
@@ -111,12 +128,12 @@ class OcrResults extends Table {
 // DATABASE
 // ============================================================================
 
-@DriftDatabase(tables: [Events, Sessions, OcrResults, HtmlCaptures, HtmlStatusLogs, EmaResponses])
+@DriftDatabase(tables: [Events, Sessions, OcrResults, HtmlCaptures, HtmlStatusLogs, EmaResponses, LocalSafetyAlerts])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   static const int maxSyncRetries = 5;
 
@@ -142,6 +159,9 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 6) {
         await _createIndexes(m);
+      }
+      if (from < 7) {
+        await m.createTable(localSafetyAlerts);
       }
     },
   );
@@ -426,6 +446,26 @@ class AppDatabase extends _$AppDatabase {
       syncRetryCount: row.data['sync_retry_count'] as int,
       createdAt: DateTime.fromMillisecondsSinceEpoch((row.data['created_at'] as int) * 1000),
     )).toList();
+  }
+
+  // ==========================================================================
+  // LOCAL SAFETY ALERTS (persisted locally, synced through upload pipeline)
+  // ==========================================================================
+
+  Future<int> insertLocalSafetyAlert(LocalSafetyAlertsCompanion alert) {
+    return into(localSafetyAlerts).insert(alert);
+  }
+
+  Future<List<LocalSafetyAlert>> getUnsyncedSafetyAlerts({int? limit}) {
+    final query = select(localSafetyAlerts)
+      ..where((a) => a.synced.equals(false));
+    if (limit != null) query.limit(limit);
+    return query.get();
+  }
+
+  Future<int> markSafetyAlertsSynced(List<String> alertIds) {
+    return (update(localSafetyAlerts)..where((a) => a.id.isIn(alertIds)))
+        .write(const LocalSafetyAlertsCompanion(synced: Value(true)));
   }
 
   // ==========================================================================

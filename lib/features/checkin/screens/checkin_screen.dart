@@ -198,8 +198,33 @@ class _CheckinScreenState extends State<CheckinScreen>
   }
 
   Future<void> _sendSafetyAlert() async {
+    final alertId = const Uuid().v4();
+    final responsesJson = jsonEncode(
+      _responses.map((k, v) => MapEntry(k, v?.toString())),
+    );
+
+    // Step 1: ALWAYS persist locally first (never lose an alert)
     try {
-      final alertId = const Uuid().v4();
+      await widget.database.insertLocalSafetyAlert(
+        LocalSafetyAlertsCompanion(
+          id: drift.Value(alertId),
+          participantId: drift.Value(widget.participantId),
+          sessionId: drift.Value(widget.sessionId),
+          alertType: const drift.Value('confirmed_danger'),
+          responses: drift.Value(responsesJson),
+          triggerQuestion: drift.Value(_currentTriggerQuestionId),
+          confirmationNumber: drift.Value(_confirmationCount + 1),
+          createdAt: drift.Value(DateTime.now()),
+        ),
+      );
+      print('[CheckIn] Safety alert persisted locally: $alertId');
+    } catch (e) {
+      print('[CheckIn] CRITICAL: Failed to persist safety alert locally: $e');
+    }
+
+    // Step 2: Attempt immediate Firestore write (for fastest notification)
+    bool firestoreSuccess = false;
+    try {
       await FirebaseFirestore.instance
           .collection('participants')
           .doc(widget.participantId)
@@ -213,12 +238,30 @@ class _CheckinScreenState extends State<CheckinScreen>
         'confirmedDanger': true,
         'confirmationNumber': _confirmationCount + 1,
         'triggerQuestion': _currentTriggerQuestionId,
-        // Recipients managed via alert_recipients Firestore collection
         'handled': false,
-      });
-      print('[CheckIn] Safety alert written to Firestore: $alertId');
+      }).timeout(const Duration(seconds: 10));
+
+      firestoreSuccess = true;
+      print('[CheckIn] Safety alert sent to Firestore: $alertId');
+
+      // Mark local copy as synced
+      await widget.database.markSafetyAlertsSynced([alertId]);
     } catch (e) {
-      print('[CheckIn] Error sending safety alert: $e');
+      print('[CheckIn] Firestore write failed (will retry via sync): $e');
+
+      // Show warning to user — alert is saved locally but team may not be notified yet
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Alert saved. The study team will be notified when your connection is restored. '
+              'If you need immediate help, please call 988.',
+            ),
+            duration: Duration(seconds: 8),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
     }
   }
 
@@ -972,19 +1015,41 @@ class _CheckinScreenState extends State<CheckinScreen>
   }
 
   /// Send a fallback safety alert when check-in is abandoned with high-risk responses.
-  /// This catches cases where the participant exits before reaching the confirmation.
+  /// Uses local-first persistence to ensure the alert is never lost.
   Future<void> _sendFallbackAlert() async {
-    try {
-      final alertId = const Uuid().v4();
+    final alertId = const Uuid().v4();
+    final responsesJson = jsonEncode(
+      _responses.map((k, v) => MapEntry(k, v?.toString())),
+    );
 
-      // Identify which questions triggered
-      final triggerQuestions = <String>[];
-      for (final q in _config!.questions) {
-        if (_isQuestionAboveThreshold(q)) {
-          triggerQuestions.add(q.id);
-        }
+    // Identify which questions triggered
+    final triggerQuestions = <String>[];
+    for (final q in _config!.questions) {
+      if (_isQuestionAboveThreshold(q)) {
+        triggerQuestions.add(q.id);
       }
+    }
 
+    // Step 1: Persist locally first
+    try {
+      await widget.database.insertLocalSafetyAlert(
+        LocalSafetyAlertsCompanion(
+          id: drift.Value(alertId),
+          participantId: drift.Value(widget.participantId),
+          sessionId: drift.Value(widget.sessionId),
+          alertType: const drift.Value('incomplete_checkin_fallback'),
+          responses: drift.Value(responsesJson),
+          triggerQuestion: drift.Value(triggerQuestions.join(',')),
+          createdAt: drift.Value(DateTime.now()),
+        ),
+      );
+      print('[CheckIn] Fallback alert persisted locally: $alertId');
+    } catch (e) {
+      print('[CheckIn] CRITICAL: Failed to persist fallback alert locally: $e');
+    }
+
+    // Step 2: Attempt immediate Firestore write
+    try {
       await FirebaseFirestore.instance
           .collection('participants')
           .doc(widget.participantId)
@@ -999,13 +1064,14 @@ class _CheckinScreenState extends State<CheckinScreen>
         'triggerQuestions': triggerQuestions,
         'completedQuestionCount': _currentIndex + 1,
         'totalQuestionCount': _visibleQuestions.length,
-        'confirmedDanger': null, // Never reached confirmation
+        'confirmedDanger': null,
         'handled': false,
-        // Recipients managed via alert_recipients Firestore collection
-      });
-      print('[CheckIn] Fallback safety alert sent for abandoned check-in: $alertId');
+      }).timeout(const Duration(seconds: 10));
+
+      await widget.database.markSafetyAlertsSynced([alertId]);
+      print('[CheckIn] Fallback alert sent to Firestore: $alertId');
     } catch (e) {
-      print('[CheckIn] Error sending fallback safety alert: $e');
+      print('[CheckIn] Fallback Firestore write failed (will retry via sync): $e');
     }
   }
 

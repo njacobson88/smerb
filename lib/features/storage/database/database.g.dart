@@ -2797,6 +2797,472 @@ class EmaResponsesCompanion extends UpdateCompanion<EmaResponse> {
   }
 }
 
+class $LocalSafetyAlertsTable extends LocalSafetyAlerts
+    with TableInfo<$LocalSafetyAlertsTable, LocalSafetyAlert> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $LocalSafetyAlertsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+      'id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _participantIdMeta =
+      const VerificationMeta('participantId');
+  @override
+  late final GeneratedColumn<String> participantId = GeneratedColumn<String>(
+      'participant_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _alertTypeMeta =
+      const VerificationMeta('alertType');
+  @override
+  late final GeneratedColumn<String> alertType = GeneratedColumn<String>(
+      'alert_type', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _responsesMeta =
+      const VerificationMeta('responses');
+  @override
+  late final GeneratedColumn<String> responses = GeneratedColumn<String>(
+      'responses', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _triggerQuestionMeta =
+      const VerificationMeta('triggerQuestion');
+  @override
+  late final GeneratedColumn<String> triggerQuestion = GeneratedColumn<String>(
+      'trigger_question', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _confirmationNumberMeta =
+      const VerificationMeta('confirmationNumber');
+  @override
+  late final GeneratedColumn<int> confirmationNumber = GeneratedColumn<int>(
+      'confirmation_number', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
+  static const VerificationMeta _createdAtMeta =
+      const VerificationMeta('createdAt');
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+      'created_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+      'synced', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("synced" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        participantId,
+        sessionId,
+        alertType,
+        responses,
+        triggerQuestion,
+        confirmationNumber,
+        createdAt,
+        synced
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'local_safety_alerts';
+  @override
+  VerificationContext validateIntegrity(Insertable<LocalSafetyAlert> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('participant_id')) {
+      context.handle(
+          _participantIdMeta,
+          participantId.isAcceptableOrUnknown(
+              data['participant_id']!, _participantIdMeta));
+    } else if (isInserting) {
+      context.missing(_participantIdMeta);
+    }
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('alert_type')) {
+      context.handle(_alertTypeMeta,
+          alertType.isAcceptableOrUnknown(data['alert_type']!, _alertTypeMeta));
+    } else if (isInserting) {
+      context.missing(_alertTypeMeta);
+    }
+    if (data.containsKey('responses')) {
+      context.handle(_responsesMeta,
+          responses.isAcceptableOrUnknown(data['responses']!, _responsesMeta));
+    } else if (isInserting) {
+      context.missing(_responsesMeta);
+    }
+    if (data.containsKey('trigger_question')) {
+      context.handle(
+          _triggerQuestionMeta,
+          triggerQuestion.isAcceptableOrUnknown(
+              data['trigger_question']!, _triggerQuestionMeta));
+    }
+    if (data.containsKey('confirmation_number')) {
+      context.handle(
+          _confirmationNumberMeta,
+          confirmationNumber.isAcceptableOrUnknown(
+              data['confirmation_number']!, _confirmationNumberMeta));
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(_createdAtMeta,
+          createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta));
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('synced')) {
+      context.handle(_syncedMeta,
+          synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  LocalSafetyAlert map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return LocalSafetyAlert(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
+      participantId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}participant_id'])!,
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      alertType: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}alert_type'])!,
+      responses: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}responses'])!,
+      triggerQuestion: attachedDatabase.typeMapping.read(
+          DriftSqlType.string, data['${effectivePrefix}trigger_question']),
+      confirmationNumber: attachedDatabase.typeMapping.read(
+          DriftSqlType.int, data['${effectivePrefix}confirmation_number']),
+      createdAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
+      synced: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}synced'])!,
+    );
+  }
+
+  @override
+  $LocalSafetyAlertsTable createAlias(String alias) {
+    return $LocalSafetyAlertsTable(attachedDatabase, alias);
+  }
+}
+
+class LocalSafetyAlert extends DataClass
+    implements Insertable<LocalSafetyAlert> {
+  final String id;
+  final String participantId;
+  final String sessionId;
+  final String alertType;
+  final String responses;
+  final String? triggerQuestion;
+  final int? confirmationNumber;
+  final DateTime createdAt;
+  final bool synced;
+  const LocalSafetyAlert(
+      {required this.id,
+      required this.participantId,
+      required this.sessionId,
+      required this.alertType,
+      required this.responses,
+      this.triggerQuestion,
+      this.confirmationNumber,
+      required this.createdAt,
+      required this.synced});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['participant_id'] = Variable<String>(participantId);
+    map['session_id'] = Variable<String>(sessionId);
+    map['alert_type'] = Variable<String>(alertType);
+    map['responses'] = Variable<String>(responses);
+    if (!nullToAbsent || triggerQuestion != null) {
+      map['trigger_question'] = Variable<String>(triggerQuestion);
+    }
+    if (!nullToAbsent || confirmationNumber != null) {
+      map['confirmation_number'] = Variable<int>(confirmationNumber);
+    }
+    map['created_at'] = Variable<DateTime>(createdAt);
+    map['synced'] = Variable<bool>(synced);
+    return map;
+  }
+
+  LocalSafetyAlertsCompanion toCompanion(bool nullToAbsent) {
+    return LocalSafetyAlertsCompanion(
+      id: Value(id),
+      participantId: Value(participantId),
+      sessionId: Value(sessionId),
+      alertType: Value(alertType),
+      responses: Value(responses),
+      triggerQuestion: triggerQuestion == null && nullToAbsent
+          ? const Value.absent()
+          : Value(triggerQuestion),
+      confirmationNumber: confirmationNumber == null && nullToAbsent
+          ? const Value.absent()
+          : Value(confirmationNumber),
+      createdAt: Value(createdAt),
+      synced: Value(synced),
+    );
+  }
+
+  factory LocalSafetyAlert.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return LocalSafetyAlert(
+      id: serializer.fromJson<String>(json['id']),
+      participantId: serializer.fromJson<String>(json['participantId']),
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      alertType: serializer.fromJson<String>(json['alertType']),
+      responses: serializer.fromJson<String>(json['responses']),
+      triggerQuestion: serializer.fromJson<String?>(json['triggerQuestion']),
+      confirmationNumber: serializer.fromJson<int?>(json['confirmationNumber']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      synced: serializer.fromJson<bool>(json['synced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'participantId': serializer.toJson<String>(participantId),
+      'sessionId': serializer.toJson<String>(sessionId),
+      'alertType': serializer.toJson<String>(alertType),
+      'responses': serializer.toJson<String>(responses),
+      'triggerQuestion': serializer.toJson<String?>(triggerQuestion),
+      'confirmationNumber': serializer.toJson<int?>(confirmationNumber),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'synced': serializer.toJson<bool>(synced),
+    };
+  }
+
+  LocalSafetyAlert copyWith(
+          {String? id,
+          String? participantId,
+          String? sessionId,
+          String? alertType,
+          String? responses,
+          Value<String?> triggerQuestion = const Value.absent(),
+          Value<int?> confirmationNumber = const Value.absent(),
+          DateTime? createdAt,
+          bool? synced}) =>
+      LocalSafetyAlert(
+        id: id ?? this.id,
+        participantId: participantId ?? this.participantId,
+        sessionId: sessionId ?? this.sessionId,
+        alertType: alertType ?? this.alertType,
+        responses: responses ?? this.responses,
+        triggerQuestion: triggerQuestion.present
+            ? triggerQuestion.value
+            : this.triggerQuestion,
+        confirmationNumber: confirmationNumber.present
+            ? confirmationNumber.value
+            : this.confirmationNumber,
+        createdAt: createdAt ?? this.createdAt,
+        synced: synced ?? this.synced,
+      );
+  @override
+  String toString() {
+    return (StringBuffer('LocalSafetyAlert(')
+          ..write('id: $id, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('alertType: $alertType, ')
+          ..write('responses: $responses, ')
+          ..write('triggerQuestion: $triggerQuestion, ')
+          ..write('confirmationNumber: $confirmationNumber, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, participantId, sessionId, alertType,
+      responses, triggerQuestion, confirmationNumber, createdAt, synced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is LocalSafetyAlert &&
+          other.id == this.id &&
+          other.participantId == this.participantId &&
+          other.sessionId == this.sessionId &&
+          other.alertType == this.alertType &&
+          other.responses == this.responses &&
+          other.triggerQuestion == this.triggerQuestion &&
+          other.confirmationNumber == this.confirmationNumber &&
+          other.createdAt == this.createdAt &&
+          other.synced == this.synced);
+}
+
+class LocalSafetyAlertsCompanion extends UpdateCompanion<LocalSafetyAlert> {
+  final Value<String> id;
+  final Value<String> participantId;
+  final Value<String> sessionId;
+  final Value<String> alertType;
+  final Value<String> responses;
+  final Value<String?> triggerQuestion;
+  final Value<int?> confirmationNumber;
+  final Value<DateTime> createdAt;
+  final Value<bool> synced;
+  final Value<int> rowid;
+  const LocalSafetyAlertsCompanion({
+    this.id = const Value.absent(),
+    this.participantId = const Value.absent(),
+    this.sessionId = const Value.absent(),
+    this.alertType = const Value.absent(),
+    this.responses = const Value.absent(),
+    this.triggerQuestion = const Value.absent(),
+    this.confirmationNumber = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  LocalSafetyAlertsCompanion.insert({
+    required String id,
+    required String participantId,
+    required String sessionId,
+    required String alertType,
+    required String responses,
+    this.triggerQuestion = const Value.absent(),
+    this.confirmationNumber = const Value.absent(),
+    required DateTime createdAt,
+    this.synced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        participantId = Value(participantId),
+        sessionId = Value(sessionId),
+        alertType = Value(alertType),
+        responses = Value(responses),
+        createdAt = Value(createdAt);
+  static Insertable<LocalSafetyAlert> custom({
+    Expression<String>? id,
+    Expression<String>? participantId,
+    Expression<String>? sessionId,
+    Expression<String>? alertType,
+    Expression<String>? responses,
+    Expression<String>? triggerQuestion,
+    Expression<int>? confirmationNumber,
+    Expression<DateTime>? createdAt,
+    Expression<bool>? synced,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (participantId != null) 'participant_id': participantId,
+      if (sessionId != null) 'session_id': sessionId,
+      if (alertType != null) 'alert_type': alertType,
+      if (responses != null) 'responses': responses,
+      if (triggerQuestion != null) 'trigger_question': triggerQuestion,
+      if (confirmationNumber != null) 'confirmation_number': confirmationNumber,
+      if (createdAt != null) 'created_at': createdAt,
+      if (synced != null) 'synced': synced,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  LocalSafetyAlertsCompanion copyWith(
+      {Value<String>? id,
+      Value<String>? participantId,
+      Value<String>? sessionId,
+      Value<String>? alertType,
+      Value<String>? responses,
+      Value<String?>? triggerQuestion,
+      Value<int?>? confirmationNumber,
+      Value<DateTime>? createdAt,
+      Value<bool>? synced,
+      Value<int>? rowid}) {
+    return LocalSafetyAlertsCompanion(
+      id: id ?? this.id,
+      participantId: participantId ?? this.participantId,
+      sessionId: sessionId ?? this.sessionId,
+      alertType: alertType ?? this.alertType,
+      responses: responses ?? this.responses,
+      triggerQuestion: triggerQuestion ?? this.triggerQuestion,
+      confirmationNumber: confirmationNumber ?? this.confirmationNumber,
+      createdAt: createdAt ?? this.createdAt,
+      synced: synced ?? this.synced,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (participantId.present) {
+      map['participant_id'] = Variable<String>(participantId.value);
+    }
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (alertType.present) {
+      map['alert_type'] = Variable<String>(alertType.value);
+    }
+    if (responses.present) {
+      map['responses'] = Variable<String>(responses.value);
+    }
+    if (triggerQuestion.present) {
+      map['trigger_question'] = Variable<String>(triggerQuestion.value);
+    }
+    if (confirmationNumber.present) {
+      map['confirmation_number'] = Variable<int>(confirmationNumber.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LocalSafetyAlertsCompanion(')
+          ..write('id: $id, ')
+          ..write('participantId: $participantId, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('alertType: $alertType, ')
+          ..write('responses: $responses, ')
+          ..write('triggerQuestion: $triggerQuestion, ')
+          ..write('confirmationNumber: $confirmationNumber, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('synced: $synced, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   late final $EventsTable events = $EventsTable(this);
@@ -2805,6 +3271,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $HtmlCapturesTable htmlCaptures = $HtmlCapturesTable(this);
   late final $HtmlStatusLogsTable htmlStatusLogs = $HtmlStatusLogsTable(this);
   late final $EmaResponsesTable emaResponses = $EmaResponsesTable(this);
+  late final $LocalSafetyAlertsTable localSafetyAlerts =
+      $LocalSafetyAlertsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2815,6 +3283,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         ocrResults,
         htmlCaptures,
         htmlStatusLogs,
-        emaResponses
+        emaResponses,
+        localSafetyAlerts
       ];
 }
