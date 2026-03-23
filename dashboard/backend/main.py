@@ -61,6 +61,7 @@ if config.DEV_MODE:
     logger.warning("DEV_MODE is enabled - IP whitelist is BYPASSED")
 
 # Log configuration on startup
+logger.info(f"Environment: {config.ENVIRONMENT} (prefix: '{config.COLLECTION_PREFIX}')")
 logger.info(f"Firebase Project: {config.FIREBASE_PROJECT_ID}")
 logger.info(f"CORS Origins: {len(config.get_cors_origins())} origins configured")
 
@@ -121,6 +122,8 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
         "/api/scheduler/refresh-cache",
         "/api/redcap/data-entry-trigger",
         "/api/twilio/call-response",
+        "/api/config/environment",
+        "/api/install/links",
     ):
         return await call_next(request)
 
@@ -154,7 +157,7 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
 security = HTTPBearer(auto_error=False)
 
 # Collection name for dashboard users
-DASHBOARD_USERS_COLLECTION = "dashboard_users"
+DASHBOARD_USERS_COLLECTION = config.col("dashboard_users")
 
 
 def get_user_from_firestore(email: str) -> Optional[dict]:
@@ -232,6 +235,15 @@ async def verify_admin_token(
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/config/environment")
+def get_environment():
+    """Return current environment. No auth required — used by frontend for dev banner."""
+    return {
+        "environment": config.ENVIRONMENT,
+        "collectionPrefix": config.COLLECTION_PREFIX,
+    }
 
 
 @app.get("/api/debug/test-signing")
@@ -428,7 +440,7 @@ def debug_collections():
     """Debug endpoint to check Firestore connectivity."""
     try:
         # List all documents in participants collection
-        participants_ref = db.collection("participants")
+        participants_ref = db.collection(config.col("participants"))
         docs = list(participants_ref.limit(10).stream())
 
         result = {
@@ -453,7 +465,7 @@ def debug_collections():
             result["root_collections"] = collections
 
             # Check valid_participants collection
-            valid_ref = db.collection("valid_participants")
+            valid_ref = db.collection(config.col("valid_participants"))
             valid_docs = list(valid_ref.limit(10).stream())
             result["valid_participants_count"] = len(valid_docs)
             result["valid_participant_ids"] = [doc.id for doc in valid_docs]
@@ -466,7 +478,7 @@ def debug_collections():
             result["root_collections"] = f"error: {e}"
 
         # Check for test2 specifically
-        test2_ref = db.collection("participants").document("test2")
+        test2_ref = db.collection(config.col("participants")).document("test2")
         test2_doc = test2_ref.get()
         result["test2_exists"] = test2_doc.exists
         if test2_doc.exists:
@@ -531,12 +543,12 @@ def get_all_participant_ids(enrolled_only: bool = True) -> list:
 def get_participant_data(participant_id: str) -> Optional[dict]:
     """Get participant data from either collection."""
     # Try participants collection first
-    doc = db.collection("participants").document(participant_id).get()
+    doc = db.collection(config.col("participants")).document(participant_id).get()
     if doc.exists:
         return doc.to_dict()
 
     # Try valid_participants collection
-    doc = db.collection("valid_participants").document(participant_id).get()
+    doc = db.collection(config.col("valid_participants")).document(participant_id).get()
     if doc.exists:
         return doc.to_dict()
 
@@ -548,14 +560,14 @@ def get_participant_ref(participant_id: str):
     Get reference for participant's subcollections (events, ema_responses, safety_alerts).
     These are always stored under participants/{id}/ regardless of where the metadata is.
     """
-    return db.collection("participants").document(participant_id)
+    return db.collection(config.col("participants")).document(participant_id)
 
 
 # ============================================================================
 # Dashboard Cache for Scalability
 # ============================================================================
 
-DASHBOARD_CACHE_COLLECTION = "dashboard_cache"
+DASHBOARD_CACHE_COLLECTION = config.col("dashboard_cache")
 
 # ============================================================================
 # Safety Alerts In-Memory Cache (refreshed every 2 minutes)
@@ -1163,9 +1175,9 @@ def get_overall_status(
                 manual_status = None
                 try:
                     # Check valid_participants first, then participants
-                    p_doc = db.collection("valid_participants").document(pid).get()
+                    p_doc = db.collection(config.col("valid_participants")).document(pid).get()
                     if not p_doc.exists:
-                        p_doc = db.collection("participants").document(pid).get()
+                        p_doc = db.collection(config.col("participants")).document(pid).get()
                     if p_doc.exists:
                         p_data = p_doc.to_dict()
                         manual_status = p_data.get("manualActiveStatus")
@@ -1617,8 +1629,8 @@ def update_study_start_date(
 
         # Get participant reference - check both collections
         participant_ref = None
-        valid_ref = db.collection("valid_participants").document(participant_id)
-        participants_ref = db.collection("participants").document(participant_id)
+        valid_ref = db.collection(config.col("valid_participants")).document(participant_id)
+        participants_ref = db.collection(config.col("participants")).document(participant_id)
 
         # Check which collection has the participant
         if valid_ref.get().exists:
@@ -1678,8 +1690,8 @@ def update_active_status(
     try:
         # Get participant reference - check both collections
         participant_ref = None
-        valid_ref = db.collection("valid_participants").document(participant_id)
-        participants_ref = db.collection("participants").document(participant_id)
+        valid_ref = db.collection(config.col("valid_participants")).document(participant_id)
+        participants_ref = db.collection(config.col("participants")).document(participant_id)
 
         # Check which collection has the participant
         if valid_ref.get().exists:
@@ -2226,7 +2238,7 @@ def download_screenshots_concurrent(
 
 
 # Export Jobs Collection for async exports
-EXPORT_JOBS_COLLECTION = "export_jobs"
+EXPORT_JOBS_COLLECTION = config.col("export_jobs")
 
 
 def run_background_export(job_id: str, participant_id: str, export_level: int,
@@ -3115,7 +3127,7 @@ def remove_user(request: Request, email: str, user: dict = Depends(verify_admin_
 # Alert Recipients Management (for Twilio SMS alerts)
 # ============================================================================
 
-ALERT_RECIPIENTS_COLLECTION = "alert_recipients"
+ALERT_RECIPIENTS_COLLECTION = config.col("alert_recipients")
 
 
 class AddRecipientRequest(BaseModel):
@@ -3249,9 +3261,9 @@ def initialize_admin(request: Request):
 # On-Call Roster & Escalation System
 # ============================================================================
 
-ONCALL_COLLECTION = "oncall_roster"
-SAFETY_EVENTS_COLLECTION = "safety_events"
-FOLLOWUP_COLLECTION = "followup_schedule"
+ONCALL_COLLECTION = config.col("oncall_roster")
+SAFETY_EVENTS_COLLECTION = config.col("safety_events")
+FOLLOWUP_COLLECTION = config.col("followup_schedule")
 
 # Escalation timing (in minutes)
 ESCALATION_PRIMARY_TIMEOUT = 15  # Primary on-call has 15 min to respond
@@ -3906,8 +3918,8 @@ async def twilio_call_response(
 import random
 import requests as http_requests
 
-REDCAP_MAPPINGS_COLLECTION = "redcap_mappings"
-VALID_PARTICIPANTS_COLLECTION = "valid_participants"
+REDCAP_MAPPINGS_COLLECTION = config.col("redcap_mappings")
+VALID_PARTICIPANTS_COLLECTION = config.col("valid_participants")
 
 
 def generate_unique_9digit_id() -> str:
