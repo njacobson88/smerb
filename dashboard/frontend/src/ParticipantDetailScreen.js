@@ -726,16 +726,16 @@ const ParticipantDetailScreen = ({
           )}
 
           {/* Compliance Badge + Notification Panel */}
-          {(complianceData || summary) && (
+          {summary && (
             <div className="flex items-center gap-3 mb-4">
               {/* Compliance badge */}
-              {complianceData.threeDay?.needs_notification && (
+              {complianceData?.threeDay?.needs_notification && (
                 <span className="px-3 py-1 bg-amber-500 text-white text-xs font-bold rounded-full animate-pulse"
                   title="Low compliance — consider sending a notification">
-                  ⚠ Low Compliance ({complianceData.threeDay.compliance_pct}%)
+                  ⚠ Low Compliance ({complianceData?.threeDay?.compliance_pct ?? 0}%)
                 </span>
               )}
-              {complianceData.weekly && (
+              {complianceData?.weekly && (
                 <span className={`px-2 py-1 text-xs font-medium rounded ${
                   complianceData.weekly.level === 'high' ? 'bg-green-100 text-green-800' :
                   complianceData.weekly.level === 'medium' ? 'bg-blue-100 text-blue-800' :
