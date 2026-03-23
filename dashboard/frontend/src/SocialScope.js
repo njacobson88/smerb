@@ -904,6 +904,7 @@ const AlertsScreen = ({ goToParticipantView }) => {
   const [rosterEditing, setRosterEditing] = useState(null);
   const [rosterForm, setRosterForm] = useState({ name: '', email: '', phone: '' });
   const [rosterSaving, setRosterSaving] = useState(false);
+  const [dashboardUsers, setDashboardUsers] = useState([]);
 
   // Follow-ups state
   const [followups, setFollowups] = useState([]);
@@ -938,13 +939,21 @@ const AlertsScreen = ({ goToParticipantView }) => {
     } catch (e) { /* ignore */ }
   }, []);
 
+  const fetchDashboardUsers = React.useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/admin/users`);
+      if (res.ok) { const data = await res.json(); setDashboardUsers(data.users || []); }
+    } catch (e) { /* non-admin may not have access, that's ok */ }
+  }, []);
+
   React.useEffect(() => {
     fetchAlerts();
     fetchRoster();
     fetchFollowups();
+    fetchDashboardUsers();
     const interval = setInterval(fetchAlerts, 2 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [fetchAlerts, fetchRoster, fetchFollowups]);
+  }, [fetchAlerts, fetchRoster, fetchFollowups, fetchDashboardUsers]);
 
   const saveRosterRole = async (role) => {
     setRosterSaving(true);
@@ -1001,14 +1010,38 @@ const AlertsScreen = ({ goToParticipantView }) => {
                 <div className="text-xs font-bold text-gray-500 uppercase mb-2">{labels[role]}</div>
                 {isEditing ? (
                   <div className="space-y-2">
+                    {/* Dropdown to select from dashboard users */}
+                    <select
+                      value={rosterForm.email}
+                      onChange={e => {
+                        const selectedEmail = e.target.value;
+                        if (selectedEmail === '__manual__') {
+                          setRosterForm({ name: '', email: '', phone: '' });
+                        } else {
+                          const user = dashboardUsers.find(u => u.email === selectedEmail);
+                          setRosterForm(f => ({
+                            ...f,
+                            email: selectedEmail,
+                            name: f.name || selectedEmail.split('@')[0].replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                          }));
+                        }
+                      }}
+                      className="w-full border rounded px-2 py-1 text-sm bg-white"
+                    >
+                      <option value="">Select team member...</option>
+                      {dashboardUsers.map(u => (
+                        <option key={u.email} value={u.email}>{u.email} ({u.role})</option>
+                      ))}
+                      <option value="__manual__">Enter manually...</option>
+                    </select>
                     <input value={rosterForm.name} onChange={e => setRosterForm(f => ({...f, name: e.target.value}))}
-                      placeholder="Name" className="w-full border rounded px-2 py-1 text-sm" />
+                      placeholder="Display name" className="w-full border rounded px-2 py-1 text-sm" />
                     <input value={rosterForm.email} onChange={e => setRosterForm(f => ({...f, email: e.target.value}))}
-                      placeholder="Email" className="w-full border rounded px-2 py-1 text-sm" />
+                      placeholder="Email (editable)" className="w-full border rounded px-2 py-1 text-sm" />
                     <input value={rosterForm.phone} onChange={e => setRosterForm(f => ({...f, phone: e.target.value}))}
-                      placeholder="Phone (10 digits)" className="w-full border rounded px-2 py-1 text-sm" />
+                      placeholder="Phone (10 digits, for SMS alerts)" className="w-full border rounded px-2 py-1 text-sm" />
                     <div className="flex gap-2">
-                      <button onClick={() => saveRosterRole(role)} disabled={rosterSaving}
+                      <button onClick={() => saveRosterRole(role)} disabled={rosterSaving || !rosterForm.name || !rosterForm.email}
                         className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 disabled:opacity-50">
                         {rosterSaving ? 'Saving...' : 'Save'}
                       </button>
