@@ -60,6 +60,10 @@ const SocialScope = () => {
   if (window.location.pathname === '/install') {
     return <InstallPage />;
   }
+  return <SocialScopeDashboard />;
+};
+
+const SocialScopeDashboard = () => {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [networkBlocked, setNetworkBlocked] = useState(false);
