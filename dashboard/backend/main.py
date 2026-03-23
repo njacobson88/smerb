@@ -359,59 +359,77 @@ def send_distribution_invite(
         if not device_type:
             raise HTTPException(status_code=400, detail="No device type set for this participant. Please confirm iOS or Android first.")
 
-        # Add tester to Firebase App Distribution via CLI
-        import subprocess
+        # Use Firebase App Distribution REST API (not CLI — CLI isn't available on Cloud Run)
+        import google.auth
+        import google.auth.transport.requests
 
-        # Add tester email to the testers group
-        add_result = subprocess.run(
-            ["firebase", "appdistribution:testers:add",
-             "--emails", email,
-             "--group-aliases", "testers",
-             "--project", config.FIREBASE_PROJECT_ID],
-            capture_output=True, text=True, timeout=30
+        # Get credentials for API calls
+        creds, project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
+        creds.refresh(google.auth.transport.requests.Request())
+        access_token = creds.token
 
-        if add_result.returncode != 0:
-            logger.error(f"Failed to add tester {email}: {add_result.stderr}")
-            raise HTTPException(status_code=500, detail=f"Failed to add tester: {add_result.stderr}")
-
-        # Determine the correct app ID based on device type
+        project_number = "436153481478"
         if device_type == "ios":
-            app_id = "1:436153481478:ios:4d04d2e6257b0f0d9f8687"
+            app_id = f"1:{project_number}:ios:4d04d2e6257b0f0d9f8687"
         else:
-            app_id = "1:436153481478:android:cd39924bcf90a0ab9f8687"
+            app_id = f"1:{project_number}:android:cd39924bcf90a0ab9f8687"
 
-        # Get the latest release and distribute to this tester
-        dist_result = subprocess.run(
-            ["firebase", "appdistribution:distribute",
-             "--app", app_id,
-             "--testers", email,
-             "--project", config.FIREBASE_PROJECT_ID],
-            capture_output=True, text=True, timeout=60,
-            # This sends the invite email for the latest release
-        )
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
 
-        # Update participant record (set/merge in case doc doesn't exist yet)
+        # Step 1: Add tester to the project
+        add_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/testers:batchAdd"
+        add_resp = http_requests.post(add_url, headers=headers, json={
+            "emails": [email]
+        })
+
+        if add_resp.status_code not in (200, 409):  # 409 = already exists
+            logger.error(f"Failed to add tester {email}: {add_resp.status_code} {add_resp.text}")
+            raise HTTPException(status_code=500, detail=f"Failed to add tester: {add_resp.text}")
+
+        logger.info(f"Tester {email} added (status: {add_resp.status_code})")
+
+        # Step 2: Add tester to the "testers" group
+        group_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups/testers"
+        # First check if group exists, create if not
+        group_check = http_requests.get(group_url, headers=headers)
+        if group_check.status_code == 404:
+            create_group_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups"
+            http_requests.post(create_group_url, headers=headers, json={
+                "name": f"projects/{project_number}/groups/testers",
+                "displayName": "testers",
+            })
+
+        # Add tester to group
+        group_add_url = f"{group_url}:batchJoin"
+        http_requests.post(group_add_url, headers=headers, json={
+            "emails": [email]
+        })
+
+        # Update participant record
         doc_ref = db.collection(config.col("participants")).document(participant_id)
         doc_ref.set({
             "distributionInviteSentAt": datetime.utcnow(),
             "distributionInviteStatus": "sent",
             "distributionInviteSentBy": user.get("email"),
             "distributionInviteDeviceType": device_type,
+            "distributionEmail": email,
         }, merge=True)
 
         logger.info(f"Distribution invite sent to {email} ({device_type}) for {participant_id} by {user.get('email')}")
 
         return {
-            "message": f"Invite sent to {email} for {device_type}",
+            "message": f"Tester {email} added to Firebase App Distribution for {device_type}. "
+                       f"They will receive an invite email from Firebase to download the app.",
             "email": email,
             "deviceType": device_type,
-            "testerAddResult": add_result.stdout.strip() if add_result.returncode == 0 else add_result.stderr.strip(),
         }
     except HTTPException:
         raise
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Firebase CLI timed out")
     except Exception as e:
         logger.error(f"Failed to send distribution invite: {e}")
         raise HTTPException(status_code=500, detail=str(e))
