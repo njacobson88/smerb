@@ -315,19 +315,34 @@ exports[safetyAlertFnName] = onDocumentCreated(
     }
 
     // ================================================================
-    // Step 3: Notify on-call team via SMS
+    // Step 3: Notify on-call team via SMS (uses on-call roster)
+    // Primary on-call is notified first. SMS includes reply instructions.
     // ================================================================
-    const recipientsSnapshot = await admin.firestore()
-      .collection(col("alert_recipients")).get();
-
+    const roster = await getOnCallRoster();
     const recipients = [];
-    recipientsSnapshot.forEach((doc) => {
-      const data = doc.data();
-      recipients.push({ phone: doc.id, name: data.name || null });
-    });
+
+    // Build recipient list from on-call roster (primary first, then backup, then PI)
+    for (const role of ["primary", "backup", "pi"]) {
+      const person = roster[role];
+      if (person && person.phone) {
+        recipients.push({ phone: person.phone, name: person.name || role, role });
+      }
+    }
+
+    // Legacy fallback: also check alert_recipients collection
+    try {
+      const legacySnapshot = await admin.firestore()
+        .collection(col("alert_recipients")).get();
+      legacySnapshot.forEach((doc) => {
+        const data = doc.data();
+        if (!recipients.find(r => r.phone === doc.id)) {
+          recipients.push({ phone: doc.id, name: data.name || null, role: "legacy" });
+        }
+      });
+    } catch (e) { /* ignore legacy collection errors */ }
 
     if (alertData.pageTarget && !recipients.find(r => r.phone === alertData.pageTarget)) {
-      recipients.push({ phone: alertData.pageTarget, name: "Legacy Target" });
+      recipients.push({ phone: alertData.pageTarget, name: "Legacy Target", role: "legacy" });
     }
 
     let smsResults = [];
@@ -351,11 +366,13 @@ exports[safetyAlertFnName] = onDocumentCreated(
           (isConfirmedDanger
             ? `Participant CONFIRMED they are in immediate danger.\n`
             : isWalkAway
-              ? `POTENTIAL RISK: Participant gave concerning responses then walked away without completing the safety check. They may be in a risk state but this is NOT confirmed. Please follow up.\n`
+              ? `POTENTIAL RISK: Participant gave concerning responses then walked away. Not confirmed — please follow up.\n`
               : isFallback
-                ? `Participant gave high-risk responses but exited check-in before confirmation.\n`
-                : `A participant endorsed imminent self-harm risk.\n`) +
-          `View: ${DASHBOARD_URL}`;
+                ? `High-risk responses, exited before confirmation.\n`
+                : `Endorsed imminent self-harm risk.\n`) +
+          `\nReply ACK to acknowledge.\n` +
+          `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER to log disposition.\n` +
+          `Dashboard: ${DASHBOARD_URL}`;
 
         for (const recipient of recipients) {
           try {
@@ -367,6 +384,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
             smsResults.push({
               phone: recipient.phone,
               name: recipient.name,
+              role: recipient.role,
               sid: result.sid,
               status: result.status,
             });
@@ -514,11 +532,10 @@ exports[escalationFnName] = onSchedule(
       const now = new Date();
       const fifteenMinAgo = new Date(now.getTime() - 15 * 60 * 1000);
 
-      // Find safety events that haven't been responded to
+      // Find safety events that are still open (not fully resolved)
       const eventsSnapshot = await admin.firestore()
         .collection(col("safety_events"))
         .where("escalationStopped", "==", false)
-        .where("currentDisposition", "==", null)
         .get();
 
       if (eventsSnapshot.empty) return;
@@ -530,54 +547,134 @@ exports[escalationFnName] = onSchedule(
       for (const doc of eventsSnapshot.docs) {
         const eventData = doc.data();
         const createdAt = eventData.createdAt?.toDate?.() || new Date();
+        const acknowledged = eventData.acknowledged === true;
+        const lastCheckInAt = eventData.lastCheckInAt?.toDate?.();
+        const currentDisposition = eventData.currentDisposition;
+
+        // Skip fully resolved events
+        if (currentDisposition && !["ongoing"].includes(currentDisposition)) continue;
 
         const minutesSinceCreation = (now.getTime() - createdAt.getTime()) / (60 * 1000);
 
-        // Determine escalation level
-        let escalationTarget = null;
-        let escalationLevel = null;
+        // Determine what needs to happen
+        if (!acknowledged) {
+          // NOT ACKNOWLEDGED: escalate if 15+ min with no ACK
+          let escalationTarget = null;
+          let escalationLevel = null;
 
-        if (minutesSinceCreation >= 30 && !eventData.piEscalated) {
-          // 30+ minutes: escalate to PI
-          escalationTarget = roster.pi;
-          escalationLevel = "pi";
-        } else if (minutesSinceCreation >= 15 && !eventData.backupEscalated) {
-          // 15+ minutes: escalate to backup
-          escalationTarget = roster.backup;
-          escalationLevel = "backup";
-        }
+          if (minutesSinceCreation >= 30 && !eventData.piEscalated) {
+            escalationTarget = roster.pi;
+            escalationLevel = "pi";
+          } else if (minutesSinceCreation >= 15 && !eventData.backupEscalated) {
+            escalationTarget = roster.backup;
+            escalationLevel = "backup";
+          }
 
-        if (escalationTarget && escalationTarget.phone) {
-          try {
-            const result = await client.messages.create({
-              body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
-                    `Safety event for participant ${eventData.participantId} ` +
-                    `has not been responded to in ${Math.round(minutesSinceCreation)} minutes.\n` +
-                    `Please log a disposition immediately.\n` +
-                    `Dashboard: ${DASHBOARD_URL}`,
-              from: fromNumber,
-              to: `+1${escalationTarget.phone}`,
-            });
+          if (escalationTarget && escalationTarget.phone) {
+            try {
+              await client.messages.create({
+                body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
+                      `Safety event for participant ${eventData.participantId} ` +
+                      `has NOT been acknowledged in ${Math.round(minutesSinceCreation)} min.\n` +
+                      `Reply ACK to acknowledge, or log disposition.\n` +
+                      `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER.\n` +
+                      `Dashboard: ${DASHBOARD_URL}`,
+                from: fromNumber,
+                to: `+1${escalationTarget.phone}`,
+              });
 
-            console.log(`Escalation SMS sent to ${escalationLevel} (${escalationTarget.name}): ${result.sid}`);
+              const updateData = {};
+              updateData[`${escalationLevel}Escalated`] = true;
+              updateData[`${escalationLevel}EscalatedAt`] = admin.firestore.FieldValue.serverTimestamp();
+              await doc.ref.update(updateData);
 
-            // Mark escalation as sent
-            const updateData = {};
-            updateData[`${escalationLevel}Escalated`] = true;
-            updateData[`${escalationLevel}EscalatedAt`] = admin.firestore.FieldValue.serverTimestamp();
-            await doc.ref.update(updateData);
+              await doc.ref.collection("audit_trail").doc().set({
+                type: "escalation",
+                escalationLevel,
+                escalatedTo: escalationTarget.name,
+                reason: "not_acknowledged",
+                minutesSinceCreation: Math.round(minutesSinceCreation),
+                loggedBy: "system",
+                loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
 
-            // Log to audit trail
-            await doc.ref.collection("audit_trail").doc().set({
-              type: "escalation",
-              escalationLevel,
-              escalatedTo: escalationTarget.name,
-              minutesSinceCreation: Math.round(minutesSinceCreation),
-              loggedBy: "system",
-              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-          } catch (err) {
-            console.error(`Escalation to ${escalationLevel} failed:`, err.message);
+              console.log(`Escalation (not ACKed) to ${escalationLevel}: ${eventData.participantId}`);
+            } catch (err) {
+              console.error(`Escalation to ${escalationLevel} failed:`, err.message);
+            }
+          }
+        } else if (currentDisposition === "ongoing") {
+          // ACKNOWLEDGED + ONGOING: send hourly check-in reminders
+          // Escalate to backup/PI if no check-in within 15 min of the hour mark
+          const minutesSinceLastCheckIn = lastCheckInAt
+            ? (now.getTime() - lastCheckInAt.getTime()) / (60 * 1000)
+            : minutesSinceCreation;
+
+          if (minutesSinceLastCheckIn >= 60) {
+            // Send hourly check-in reminder to primary
+            const primary = roster.primary;
+            if (primary && primary.phone && !eventData[`hourlyReminder_${Math.floor(minutesSinceCreation / 60)}`]) {
+              try {
+                await client.messages.create({
+                  body: `[SocialScope CHECK-IN REMINDER]\n` +
+                        `Your ongoing event for participant ${eventData.participantId} ` +
+                        `needs an update (${Math.round(minutesSinceCreation)} min since alert).\n` +
+                        `Reply ONGOING to confirm still working on it.\n` +
+                        `Reply SAFE, SUPPORT, 988, or ER to log final disposition.\n` +
+                        `If no response in 15 min, backup will be paged.`,
+                  from: fromNumber,
+                  to: `+1${primary.phone}`,
+                });
+
+                const hourKey = `hourlyReminder_${Math.floor(minutesSinceCreation / 60)}`;
+                await doc.ref.update({ [hourKey]: admin.firestore.FieldValue.serverTimestamp() });
+
+                await doc.ref.collection("audit_trail").doc().set({
+                  type: "hourly_checkin_reminder",
+                  minutesSinceCreation: Math.round(minutesSinceCreation),
+                  loggedBy: "system",
+                  loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+
+                console.log(`Hourly check-in reminder sent for ${eventData.participantId}`);
+              } catch (err) {
+                console.error(`Hourly reminder failed:`, err.message);
+              }
+            }
+
+            // Escalate if 75+ min since last check-in (60 min + 15 min grace)
+            if (minutesSinceLastCheckIn >= 75) {
+              const escalationTarget = !eventData.backupEscalatedOngoing ? roster.backup : roster.pi;
+              const escalationLevel = !eventData.backupEscalatedOngoing ? "backup" : "pi";
+
+              if (escalationTarget && escalationTarget.phone) {
+                try {
+                  await client.messages.create({
+                    body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
+                          `Ongoing safety event for ${eventData.participantId} ` +
+                          `— primary on-call has not checked in for ${Math.round(minutesSinceLastCheckIn)} min.\n` +
+                          `Reply ACK, ONGOING, SAFE, SUPPORT, 988, or ER.`,
+                    from: fromNumber,
+                    to: `+1${escalationTarget.phone}`,
+                  });
+
+                  await doc.ref.update({
+                    [`${escalationLevel}EscalatedOngoing`]: true,
+                  });
+
+                  await doc.ref.collection("audit_trail").doc().set({
+                    type: "escalation",
+                    escalationLevel,
+                    reason: "ongoing_no_checkin",
+                    minutesSinceLastCheckIn: Math.round(minutesSinceLastCheckIn),
+                    loggedBy: "system",
+                    loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  });
+                } catch (err) {
+                  console.error(`Ongoing escalation failed:`, err.message);
+                }
+              }
+            }
           }
         }
       }

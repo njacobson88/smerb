@@ -122,6 +122,7 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
         "/api/scheduler/refresh-cache",
         "/api/redcap/data-entry-trigger",
         "/api/twilio/call-response",
+        "/api/twilio/sms-reply",
         "/api/config/environment",
         "/api/install/links",
     ):
@@ -4140,6 +4141,158 @@ async def twilio_call_response(
         logger.error(f"[Twilio IVR] Error: {e}", exc_info=True)
         return Response(
             content='<Response><Say>An error occurred. Please call 988 if you need help.</Say></Response>',
+            media_type="application/xml",
+        )
+
+
+# ============================================================================
+# Twilio SMS Reply Webhook — On-call can reply to SMS to ACK/update disposition
+# ============================================================================
+
+# SMS command mapping
+SMS_DISPOSITION_MAP = {
+    "ACK": "acknowledged",
+    "SAFE": "contacted_safe",
+    "SUPPORT": "contacted_needs_support",
+    "NOREACH": "unable_to_reach",
+    "FALSE": "false_alarm",
+    "988": "escalated_988",
+    "ER": "escalated_er",
+    "ONGOING": "ongoing",
+}
+
+
+@app.post("/api/twilio/sms-reply")
+async def twilio_sms_reply(request: Request):
+    """
+    Twilio webhook for incoming SMS replies from on-call staff.
+    Matches the sender's phone to the on-call roster, finds their most
+    recent unresolved safety event, and applies the disposition.
+
+    Commands: ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, ONGOING
+    """
+    try:
+        form_data = await request.form()
+        body = form_data.get("Body", "").strip().upper()
+        from_number = form_data.get("From", "").replace("+1", "").replace("+", "")
+
+        logger.info(f"[SMS Reply] From: {from_number}, Body: '{body}'")
+
+        # Look up who this is from the on-call roster
+        responder_name = None
+        for doc in db.collection(ONCALL_COLLECTION).stream():
+            data = doc.to_dict()
+            if data.get("phone") == from_number:
+                responder_name = data.get("name", doc.id)
+                break
+
+        if not responder_name:
+            # Check alert_recipients as fallback
+            doc = db.collection(ALERT_RECIPIENTS_COLLECTION).document(from_number).get()
+            if doc.exists:
+                responder_name = doc.to_dict().get("name", from_number)
+
+        if not responder_name:
+            logger.warning(f"[SMS Reply] Unknown sender: {from_number}")
+            return Response(
+                content='<Response><Message>Unknown number. Please use the dashboard.</Message></Response>',
+                media_type="application/xml",
+            )
+
+        # Parse the command
+        command = body.split()[0] if body else ""
+        disposition = SMS_DISPOSITION_MAP.get(command)
+
+        if not disposition:
+            return Response(
+                content='<Response><Message>Unknown command. Reply: ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, or ONGOING</Message></Response>',
+                media_type="application/xml",
+            )
+
+        # Find the most recent unresolved safety event
+        events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+            .where("escalationStopped", "==", False)
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .limit(5).stream())
+
+        # Also check for acknowledged/ongoing events
+        if not events:
+            events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+                .where("currentDisposition", "==", "ongoing")
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                .limit(5).stream())
+
+        if not events:
+            return Response(
+                content='<Response><Message>No active safety events found.</Message></Response>',
+                media_type="application/xml",
+            )
+
+        event_doc = events[0]
+        event_data = event_doc.to_dict()
+        participant_id = event_data.get("participantId", "unknown")
+
+        # Apply the disposition
+        update_data = {
+            "lastRespondedBy": responder_name,
+            "lastRespondedAt": datetime.utcnow(),
+        }
+
+        if disposition == "acknowledged":
+            update_data["acknowledged"] = True
+            update_data["acknowledgedAt"] = datetime.utcnow()
+            update_data["acknowledgedBy"] = responder_name
+            reply_msg = f"Acknowledged. Event for {participant_id} — you're on it. Reply ONGOING/SAFE/SUPPORT/988/ER when resolved."
+        elif disposition == "ongoing":
+            update_data["currentDisposition"] = "ongoing"
+            update_data["lastCheckInAt"] = datetime.utcnow()
+            reply_msg = f"Checked in — still working on {participant_id}. Next check-in in 1 hour."
+        else:
+            update_data["currentDisposition"] = disposition
+            update_data["escalationStopped"] = True
+            if not event_data.get("firstResponseAt"):
+                created_at = event_data.get("createdAt")
+                if created_at and hasattr(created_at, "timestamp"):
+                    response_time = (datetime.utcnow() - datetime.fromtimestamp(created_at.timestamp())).total_seconds()
+                    update_data["timeToHumanContactSeconds"] = response_time
+                    update_data["firstResponseAt"] = datetime.utcnow()
+            if disposition in ("escalated_988", "escalated_er", "contacted_needs_support"):
+                update_data["adverseEventFlag"] = True
+
+            labels = {
+                "contacted_safe": "Safe",
+                "contacted_needs_support": "Needs support",
+                "unable_to_reach": "Unable to reach",
+                "false_alarm": "False alarm",
+                "escalated_988": "Escalated to 988",
+                "escalated_er": "Escalated to ER",
+            }
+            reply_msg = f"Disposition logged for {participant_id}: {labels.get(disposition, disposition)}. Escalation stopped."
+
+        event_doc.reference.update(update_data)
+
+        # Log to audit trail
+        event_doc.reference.collection("audit_trail").doc().set({
+            "type": "sms_disposition",
+            "disposition": disposition,
+            "command": command,
+            "respondedBy": responder_name,
+            "fromNumber": from_number,
+            "loggedBy": "sms_webhook",
+            "loggedAt": datetime.utcnow(),
+        })
+
+        logger.info(f"[SMS Reply] {responder_name} replied '{command}' -> {disposition} for {participant_id}")
+
+        return Response(
+            content=f'<Response><Message>{reply_msg}</Message></Response>',
+            media_type="application/xml",
+        )
+
+    except Exception as e:
+        logger.error(f"[SMS Reply] Error: {e}", exc_info=True)
+        return Response(
+            content='<Response><Message>Error processing reply. Please use the dashboard.</Message></Response>',
             media_type="application/xml",
         )
 

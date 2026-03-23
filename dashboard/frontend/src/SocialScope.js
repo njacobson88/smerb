@@ -1226,6 +1226,8 @@ const AlertsScreen = ({ goToParticipantView }) => {
                             onChange={e => setDispositionForm(f => ({...f, disposition: e.target.value}))}
                             className="w-full border rounded px-2 py-1.5 text-sm bg-white">
                             <option value="">Select...</option>
+                            <option value="acknowledged">Acknowledged — I'm working on it</option>
+                            <option value="ongoing">Still ongoing — checking in</option>
                             <option value="contacted_safe">Contacted — Participant is safe</option>
                             <option value="contacted_needs_support">Contacted — Needs support/referral</option>
                             <option value="unable_to_reach">Unable to reach participant</option>
@@ -1259,14 +1261,22 @@ const AlertsScreen = ({ goToParticipantView }) => {
                       <button
                         onClick={() => logDisposition(alertKey)}
                         disabled={dispositionSaving || !dispositionForm.disposition}
-                        className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded hover:bg-green-700 disabled:opacity-50"
+                        className={`px-4 py-2 text-white text-sm font-medium rounded disabled:opacity-50 ${
+                          dispositionForm.disposition === 'acknowledged' || dispositionForm.disposition === 'ongoing'
+                            ? 'bg-blue-600 hover:bg-blue-700'
+                            : 'bg-green-600 hover:bg-green-700'
+                        }`}
                       >
-                        {dispositionSaving ? 'Saving...' : 'Log Response & Stop Escalation'}
+                        {dispositionSaving ? 'Saving...'
+                          : dispositionForm.disposition === 'acknowledged' ? 'Acknowledge — I\'m On It'
+                          : dispositionForm.disposition === 'ongoing' ? 'Check In — Still Working'
+                          : 'Log Final Disposition & Stop Escalation'}
                       </button>
 
                       <p className="text-xs text-gray-400 mt-2">
-                        Logging a response stops the escalation timer (backup/PI won't be paged).
-                        For serious events, follow-up schedule (24h/48h/72h/7d) will be auto-created.
+                        <strong>Acknowledge:</strong> Buys time — hourly check-ins required until final disposition.
+                        {' '}<strong>Final disposition:</strong> Stops all escalation.
+                        {' '}You can also reply to the SMS: ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, or ONGOING.
                       </p>
                     </div>
                   )}
