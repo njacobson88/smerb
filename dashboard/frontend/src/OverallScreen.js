@@ -203,7 +203,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
   const getWeekDateRange = useCallback((offset = 0) => {
     const today = new Date();
     const endDate = new Date(today);
-    endDate.setDate(today.getDate() - 1 - offset * 7);
+    endDate.setDate(today.getDate() - offset * 7); // Include today
 
     const startDate = new Date(endDate);
     startDate.setDate(endDate.getDate() - 6);
