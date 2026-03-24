@@ -11,12 +11,15 @@ import '../../../features/checkin/screens/checkin_screen.dart';
 import '../../../features/checkin/services/checkin_service.dart';
 import '../../../features/settings/screens/settings_screen.dart';
 import '../../../features/safety/screens/safety_plan_screen.dart';
+import '../../../features/notifications/screens/notifications_screen.dart';
+import '../../../features/notifications/services/push_notification_service.dart';
 
 class BrowserScreen extends StatefulWidget {
   final CaptureService captureService;
   final AppDatabase database;
   final UploadService uploadService;
   final ParticipantService participantService;
+  final PushNotificationService? pushService;
 
   const BrowserScreen({
     super.key,
@@ -24,6 +27,7 @@ class BrowserScreen extends StatefulWidget {
     required this.database,
     required this.uploadService,
     required this.participantService,
+    this.pushService,
   });
 
   @override
@@ -195,6 +199,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _reload() {
     _controller?.reload();
+  }
+
+  void _openNotifications() {
+    if (widget.pushService == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NotificationsScreen(
+          participantId: widget.captureService.participantId,
+          pushService: widget.pushService!,
+        ),
+      ),
+    );
   }
 
   void _openSafetyPlan() {
@@ -565,6 +582,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     icon: const Icon(Icons.refresh),
                     onPressed: _reload,
                     tooltip: 'Reload',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.notifications_outlined),
+                    onPressed: _openNotifications,
+                    tooltip: 'Notifications',
                   ),
                   IconButton(
                     icon: const Icon(Icons.health_and_safety),

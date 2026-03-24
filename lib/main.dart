@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
 import 'core/config/environment_config.dart';
 import 'features/browser/screens/browser_screen.dart';
@@ -11,12 +12,24 @@ import 'features/sync/services/background_sync_service.dart';
 import 'features/ocr/services/ocr_service.dart';
 import 'features/onboarding/services/participant_service.dart';
 import 'features/onboarding/screens/enrollment_screen.dart';
+import 'features/notifications/services/push_notification_service.dart';
+
+/// Background message handler for FCM (must be top-level)
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  print('[Push] Background message: ${message.notification?.title}');
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Register background message handler
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
   runApp(const SmerbApp());
 }
 
@@ -99,6 +112,7 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
   UploadService? _uploadService;
   OcrService? _ocrService;
   BackgroundSyncService? _backgroundSyncService;
+  PushNotificationService? _pushService;
 
   bool _initialized = false;
   bool _enrolled = false;
@@ -192,8 +206,14 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
       },
     );
 
+    // Initialize push notifications
+    final pushService = PushNotificationService(participantId: participantId);
+    await pushService.initialize();
+    _pushService = pushService;
+
     print('[App] Services initialized for participant: $participantId');
     print('[App] Background sync started (30s interval)');
+    print('[App] Push notifications initialized');
   }
 
   Future<void> _onEnrolled() async {
@@ -260,6 +280,7 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
                 database: _database,
                 uploadService: _uploadService!,
                 participantService: _participantService,
+                pushService: _pushService,
               ),
             );
           },
