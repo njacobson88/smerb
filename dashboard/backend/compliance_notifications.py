@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Any
 import sendgrid
 from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 import firebase_admin
-from firebase_admin import firestore, messaging
+from firebase_admin import firestore
 
 import config
 
@@ -185,8 +185,12 @@ def send_push_notification(
     body: str,
     db,
 ) -> dict:
-    """Send a push notification to a participant via Firebase Cloud Messaging."""
+    """Send a push notification to a participant via Firebase Cloud Messaging REST API."""
     try:
+        import google.auth
+        import google.auth.transport.requests
+        import requests as http_req
+
         # Look up the participant's FCM token from Firestore
         doc = db.collection(config.col("participants")).document(participant_id).get()
         if not doc.exists:
@@ -198,16 +202,33 @@ def send_push_notification(
         if not fcm_token:
             return {"success": False, "error": "No FCM token registered for this participant"}
 
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
-            token=fcm_token,
+        # Use the FCM v1 REST API directly with cloud-platform scope
+        # This works on Cloud Run where firebase_admin.messaging may fail
+        creds, project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
+        creds.refresh(google.auth.transport.requests.Request())
 
-        response = messaging.send(message)
-        return {"success": True, "messageId": response}
+        project_id = config.FIREBASE_PROJECT_ID
+        url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+
+        resp = http_req.post(url, headers={
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+        }, json={
+            "message": {
+                "token": fcm_token,
+                "notification": {
+                    "title": title,
+                    "body": body,
+                },
+            }
+        })
+
+        if resp.status_code == 200:
+            return {"success": True, "messageId": resp.json().get("name")}
+        else:
+            return {"success": False, "error": f"FCM API {resp.status_code}: {resp.text[:200]}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
