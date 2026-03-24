@@ -5,10 +5,6 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../../../core/config/environment_config.dart';
 
 /// Handles Firebase Cloud Messaging (FCM) push notifications.
-/// - Requests permission on iOS
-/// - Registers the FCM token in Firestore for the participant
-/// - Shows local notifications when the app is in the foreground
-/// - Stores received notifications for display in the app
 class PushNotificationService {
   final String participantId;
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
@@ -23,19 +19,28 @@ class PushNotificationService {
 
   /// Initialize push notifications — call once after enrollment
   Future<void> initialize() async {
-    // Request permission (required on iOS)
-    final settings = await _messaging.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-      provisional: false,
-    );
+    try {
+      print('[Push] Initializing for participant: $participantId');
 
-    print('[Push] Permission status: ${settings.authorizationStatus}');
+      // Request permission (required on iOS)
+      NotificationSettings settings;
+      try {
+        settings = await _messaging.requestPermission(
+          alert: true,
+          badge: true,
+          sound: true,
+          provisional: true, // Use provisional to avoid blocking if denied
+        );
+        print('[Push] Permission status: ${settings.authorizationStatus}');
+      } catch (e) {
+        print('[Push] Permission request failed: $e');
+        // Still try to get token — Android doesn't need explicit permission
+        settings = await _messaging.getNotificationSettings();
+        print('[Push] Current settings: ${settings.authorizationStatus}');
+      }
 
-    if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-        settings.authorizationStatus == AuthorizationStatus.provisional) {
-      // Get and register FCM token
+      // Always try to get the FCM token regardless of permission status
+      // On Android, no permission needed. On iOS, provisional allows silent delivery.
       await _registerToken();
 
       // Listen for token refreshes
@@ -59,15 +64,26 @@ class PushNotificationService {
       if (initialMessage != null) {
         _handleNotificationTap(initialMessage);
       }
+
+      print('[Push] Initialization complete. Token: ${_fcmToken != null ? "registered" : "FAILED"}');
+    } catch (e) {
+      print('[Push] INITIALIZATION ERROR: $e');
+      // Don't rethrow — push failure shouldn't crash the app
     }
   }
 
   Future<void> _registerToken() async {
     try {
+      // On iOS, you may need the APNS token first
+      final apnsToken = await _messaging.getAPNSToken();
+      print('[Push] APNS token: ${apnsToken != null ? "${apnsToken.substring(0, 20)}..." : "null (expected on simulator/macOS)"}');
+
       _fcmToken = await _messaging.getToken();
       if (_fcmToken != null) {
         await _saveTokenToFirestore(_fcmToken!);
         print('[Push] FCM token registered: ${_fcmToken!.substring(0, 20)}...');
+      } else {
+        print('[Push] FCM token is null — push notifications will not work');
       }
     } catch (e) {
       print('[Push] Failed to get FCM token: $e');
@@ -83,8 +99,9 @@ class PushNotificationService {
         'fcmToken': token,
         'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
+      print('[Push] Token saved to Firestore');
     } catch (e) {
-      print('[Push] Failed to save FCM token: $e');
+      print('[Push] Failed to save FCM token to Firestore: $e');
     }
   }
 
@@ -92,7 +109,7 @@ class PushNotificationService {
     const androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
     const iosSettings = DarwinInitializationSettings(
-      requestAlertPermission: false, // Already requested via FCM
+      requestAlertPermission: false,
       requestBadgePermission: false,
       requestSoundPermission: false,
     );
@@ -105,19 +122,15 @@ class PushNotificationService {
       initSettings,
       onDidReceiveNotificationResponse: (response) {
         print('[Push] Local notification tapped: ${response.payload}');
-        // Navigation handled by the screen that reads stored notifications
       },
     );
   }
 
-  /// Handle messages received while app is in the foreground
   void _handleForegroundMessage(RemoteMessage message) {
     print('[Push] Foreground message: ${message.notification?.title}');
 
-    // Store the notification
     _storeNotification(message);
 
-    // Show as a local notification (FCM doesn't auto-show in foreground)
     final notification = message.notification;
     if (notification != null) {
       _localNotifications.show(
@@ -144,13 +157,11 @@ class PushNotificationService {
     }
   }
 
-  /// Handle notification tap (app was in background or terminated)
   void _handleNotificationTap(RemoteMessage message) {
     print('[Push] Notification tapped: ${message.notification?.title}');
     _storeNotification(message, tapped: true);
   }
 
-  /// Store received notification in Firestore for display in the app
   Future<void> _storeNotification(RemoteMessage message, {bool tapped = false}) async {
     try {
       await FirebaseFirestore.instance
@@ -171,7 +182,6 @@ class PushNotificationService {
     }
   }
 
-  /// Get unread notification count
   Future<int> getUnreadCount() async {
     try {
       final query = await FirebaseFirestore.instance
@@ -186,7 +196,6 @@ class PushNotificationService {
     }
   }
 
-  /// Mark a notification as read
   Future<void> markAsRead(String notificationId) async {
     try {
       await FirebaseFirestore.instance
@@ -200,7 +209,6 @@ class PushNotificationService {
     }
   }
 
-  /// Mark all notifications as read
   Future<void> markAllAsRead() async {
     try {
       final unread = await FirebaseFirestore.instance
