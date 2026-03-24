@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_html/flutter_html.dart';
 import '../../../core/config/environment_config.dart';
 import '../services/push_notification_service.dart';
 
@@ -266,19 +267,35 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                       ],
                     ),
                   ),
-                  // Body text — full width, no truncation when expanded
+                  // Body — renders HTML when expanded, plain preview when collapsed
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-                    child: Text(
-                      isExpanded
-                          ? (notif['body'] as String)
-                          : _truncate(notif['body'] as String, 100),
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.grey[600],
-                        height: 1.5,
-                      ),
-                    ),
+                    child: isExpanded
+                        ? Html(
+                            data: _toHtml(notif['body'] as String),
+                            style: {
+                              'body': Style(
+                                fontSize: FontSize(14),
+                                color: Colors.grey[700],
+                                lineHeight: const LineHeight(1.6),
+                                margin: Margins.zero,
+                                padding: HtmlPaddings.zero,
+                              ),
+                              'b': Style(fontWeight: FontWeight.w700),
+                              'strong': Style(fontWeight: FontWeight.w700),
+                              'i': Style(fontStyle: FontStyle.italic),
+                              'em': Style(fontStyle: FontStyle.italic),
+                              'u': Style(textDecoration: TextDecoration.underline),
+                            },
+                          )
+                        : Text(
+                            _stripHtml(_truncate(notif['body'] as String, 120)),
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Colors.grey[600],
+                              height: 1.5,
+                            ),
+                          ),
                   ),
                   // Mark as read button when expanded
                   if (isExpanded && !isRead) ...[
@@ -306,7 +323,30 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   String _truncate(String text, int maxLength) {
-    if (text.length <= maxLength) return text;
-    return '${text.substring(0, maxLength)}...';
+    final clean = _stripHtml(text);
+    if (clean.length <= maxLength) return clean;
+    return '${clean.substring(0, maxLength)}...';
+  }
+
+  /// Convert plain text with \n to HTML paragraphs, preserving any existing HTML tags
+  String _toHtml(String text) {
+    if (text.contains('<') && text.contains('>')) {
+      // Already contains HTML
+      return text;
+    }
+    // Convert newlines to <br> for plain text messages
+    return text.replaceAll('\n\n', '<br><br>').replaceAll('\n', '<br>');
+  }
+
+  /// Strip HTML tags for the collapsed preview
+  String _stripHtml(String text) {
+    return text
+        .replaceAll(RegExp(r'<br\s*/?>'), '\n')
+        .replaceAll(RegExp(r'<[^>]*>'), '')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&nbsp;', ' ')
+        .trim();
   }
 }

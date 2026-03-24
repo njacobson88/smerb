@@ -28,7 +28,7 @@ LOW_COMPLIANCE_TEMPLATES = {
     "ema": [
         {
             "subject": "Quick check-in from the SocialScope team",
-            "body": "Hi {name},\n\nWe noticed you've completed {ema_count} of {ema_expected} check-ins over the past few days. We know life gets busy, and we really appreciate your continued participation.\n\nEach check-in takes less than 2 minutes and helps us understand how social media affects well-being. Your responses are incredibly valuable to our research.\n\nIf you're having any trouble with the app, please don't hesitate to reach out — we're happy to help!\n\nBest,\nThe SocialScope Study Team\nDartmouth College",
+            "body": "Hi <b>{name}</b>,<br><br>We noticed you've completed <b>{ema_count} of {ema_expected}</b> check-ins over the past few days. We know life gets busy, and we really appreciate your continued participation.<br><br>Each check-in takes <u>less than 2 minutes</u> and helps us understand how social media affects well-being. Your responses are <i>incredibly valuable</i> to our research.<br><br>If you're having any trouble with the app, please don't hesitate to reach out — we're happy to help!<br><br>Best,<br>The SocialScope Study Team<br>Dartmouth College",
         },
         {
             "subject": "We miss your check-ins!",
@@ -164,15 +164,41 @@ def send_compliance_email(
     sendgrid_api_key: str,
     from_email: str = "Social.Media.Wellness@dartmouth.edu",
 ) -> dict:
-    """Send a compliance notification email via SendGrid."""
+    """Send a compliance notification email via SendGrid. Supports HTML formatting."""
     try:
         sg = sendgrid.SendGridAPIClient(api_key=sendgrid_api_key)
-        message = Mail(
-            from_email=(from_email, "SocialScope Study Team"),
-            to_emails=to_email,
-            subject=subject,
-            plain_text_content=body,
-        )
+
+        # Check if body contains HTML tags
+        is_html = '<b>' in body or '<i>' in body or '<u>' in body or '<br' in body or '<p>' in body
+
+        if is_html:
+            # Wrap in a styled HTML email template
+            html_body = f"""
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333; line-height: 1.6;">
+                {body}
+            </div>
+            """
+            # Also create a plain text fallback by stripping tags
+            import re
+            plain_body = re.sub(r'<br\s*/?>', '\n', body)
+            plain_body = re.sub(r'<[^>]+>', '', plain_body)
+            plain_body = plain_body.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').strip()
+
+            message = Mail(
+                from_email=(from_email, "SocialScope Study Team"),
+                to_emails=to_email,
+                subject=subject,
+                plain_text_content=plain_body,
+                html_content=html_body,
+            )
+        else:
+            message = Mail(
+                from_email=(from_email, "SocialScope Study Team"),
+                to_emails=to_email,
+                subject=subject,
+                plain_text_content=body,
+            )
+
         response = sg.send(message)
         return {"status": response.status_code, "success": response.status_code in (200, 201, 202)}
     except Exception as e:
