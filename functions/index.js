@@ -17,7 +17,7 @@ function col(name) { return `${PREFIX}${name}`; }
 
 // URLs parameterized for dev/prod
 const BACKEND_URL = process.env.BACKEND_URL || "https://socialscope-dashboard-api-436153481478.us-central1.run.app";
-const DASHBOARD_URL = process.env.DASHBOARD_URL || "${DASHBOARD_URL}";
+const DASHBOARD_URL = process.env.DASHBOARD_URL || "https://socialscope-dashboard.web.app";
 
 console.log(`[Config] Environment: ${ENVIRONMENT}, prefix: '${PREFIX}'`);
 
@@ -35,7 +35,7 @@ const alertSenderEmail = defineSecret("ALERT_SENDER_EMAIL"); // e.g., Social.Med
 // Helper: Send email via SendGrid (for Slack channel and participant notifications)
 // ============================================================================
 async function sendEmail({ senderEmail, to, subject, body }) {
-  sgMail.setApiKey(sendgridApiKey.value());
+  sgMail.setApiKey(sendgridApiKey.value().trim());
 
   await sgMail.send({
     to,
@@ -635,14 +635,17 @@ exports[safetyAlertFnName] = onDocumentCreated(
         }
 
         // Store participant info on the safety event for on-call context
+        // Filter out undefined values (Firestore rejects them)
         if (safetyEventRef) {
-          await safetyEventRef.update({
-            participantPhone: participantInfo.phone,
-            participantEmail: participantInfo.email,
-            participantName: participantInfo.name,
-            redcapId: participantInfo.redcapId,
-            emergencyContactCount: (participantInfo.emergencyContacts || []).length,
-          });
+          const contextUpdate = {};
+          if (participantInfo.phone) contextUpdate.participantPhone = participantInfo.phone;
+          if (participantInfo.email) contextUpdate.participantEmail = participantInfo.email;
+          if (participantInfo.name) contextUpdate.participantName = participantInfo.name;
+          if (participantInfo.redcapId) contextUpdate.redcapId = participantInfo.redcapId;
+          contextUpdate.emergencyContactCount = (participantInfo.emergencyContacts || []).length;
+          if (Object.keys(contextUpdate).length > 0) {
+            await safetyEventRef.update(contextUpdate);
+          }
         }
       } catch (err) {
         console.error("Participant outreach error:", err);

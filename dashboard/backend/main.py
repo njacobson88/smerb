@@ -4146,6 +4146,8 @@ SMS_DISPOSITION_MAP = {
     "SUPPORT": "contacted_needs_support",
     "NOREACH": "unable_to_reach",
     "FALSE": "false_alarm",
+    "ERROR": "false_alarm",  # Participant replies ERROR = accidental
+    "1": "false_alarm",      # Participant replies 1 = accidental
     "988": "escalated_988",
     "ER": "escalated_er",
     "ONGOING": "ongoing",
@@ -4629,7 +4631,7 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
 
 @app.post("/api/redcap/data-entry-trigger")
 @limiter.limit("60/minute")
-def redcap_data_entry_trigger(request: Request):
+async def redcap_data_entry_trigger(request: Request):
     """
     REDCap Data Entry Trigger endpoint.
     Called by REDCap whenever a form is saved. Filters to only act when
@@ -4642,23 +4644,9 @@ def redcap_data_entry_trigger(request: Request):
     """
     try:
         # REDCap sends form-encoded POST data
-        # Fields: project_id, instrument, record, redcap_event_name, etc.
-        form_data = {}
-
-        # Handle both form data and query params
         import urllib.parse
-        body = request.scope.get("body", b"")
-        if not body:
-            # Try to read synchronously for non-async context
-            import asyncio
-            loop = asyncio.new_event_loop()
-            body = loop.run_until_complete(request.body())
-            loop.close()
-        else:
-            body = b""
-
-        if body:
-            form_data = dict(urllib.parse.parse_qsl(body.decode("utf-8")))
+        body = await request.body()
+        form_data = dict(urllib.parse.parse_qsl(body.decode("utf-8"))) if body else {}
 
         instrument = form_data.get("instrument", "")
         record_id = form_data.get("record", "")
