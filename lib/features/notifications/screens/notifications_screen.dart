@@ -222,95 +222,77 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Header row: icon + title + time + unread dot
                   Padding(
-                    padding: EdgeInsets.fromLTRB(16, 14, 16, isExpanded ? 8 : 14),
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
                     child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        // Icon
                         Container(
-                          width: 40,
-                          height: 40,
+                          width: 36,
+                          height: 36,
                           decoration: BoxDecoration(
                             color: iconColor.withAlpha(25),
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: Icon(icon, color: iconColor, size: 22),
+                          child: Icon(icon, color: iconColor, size: 20),
                         ),
-                        const SizedBox(width: 12),
-                        // Content
+                        const SizedBox(width: 10),
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      title,
-                                      style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: isRead
-                                            ? FontWeight.w500
-                                            : FontWeight.w700,
-                                        color: const Color(0xFF1A1A2E),
-                                      ),
-                                    ),
-                                  ),
-                                  if (!isRead)
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: const BoxDecoration(
-                                        color: Color(0xFF4A6CF7),
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                isExpanded
-                                    ? (notif['body'] as String)
-                                    : _truncate(notif['body'] as String, 80),
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.grey[600],
-                                  height: 1.4,
-                                ),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                timeStr,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.grey[400],
-                                ),
-                              ),
-                            ],
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: isRead ? FontWeight.w500 : FontWeight.w700,
+                              color: const Color(0xFF1A1A2E),
+                            ),
                           ),
                         ),
+                        const SizedBox(width: 8),
+                        Text(
+                          timeStr,
+                          style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                        ),
+                        if (!isRead) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            width: 8, height: 8,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF4A6CF7),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
-                  // Expanded content with action buttons
-                  if (isExpanded) ...[
+                  // Body text — full width, no truncation when expanded
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                    child: Text(
+                      isExpanded
+                          ? (notif['body'] as String)
+                          : _truncate(notif['body'] as String, 100),
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey[600],
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                  // Mark as read button when expanded
+                  if (isExpanded && !isRead) ...[
                     const Divider(height: 1),
                     Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(
-                        children: [
-                          if (!isRead)
-                            TextButton.icon(
-                              onPressed: () => _markAsRead(notif['id']),
-                              icon: const Icon(Icons.check, size: 16),
-                              label: const Text('Mark as read'),
-                              style: TextButton.styleFrom(
-                                foregroundColor: const Color(0xFF4A6CF7),
-                                textStyle: const TextStyle(fontSize: 12),
-                              ),
-                            ),
-                        ],
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      child: TextButton.icon(
+                        onPressed: () => _markAsRead(notif['id']),
+                        icon: const Icon(Icons.check, size: 16),
+                        label: const Text('Mark as read'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xFF4A6CF7),
+                          textStyle: const TextStyle(fontSize: 12),
+                        ),
                       ),
                     ),
                   ],
