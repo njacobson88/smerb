@@ -304,6 +304,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ),
           IconButton(
+            icon: const Icon(Icons.notifications_outlined, size: 22, color: Colors.white),
+            onPressed: _openNotifications,
+            tooltip: 'Notifications',
+          ),
+          IconButton(
             icon: const Icon(Icons.bug_report_outlined, size: 20, color: Colors.white70),
             onPressed: () {
               Navigator.push(
@@ -582,11 +587,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     icon: const Icon(Icons.refresh),
                     onPressed: _reload,
                     tooltip: 'Reload',
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.notifications_outlined),
-                    onPressed: _openNotifications,
-                    tooltip: 'Notifications',
                   ),
                   IconButton(
                     icon: const Icon(Icons.health_and_safety),

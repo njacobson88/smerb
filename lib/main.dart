@@ -13,6 +13,7 @@ import 'features/ocr/services/ocr_service.dart';
 import 'features/onboarding/services/participant_service.dart';
 import 'features/onboarding/screens/enrollment_screen.dart';
 import 'features/notifications/services/push_notification_service.dart';
+import 'features/notifications/services/app_update_service.dart';
 
 /// Background message handler for FCM (must be top-level)
 @pragma('vm:entry-point')
@@ -160,6 +161,13 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
       _initialized = true;
       _enrolled = isEnrolled;
     });
+
+    // Check for app updates after UI is ready
+    if (isEnrolled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) AppUpdateService.checkForUpdate(context);
+      });
+    }
   }
 
   Future<void> _initializeServices() async {
