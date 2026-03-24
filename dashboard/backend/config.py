@@ -41,6 +41,7 @@ DARTMOUTH_IP_RANGES = [
     "132.177.0.0/16",      # Secondary Dartmouth range
     # VPN ranges (when connected to Dartmouth VPN)
     "10.0.0.0/8",          # Private VPN range
+    "76.23.192.0/18",      # Dartmouth VPN exit range
     # Local development
     "127.0.0.1/32",        # Localhost IPv4
     "::1/128",             # Localhost IPv6
