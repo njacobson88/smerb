@@ -4500,14 +4500,30 @@ def send_compliance_notification(
 
         # Send push notification
         if "push" in body.delivery_methods:
-            # Use a shorter version for push
-            push_body = email_body[:200] + "..." if len(email_body) > 200 else email_body
+            # Push notification body is short (for lock screen display)
+            import re
+            plain_body = re.sub(r'<[^>]+>', '', email_body).replace('&amp;', '&').strip()
+            push_preview = plain_body[:150] + "..." if len(plain_body) > 150 else plain_body
             results["push"] = send_push_notification(
                 participant_id=body.participant_id,
                 title=subject,
-                body=push_body,
+                body=push_preview,
                 db=db,
             )
+            # Also store the FULL message in the participant's received_notifications
+            # so the in-app notification screen shows the complete content
+            try:
+                db.collection(config.col("participants")).document(body.participant_id) \
+                    .collection("received_notifications").add({
+                    "title": subject,
+                    "body": email_body,  # Full body with HTML formatting
+                    "receivedAt": datetime.utcnow(),
+                    "read": False,
+                    "tapped": False,
+                    "source": "dashboard_compliance",
+                })
+            except Exception as e:
+                logger.warning(f"Failed to store full notification: {e}")
 
         # Log to notification history
         hist_id = str(uuid.uuid4())
@@ -4654,8 +4670,17 @@ async def redcap_data_entry_trigger(request: Request):
     try:
         # REDCap sends form-encoded POST data
         import urllib.parse
-        body = await request.body()
-        form_data = dict(urllib.parse.parse_qsl(body.decode("utf-8"))) if body else {}
+
+        # Try reading as form data first (FastAPI may have consumed the body)
+        try:
+            form = await request.form()
+            form_data = dict(form)
+        except Exception:
+            # Fallback to raw body parsing
+            body = await request.body()
+            form_data = dict(urllib.parse.parse_qsl(body.decode("utf-8"))) if body else {}
+
+        logger.info(f"[REDCap DET] Raw form data keys: {list(form_data.keys())}")
 
         instrument = form_data.get("instrument", "")
         record_id = form_data.get("record", "")
