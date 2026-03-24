@@ -329,7 +329,8 @@ class UploadService {
                 .collection('events')
                 .doc(result.eventId);
 
-            batch.update(docRef, {
+            // Use set/merge instead of update — event doc may have been pruned
+            batch.set(docRef, {
               'ocr': {
                 'extractedText': result.extractedText,
                 'wordCount': result.wordCount,
@@ -338,7 +339,7 @@ class UploadService {
                 'capturedAt': Timestamp.fromDate(result.capturedAt),
               },
               'ocrSyncedAt': FieldValue.serverTimestamp(),
-            });
+            }, SetOptions(merge: true));
             syncedIds.add(result.id);
             batchCount++;
 
@@ -479,14 +480,14 @@ class UploadService {
         .doc(capture.participantId)
         .collection('events')
         .doc(capture.eventId)
-        .update({
+        .set({
       'html.storageUrl': downloadUrl,
       'html.charCount': capture.charCount,
       'html.hash': capture.htmlHash,
       'html.changed': true,
       'html.capturedAt': Timestamp.fromDate(capture.capturedAt),
       'htmlSyncedAt': FieldValue.serverTimestamp(),
-    });
+    }, SetOptions(merge: true));
 
     print('[UploadService] Uploaded HTML capture: $storagePath');
 
@@ -539,7 +540,8 @@ class UploadService {
               updates['html.htmlCaptureId'] = log.htmlCaptureId;
             }
 
-            batch.update(docRef, updates);
+            // Use set/merge — event doc may have been pruned
+            batch.set(docRef, updates, SetOptions(merge: true));
             syncedIds.add(log.id);
             batchCount++;
 
