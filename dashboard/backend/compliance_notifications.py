@@ -202,11 +202,21 @@ def send_push_notification(
         if not fcm_token:
             return {"success": False, "error": "No FCM token registered for this participant"}
 
-        # Use the FCM v1 REST API directly with cloud-platform scope
-        # This works on Cloud Run where firebase_admin.messaging may fail
-        creds, project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
+        # Use service account credentials for FCM
+        # Cloud Run default creds fail with 401 due to org policy
+        sa_key_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_KEY")
+        if sa_key_json:
+            import json
+            from google.oauth2 import service_account
+            sa_info = json.loads(sa_key_json)
+            creds = service_account.Credentials.from_service_account_info(
+                sa_info,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+        else:
+            creds, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
         creds.refresh(google.auth.transport.requests.Request())
 
         project_id = config.FIREBASE_PROJECT_ID
