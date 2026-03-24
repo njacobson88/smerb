@@ -401,6 +401,15 @@ class _SafetyPlanScreenState extends State<SafetyPlanScreen> {
     final uri = Uri.parse(url);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
+    } else if (mounted) {
+      // Fallback: show the number so they can dial manually
+      final number = url.replaceAll(RegExp(r'[^0-9+]'), '');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to open. Please call or text $number directly.'),
+          duration: const Duration(seconds: 8),
+        ),
+      );
     }
   }
 }

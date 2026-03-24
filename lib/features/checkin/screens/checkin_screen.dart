@@ -1249,6 +1249,15 @@ class _CheckinScreenState extends State<CheckinScreen>
     }
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
+    } else if (mounted) {
+      // Fallback: show the number/address so they can dial manually
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to open ${resource.action == "call" ? "dialer" : "messaging"}. '
+              '${resource.action == "call" ? "Please call" : "Please text"} ${resource.value} directly.'),
+          duration: const Duration(seconds: 8),
+        ),
+      );
     }
   }
 
