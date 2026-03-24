@@ -23,7 +23,6 @@ class NotificationsScreen extends StatefulWidget {
 class _NotificationsScreenState extends State<NotificationsScreen> {
   List<Map<String, dynamic>> _notifications = [];
   bool _loading = true;
-  String? _expandedId;
 
   @override
   void initState() {
@@ -152,7 +151,6 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         itemBuilder: (context, index) {
           final notif = _notifications[index];
           final isRead = notif['read'] as bool;
-          final isExpanded = _expandedId == notif['id'];
           final receivedAt = notif['receivedAt'];
 
           String timeStr = '';
@@ -195,9 +193,19 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           return GestureDetector(
             onTap: () {
               if (!isRead) _markAsRead(notif['id']);
-              setState(() {
-                _expandedId = isExpanded ? null : notif['id'];
-              });
+              // Open full-screen detail view
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => _NotificationDetailScreen(
+                    title: notif['title'] as String,
+                    body: notif['body'] as String,
+                    timeStr: timeStr,
+                    icon: icon,
+                    iconColor: iconColor,
+                  ),
+                ),
+              );
             },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
@@ -267,52 +275,20 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                       ],
                     ),
                   ),
-                  // Body — renders HTML when expanded, plain preview when collapsed
+                  // Body preview — tap to see full message
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-                    child: isExpanded
-                        ? Html(
-                            data: _toHtml(notif['body'] as String),
-                            style: {
-                              'body': Style(
-                                fontSize: FontSize(14),
-                                color: Colors.grey[700],
-                                lineHeight: const LineHeight(1.6),
-                                margin: Margins.zero,
-                                padding: HtmlPaddings.zero,
-                              ),
-                              'b': Style(fontWeight: FontWeight.w700),
-                              'strong': Style(fontWeight: FontWeight.w700),
-                              'i': Style(fontStyle: FontStyle.italic),
-                              'em': Style(fontStyle: FontStyle.italic),
-                              'u': Style(textDecoration: TextDecoration.underline),
-                            },
-                          )
-                        : Text(
-                            _stripHtml(_truncate(notif['body'] as String, 120)),
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey[600],
-                              height: 1.5,
-                            ),
-                          ),
-                  ),
-                  // Mark as read button when expanded
-                  if (isExpanded && !isRead) ...[
-                    const Divider(height: 1),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      child: TextButton.icon(
-                        onPressed: () => _markAsRead(notif['id']),
-                        icon: const Icon(Icons.check, size: 16),
-                        label: const Text('Mark as read'),
-                        style: TextButton.styleFrom(
-                          foregroundColor: const Color(0xFF4A6CF7),
-                          textStyle: const TextStyle(fontSize: 12),
-                        ),
+                    child: Text(
+                      _stripHtml(notif['body'] as String),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey[600],
+                        height: 1.5,
                       ),
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),
@@ -322,23 +298,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     );
   }
 
-  String _truncate(String text, int maxLength) {
-    final clean = _stripHtml(text);
-    if (clean.length <= maxLength) return clean;
-    return '${clean.substring(0, maxLength)}...';
-  }
-
-  /// Convert plain text with \n to HTML paragraphs, preserving any existing HTML tags
-  String _toHtml(String text) {
-    if (text.contains('<') && text.contains('>')) {
-      // Already contains HTML
-      return text;
-    }
-    // Convert newlines to <br> for plain text messages
-    return text.replaceAll('\n\n', '<br><br>').replaceAll('\n', '<br>');
-  }
-
-  /// Strip HTML tags for the collapsed preview
+  /// Strip HTML tags for the list preview
   String _stripHtml(String text) {
     return text
         .replaceAll(RegExp(r'<br\s*/?>'), '\n')
@@ -348,5 +308,110 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         .replaceAll('&gt;', '>')
         .replaceAll('&nbsp;', ' ')
         .trim();
+  }
+}
+
+/// Full-screen notification detail view
+class _NotificationDetailScreen extends StatelessWidget {
+  final String title;
+  final String body;
+  final String timeStr;
+  final IconData icon;
+  final Color iconColor;
+
+  const _NotificationDetailScreen({
+    required this.title,
+    required this.body,
+    required this.timeStr,
+    required this.icon,
+    required this.iconColor,
+  });
+
+  String _toHtml(String text) {
+    if (text.contains('<') && text.contains('>')) return text;
+    return text.replaceAll('\n\n', '<br><br>').replaceAll('\n', '<br>');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Notification', style: TextStyle(fontWeight: FontWeight.w600)),
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF39A0EC), Color(0xFF587AE0), Color(0xFF7050E0)],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+          ),
+        ),
+        foregroundColor: Colors.white,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: iconColor.withAlpha(25),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(icon, color: iconColor, size: 24),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1A1A2E),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        timeStr,
+                        style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            const Divider(),
+            const SizedBox(height: 16),
+            // Full message body with HTML rendering
+            Html(
+              data: _toHtml(body),
+              style: {
+                'body': Style(
+                  fontSize: FontSize(15),
+                  color: Colors.grey[800],
+                  lineHeight: const LineHeight(1.7),
+                  margin: Margins.zero,
+                  padding: HtmlPaddings.zero,
+                ),
+                'b': Style(fontWeight: FontWeight.w700),
+                'strong': Style(fontWeight: FontWeight.w700),
+                'i': Style(fontStyle: FontStyle.italic),
+                'em': Style(fontStyle: FontStyle.italic),
+                'u': Style(textDecoration: TextDecoration.underline),
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

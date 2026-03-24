@@ -225,11 +225,16 @@ const ParticipantDetailScreen = ({
   }, [currentParticipantId, fetchCompliance]);
 
   const previewNotification = async () => {
+    setNotifPreview(null); // Clear first to force re-render
     try {
       const res = await authFetch(`${API_BASE_URL}/api/compliance/preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participant_id: currentParticipantId, category: notifCategory }),
+        body: JSON.stringify({
+          participant_id: currentParticipantId,
+          category: notifCategory,
+          template_index: notifPreview?.templateIndex ?? null, // Exclude current to get a different one
+        }),
       });
       if (res.ok) setNotifPreview(await res.json());
     } catch (e) { /* ignore */ }
