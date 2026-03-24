@@ -242,10 +242,10 @@ const ParticipantDetailScreen = ({
         participant_id: currentParticipantId,
         category: notifCategory,
         delivery_methods: notifDelivery,
+        // Send the edited subject and body (user may have modified the template)
+        custom_subject: notifPreview?.subject,
+        custom_body: notifPreview?.body,
       };
-      if (notifPreview?.templateIndex !== undefined) {
-        payload.template_index = notifPreview.templateIndex;
-      }
       const res = await authFetch(`${API_BASE_URL}/api/compliance/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -788,11 +788,68 @@ const ParticipantDetailScreen = ({
                 </div>
               </div>
 
-              {/* Preview */}
+              {/* Editable message */}
               {notifPreview && (
-                <div className="bg-white border rounded p-3 mb-3 text-sm">
-                  <div className="font-semibold text-gray-800 mb-1">{notifPreview.subject}</div>
-                  <div className="text-gray-600 whitespace-pre-wrap text-xs max-h-40 overflow-y-auto">{notifPreview.body}</div>
+                <div className="bg-white border rounded p-3 mb-3">
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Subject (editable)</label>
+                  <input
+                    value={notifPreview.subject}
+                    onChange={e => setNotifPreview(p => ({...p, subject: e.target.value}))}
+                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-2 font-semibold"
+                  />
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Message (editable — supports HTML: &lt;b&gt;bold&lt;/b&gt;, &lt;i&gt;italic&lt;/i&gt;, &lt;u&gt;underline&lt;/u&gt;)</label>
+                  {/* Formatting toolbar */}
+                  <div className="flex gap-1 mb-1">
+                    {[
+                      { label: 'B', tag: 'b', title: 'Bold', style: 'font-bold' },
+                      { label: 'I', tag: 'i', title: 'Italic', style: 'italic' },
+                      { label: 'U', tag: 'u', title: 'Underline', style: 'underline' },
+                    ].map(fmt => (
+                      <button key={fmt.tag} title={fmt.title}
+                        onClick={() => {
+                          const ta = document.getElementById('notif-body-editor');
+                          if (ta) {
+                            const start = ta.selectionStart;
+                            const end = ta.selectionEnd;
+                            const text = notifPreview.body;
+                            const selected = text.substring(start, end);
+                            const wrapped = `<${fmt.tag}>${selected}</${fmt.tag}>`;
+                            const newText = text.substring(0, start) + wrapped + text.substring(end);
+                            setNotifPreview(p => ({...p, body: newText}));
+                          }
+                        }}
+                        className={`px-2 py-0.5 text-xs border rounded hover:bg-purple-100 ${fmt.style}`}>
+                        {fmt.label}
+                      </button>
+                    ))}
+                    <button title="Line break"
+                      onClick={() => {
+                        const ta = document.getElementById('notif-body-editor');
+                        if (ta) {
+                          const pos = ta.selectionStart;
+                          const text = notifPreview.body;
+                          const newText = text.substring(0, pos) + '<br>' + text.substring(pos);
+                          setNotifPreview(p => ({...p, body: newText}));
+                        }
+                      }}
+                      className="px-2 py-0.5 text-xs border rounded hover:bg-purple-100">
+                      BR
+                    </button>
+                  </div>
+                  <textarea
+                    id="notif-body-editor"
+                    value={notifPreview.body}
+                    onChange={e => setNotifPreview(p => ({...p, body: e.target.value}))}
+                    rows={8}
+                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm font-mono"
+                  />
+                  {/* HTML Preview */}
+                  <details className="mt-2">
+                    <summary className="text-xs text-purple-600 cursor-pointer">Preview formatted message</summary>
+                    <div className="mt-1 p-3 bg-gray-50 border rounded text-sm"
+                      dangerouslySetInnerHTML={{ __html: notifPreview.body.replace(/\n/g, '<br>') }}
+                    />
+                  </details>
                 </div>
               )}
 
