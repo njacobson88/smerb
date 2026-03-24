@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/timezone.dart' as tz;
 import '../../../core/config/environment_config.dart';
 import '../models/ema_config.dart';
 import '../../storage/database/database.dart';
@@ -60,7 +61,6 @@ class _CheckinScreenState extends State<CheckinScreen>
   // Walk-away notification IDs (so we can cancel them if resolved)
   static const int _notifId5Min = 9001;
   static const int _notifId10Min = 9002;
-  Timer? _tenMinNotifTimer;
 
   @override
   void initState() {
@@ -214,9 +214,6 @@ class _CheckinScreenState extends State<CheckinScreen>
   /// Cancel any scheduled walk-away notifications and log the cancellation
   void _cancelWalkAwayNotifications() {
     try {
-      _tenMinNotifTimer?.cancel();
-      _tenMinNotifTimer = null;
-
       final notifications = FlutterLocalNotificationsPlugin();
       notifications.cancel(_notifId5Min);
       notifications.cancel(_notifId10Min);
@@ -438,9 +435,6 @@ class _CheckinScreenState extends State<CheckinScreen>
     // and the backend will send a "potential risk" alert after 15 minutes.
     if (_firstThresholdExceededAt != null && !_confirmationResolved && !_completed) {
       _scheduleWalkAwayNotifications();
-    } else {
-      // If resolved normally, ensure any scheduled notifications are cleaned up
-      _tenMinNotifTimer?.cancel();
     }
 
     _crisisFlashController.dispose();
@@ -479,15 +473,18 @@ class _CheckinScreenState extends State<CheckinScreen>
         }
       }
 
-      // 5-minute follow-up — gentle and caring
-      final scheduledAt5 = DateTime.now().add(const Duration(minutes: 5));
-      notifications.show(
+      // 5-minute follow-up — use zonedSchedule for real delay (survives process kill)
+      final scheduledAt5 = tz.TZDateTime.now(tz.local).add(const Duration(minutes: 5));
+      notifications.zonedSchedule(
         _notifId5Min,
         'Just checking in',
         'We noticed you stepped away from your check-in. '
         'We want to make sure you\'re doing okay. '
         'Tap here to finish up when you\'re ready.',
+        scheduledAt5,
         details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       );
 
       _logNotificationEvent('walk_away_notification_scheduled', {
@@ -498,26 +495,19 @@ class _CheckinScreenState extends State<CheckinScreen>
         'title': 'Just checking in',
       });
 
-      // 10-minute follow-up — use Timer so we can cancel it
-      final scheduledAt10 = DateTime.now().add(const Duration(minutes: 10));
-      _tenMinNotifTimer = Timer(const Duration(minutes: 5), () {
-        notifications.show(
-          _notifId10Min,
-          'Checking in again',
-          'We want to make sure you\'re doing alright. '
-          'Completing your check-in helps us know. '
-          'If you need to talk to someone, call or text 988.',
-          details,
-        );
-
-        _logNotificationEvent('walk_away_notification_delivered', {
-          'notificationId': _notifId10Min,
-          'delayMinutes': 10,
-          'deliveredAt': DateTime.now().toIso8601String(),
-          'triggerQuestions': exceededQuestions,
-          'title': 'Checking in again',
-        });
-      });
+      // 10-minute follow-up — also zonedSchedule (survives process kill)
+      final scheduledAt10 = tz.TZDateTime.now(tz.local).add(const Duration(minutes: 10));
+      notifications.zonedSchedule(
+        _notifId10Min,
+        'Checking in again',
+        'We want to make sure you\'re doing alright. '
+        'Completing your check-in helps us know. '
+        'If you need to talk to someone, call or text 988.',
+        scheduledAt10,
+        details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      );
 
       _logNotificationEvent('walk_away_notification_scheduled', {
         'notificationId': _notifId10Min,
@@ -525,15 +515,6 @@ class _CheckinScreenState extends State<CheckinScreen>
         'scheduledDeliveryTime': scheduledAt10.toIso8601String(),
         'triggerQuestions': exceededQuestions,
         'title': 'Checking in again',
-      });
-
-      // Log the 5-min as delivered (it fires immediately via show())
-      _logNotificationEvent('walk_away_notification_delivered', {
-        'notificationId': _notifId5Min,
-        'delayMinutes': 5,
-        'deliveredAt': DateTime.now().toIso8601String(),
-        'triggerQuestions': exceededQuestions,
-        'title': 'Just checking in',
       });
 
       print('[CheckIn] Scheduled walk-away follow-up notifications '

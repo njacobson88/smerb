@@ -656,7 +656,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
     // Step 5: Update alert document with all results
     // ================================================================
     await snapshot.ref.update({
-      handled: smsResults.length > 0 || slackResult === "sent",
+      handled: smsResults.length > 0 || slackResult === "sent" || (participantSmsResult && participantSmsResult.sid) || (participantCallResult && participantCallResult.sid),
       smsResults: smsResults.length > 0 ? smsResults : null,
       smsErrors: smsErrors.length > 0 ? smsErrors : null,
       recipientCount: recipients.length,

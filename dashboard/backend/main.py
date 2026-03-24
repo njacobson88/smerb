@@ -57,6 +57,9 @@ db = firestore.client()
 if not config.SCHEDULER_SECRET:
     logger.warning("SCHEDULER_SECRET not set - scheduler endpoint will reject all requests")
 
+if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+    logger.warning("REDCAP_API_URL/TOKEN not set - REDCap integration will not work")
+
 if config.DEV_MODE:
     logger.warning("DEV_MODE is enabled - IP whitelist is BYPASSED")
 
@@ -436,7 +439,13 @@ def send_distribution_invite(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/debug/test-signing")
+def require_dev_mode():
+    """Dependency that blocks debug endpoints in production."""
+    if config.ENVIRONMENT != "dev" and not config.DEV_MODE:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@app.get("/api/debug/test-signing", dependencies=[Depends(require_dev_mode)])
 def debug_test_signing():
     """Debug endpoint to test signed URL generation."""
     try:
@@ -469,7 +478,7 @@ def debug_test_signing():
         }
 
 
-@app.get("/api/debug/day-test/{participant_id}/{date}")
+@app.get("/api/debug/day-test/{participant_id}/{date}", dependencies=[Depends(require_dev_mode)])
 def debug_day_test(participant_id: str, date: str):
     """Debug endpoint to test day queries."""
     try:
@@ -557,7 +566,7 @@ def debug_day_test(participant_id: str, date: str):
         return {"error": str(e), "type": type(e).__name__, "trace": traceback.format_exc()}
 
 
-@app.get("/api/debug/participant-data/{participant_id}")
+@app.get("/api/debug/participant-data/{participant_id}", dependencies=[Depends(require_dev_mode)])
 def debug_participant_data(participant_id: str):
     """Debug endpoint to examine participant's raw data."""
     try:
@@ -604,7 +613,7 @@ def debug_participant_data(participant_id: str):
         return {"error": str(e), "type": type(e).__name__}
 
 
-@app.get("/api/debug/participants-test")
+@app.get("/api/debug/participants-test", dependencies=[Depends(require_dev_mode)])
 def debug_participants_test():
     """Debug endpoint to test participant loading."""
     try:
@@ -625,7 +634,7 @@ def debug_participants_test():
         return {"error": str(e), "type": type(e).__name__}
 
 
-@app.get("/api/debug/collections")
+@app.get("/api/debug/collections", dependencies=[Depends(require_dev_mode)])
 def debug_collections():
     """Debug endpoint to check Firestore connectivity."""
     try:
