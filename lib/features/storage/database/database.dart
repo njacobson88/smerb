@@ -308,6 +308,31 @@ class AppDatabase extends _$AppDatabase {
         .getSingleOrNull();
   }
 
+  /// Get count of unsynced events (efficient — no row loading)
+  Future<int> getUnsyncedEventCount() async {
+    final result = await customSelect(
+      'SELECT COUNT(*) AS c FROM events WHERE synced = 0 AND sync_retry_count < ?',
+      variables: [Variable.withInt(maxSyncRetries)],
+    ).getSingle();
+    return result.data['c'] as int;
+  }
+
+  /// Get count of unsynced OCR results (efficient)
+  Future<int> getUnsyncedOcrCount() async {
+    final result = await customSelect(
+      'SELECT COUNT(*) AS c FROM ocr_results WHERE synced = 0',
+    ).getSingle();
+    return result.data['c'] as int;
+  }
+
+  /// Get count of unsynced EMA responses (efficient)
+  Future<int> getUnsyncedEmaCount() async {
+    final result = await customSelect(
+      'SELECT COUNT(*) AS c FROM ema_responses WHERE synced = 0',
+    ).getSingle();
+    return result.data['c'] as int;
+  }
+
   /// Get unsynced OCR results
   Future<List<OcrResult>> getUnsyncedOcrResults({int? limit}) {
     final query = select(ocrResults)..where((o) => o.synced.equals(false));

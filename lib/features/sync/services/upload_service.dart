@@ -744,20 +744,20 @@ class UploadService {
   /// Get sync status
   Future<Map<String, int>> getSyncStatus() async {
     final total = await database.getEventCount();
-    final unsynced = await database.getUnsyncedEvents();
+    final unsyncedCount = await database.getUnsyncedEventCount();
     final totalOcr = await database.getOcrResultCount();
-    final unsyncedOcr = await database.getUnsyncedOcrResults();
+    final unsyncedOcrCount = await database.getUnsyncedOcrCount();
     final pendingHtml = await database.getPendingHtmlSyncCount();
-    final unsyncedEma = await database.getUnsyncedEmaResponses();
+    final unsyncedEmaCount = await database.getUnsyncedEmaCount();
 
     return {
       'totalEvents': total,
-      'syncedEvents': total - unsynced.length,
-      'pendingEvents': unsynced.length,
+      'syncedEvents': total - unsyncedCount,
+      'pendingEvents': unsyncedCount,
       'totalOcr': totalOcr,
-      'pendingOcr': unsyncedOcr.length,
+      'pendingOcr': unsyncedOcrCount,
       'pendingHtml': pendingHtml,
-      'pendingEma': unsyncedEma.length,
+      'pendingEma': unsyncedEmaCount,
     };
   }
 
