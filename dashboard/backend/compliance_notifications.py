@@ -211,11 +211,11 @@ def send_push_notification(
             sa_info = json.loads(sa_key_json)
             creds = service_account.Credentials.from_service_account_info(
                 sa_info,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                scopes=["https://www.googleapis.com/auth/firebase.messaging"]
             )
         else:
             creds, _ = google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                scopes=["https://www.googleapis.com/auth/firebase.messaging"]
             )
         creds.refresh(google.auth.transport.requests.Request())
 
