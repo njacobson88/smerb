@@ -46,12 +46,10 @@ class _CheckinScreenState extends State<CheckinScreen>
   late AnimationController _crisisFlashController;
   late Animation<double> _crisisFlashAnimation;
 
-  // Safety confirmation tracking
+  // Safety confirmation tracking — only shown once at end of check-in
   bool _safetyConfirmationShowing = false;
-  String? _currentTriggerQuestionId;
-  int _confirmationCount = 0; // How many confirmations shown so far
-  final Set<String> _confirmedNoQuestions = {}; // Questions where they said "No"
-  bool _confirmedYes = false; // True if they ever said "Yes, I am in immediate danger"
+  bool _confirmedYes = false; // True if they said "Yes, I am in immediate danger"
+  bool _safetyCheckDone = false; // True after they answered the end-of-checkin safety question
 
   // Unresolved high-risk tracking (for walk-away detection)
   DateTime? _firstThresholdExceededAt;
@@ -143,11 +141,51 @@ class _CheckinScreenState extends State<CheckinScreen>
       _updateVisibleQuestions();
     });
 
-    // Track when a threshold is first exceeded (for walk-away detection)
+    // Track when a threshold is first exceeded
+    // Start the 5-minute completion nudge timer + write pending confirmation
     if (_firstThresholdExceededAt == null && _anyTriggerExceeded()) {
       _firstThresholdExceededAt = DateTime.now();
       _writePendingConfirmation();
+      _startCompletionNudgeTimer();
     }
+  }
+
+  /// Start a 5-minute timer that nudges the participant to complete their EMA
+  /// if a safety threshold was exceeded but the check-in isn't finished yet.
+  void _startCompletionNudgeTimer() {
+    Future.delayed(const Duration(minutes: 5), () {
+      if (!mounted) return;
+      if (_safetyCheckDone || _confirmationResolved) return; // Already completed
+
+      // Show a gentle local notification nudging them to finish
+      final notifications = FlutterLocalNotificationsPlugin();
+      const details = NotificationDetails(
+        android: AndroidNotificationDetails(
+          'safety_followup', 'Safety Follow-Up',
+          channelDescription: 'Follow-up notifications for safety checks',
+          importance: Importance.high, priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true, presentBadge: true, presentSound: true,
+        ),
+      );
+
+      notifications.show(
+        9003,
+        'Please finish your check-in',
+        'We noticed you haven\'t completed your check-in yet. '
+        'Your responses are important to us and help us make sure you\'re doing okay. '
+        'Please take a moment to finish — it only takes a few seconds.',
+        details,
+      );
+
+      _logNotificationEvent('completion_nudge_sent', {
+        'minutesSinceThreshold': 5,
+        'title': 'Please finish your check-in',
+      });
+
+      print('[CheckIn] 5-minute completion nudge sent');
+    });
   }
 
   /// Write a "pending_confirmation" document to Firestore so the backend
@@ -254,26 +292,18 @@ class _CheckinScreenState extends State<CheckinScreen>
     // Enforce required questions — don't advance if current is unanswered
     final currentQ = _visibleQuestions[_currentIndex];
     if (currentQ.required && !_responses.containsKey(currentQ.id)) {
-      return; // Silently block — the UI naturally waits for interaction
-    }
-
-    // Check if the current question is a safety trigger that needs confirmation
-    if (!_confirmedYes && !_safetyConfirmationShowing) {
-      final currentQ = _visibleQuestions[_currentIndex];
-      if (_isQuestionAboveThreshold(currentQ) &&
-          !_confirmedNoQuestions.contains(currentQ.id)) {
-        // Show safety confirmation for this question
-        setState(() {
-          _safetyConfirmationShowing = true;
-          _currentTriggerQuestionId = currentQ.id;
-        });
-        return;
-      }
+      return;
     }
 
     if (_currentIndex < _visibleQuestions.length - 1) {
       _swiperController.next();
     } else {
+      // Last question — check if any safety thresholds were exceeded
+      // If so, show ONE safety confirmation before submitting
+      if (_anyTriggerExceeded() && !_safetyCheckDone) {
+        setState(() => _safetyConfirmationShowing = true);
+        return;
+      }
       _submitCheckin();
     }
   }
@@ -282,32 +312,30 @@ class _CheckinScreenState extends State<CheckinScreen>
     setState(() {
       _confirmedYes = true;
       _crisisTriggered = true;
+      _safetyCheckDone = true;
       _safetyConfirmationShowing = false;
       _responses['safety_confirmed_danger'] = true;
-      _responses['safety_confirmed_at_question'] = _currentTriggerQuestionId;
-      _responses['safety_confirmation_number'] = _confirmationCount + 1;
     });
 
     _crisisFlashController.repeat(reverse: true);
 
     // Resolve the pending confirmation
     _resolvePendingConfirmation('confirmed_danger');
+    _cancelWalkAwayNotifications();
 
-    // NOW send the alert — only on confirmed "Yes"
+    // Send the alert
     _sendSafetyAlert();
 
-    // Show crisis resources dialog
+    // Show crisis resources dialog, then submit check-in
     _showCrisisDialog();
   }
 
   void _onSafetyConfirmationNo() {
     setState(() {
-      _confirmedNoQuestions.add(_currentTriggerQuestionId!);
-      _confirmationCount++;
+      _safetyCheckDone = true;
       _safetyConfirmationShowing = false;
-      _currentTriggerQuestionId = null;
 
-      // Track the crisis state for post-resources screen (but don't alert)
+      // Still show post-resources screen (crisis resources) even if they said no
       if (_anyTriggerExceeded()) {
         _crisisTriggered = true;
         _crisisFlashController.repeat(reverse: true);
@@ -316,15 +344,12 @@ class _CheckinScreenState extends State<CheckinScreen>
 
     // Resolve the pending confirmation as denied
     _resolvePendingConfirmation('denied_danger');
+    _cancelWalkAwayNotifications();
 
-    // Continue to next question
+    // Submit the check-in
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (_currentIndex < _visibleQuestions.length - 1) {
-        _swiperController.next();
-      } else {
-        _submitCheckin();
-      }
+      _submitCheckin();
     });
   }
 
@@ -343,8 +368,8 @@ class _CheckinScreenState extends State<CheckinScreen>
           sessionId: drift.Value(widget.sessionId),
           alertType: const drift.Value('confirmed_danger'),
           responses: drift.Value(responsesJson),
-          triggerQuestion: drift.Value(_currentTriggerQuestionId),
-          confirmationNumber: drift.Value(_confirmationCount + 1),
+          triggerQuestion: const drift.Value(null),
+          confirmationNumber: const drift.Value(1),
           createdAt: drift.Value(DateTime.now()),
         ),
       );
@@ -367,8 +392,7 @@ class _CheckinScreenState extends State<CheckinScreen>
         'responses': _responses.map((k, v) => MapEntry(k, v?.toString())),
         'triggeredAt': FieldValue.serverTimestamp(),
         'confirmedDanger': true,
-        'confirmationNumber': _confirmationCount + 1,
-        'triggerQuestion': _currentTriggerQuestionId,
+        'confirmationNumber': 1,
         'handled': false,
       }).timeout(const Duration(seconds: 10));
 
@@ -465,7 +489,6 @@ class _CheckinScreenState extends State<CheckinScreen>
         iOS: iosDetails,
       );
 
-      // Collect which trigger questions were exceeded for the log
       final exceededQuestions = <String>[];
       if (_config != null) {
         for (final q in _config!.questions) {
@@ -473,29 +496,7 @@ class _CheckinScreenState extends State<CheckinScreen>
         }
       }
 
-      // 5-minute follow-up — use zonedSchedule for real delay (survives process kill)
-      final scheduledAt5 = tz.TZDateTime.now(tz.local).add(const Duration(minutes: 5));
-      notifications.zonedSchedule(
-        _notifId5Min,
-        'Just checking in',
-        'We noticed you stepped away from your check-in. '
-        'We want to make sure you\'re doing okay. '
-        'Tap here to finish up when you\'re ready.',
-        scheduledAt5,
-        details,
-        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-      );
-
-      _logNotificationEvent('walk_away_notification_scheduled', {
-        'notificationId': _notifId5Min,
-        'delayMinutes': 5,
-        'scheduledDeliveryTime': scheduledAt5.toIso8601String(),
-        'triggerQuestions': exceededQuestions,
-        'title': 'Just checking in',
-      });
-
-      // 10-minute follow-up — also zonedSchedule (survives process kill)
+      // 10-minute walk-away notification (the 5-min nudge fires during the check-in itself)
       final scheduledAt10 = tz.TZDateTime.now(tz.local).add(const Duration(minutes: 10));
       notifications.zonedSchedule(
         _notifId10Min,
@@ -514,7 +515,6 @@ class _CheckinScreenState extends State<CheckinScreen>
         'delayMinutes': 10,
         'scheduledDeliveryTime': scheduledAt10.toIso8601String(),
         'triggerQuestions': exceededQuestions,
-        'title': 'Checking in again',
       });
 
       print('[CheckIn] Scheduled walk-away follow-up notifications '
@@ -868,13 +868,12 @@ class _CheckinScreenState extends State<CheckinScreen>
   // --- Safety Confirmation Screen ---
   Widget _buildSafetyConfirmationScreen() {
     final alert = _config!.safetyAlert;
-    final promptText = alert.getConfirmationPrompt(_confirmationCount);
 
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.red[700],
         foregroundColor: Colors.white,
-        title: const Text('Safety Check'),
+        title: const Text('One Last Question'),
         automaticallyImplyLeading: false,
       ),
       body: SafeArea(
@@ -883,14 +882,24 @@ class _CheckinScreenState extends State<CheckinScreen>
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.warning_amber_rounded, size: 64, color: Colors.red[700]),
+              Icon(Icons.health_and_safety, size: 64, color: Colors.red[700]),
               const SizedBox(height: 24),
               Text(
-                promptText,
+                'Thank you for completing your check-in. Based on some of your responses, we want to make sure you\'re okay.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      height: 1.5,
+                      color: Colors.grey[700],
+                    ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                'Are you currently in danger of harming yourself?',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       height: 1.5,
                       fontSize: 17,
+                      fontWeight: FontWeight.w600,
                     ),
               ),
               const SizedBox(height: 40),
