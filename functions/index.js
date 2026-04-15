@@ -122,7 +122,7 @@ async function smsParticipant(client, participantId, fromNumber) {
     const result = await client.messages.create({
       body: `This is the SocialScope study team. Based on your recent check-in, ` +
             `we want to make sure you're safe. A member of our team will be calling ` +
-            `you shortly. If you are in immediate danger, please call 988.`,
+            `you shortly.\n\nIf you are in crisis, please report to the nearest emergency room, call 911, or call 988.`,
       from: fromNumber,
       to: participantPhone.startsWith("+") ? participantPhone : `+1${participantPhone}`,
     });
@@ -149,28 +149,38 @@ async function callParticipant(client, participantId, fromNumber) {
   if (!participantPhone) return null;
 
   try {
-    // TwiML: Play a message, then offer options
-    // Press 1 = accidental/error (logs and stops escalation)
-    // Press 2 = connect to study team
-    // Press 9 = connect to 988 Suicide & Crisis Lifeline (warm handoff)
+    // TwiML: iOS-optimized structure — pause + short ID for Live Voicemail,
+    // then full message with Gather, then repeat fallback Gather.
+    // Press 1 = accidental/error, Press 2 = crisis/988 conference, Press 3 = crisis + emergency contacts
     const twiml = `<Response>
-      <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}" method="POST" timeout="15">
-        <Say voice="alice">
-          Hello, this is the SocialScope study team calling to check on you
-          after your recent check-in. We want to make sure you are safe.
-          Press 1 if you are safe and this was an accidental response.
-          Press 2 to speak with a member of the study team.
-          Press 9 to be connected to the 988 Suicide and Crisis Lifeline.
+      <Pause length="2"/>
+      <Say voice="Polly.Joanna">SocialScope study team. Safety check-in call.</Say>
+      <Pause length="3"/>
+      <Say voice="Polly.Joanna">Hello, this is the SocialScope study team at Dartmouth College calling to check on you after your recent check-in. We want to make sure you are safe.</Say>
+      <Pause length="2"/>
+      <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}" method="POST" timeout="20">
+        <Say voice="Polly.Joanna">
+          Press 1 if you are safe and this was an error or accidental response.
+          Press 2 if you are experiencing a crisis and would like to be connected to the 988 Suicide and Crisis Lifeline.
+          Press 3 if you are experiencing a crisis and would also like us to notify your emergency contacts.
         </Say>
       </Gather>
-      <Say voice="alice">We did not receive a response. A team member will follow up with you shortly.</Say>
+      <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}" method="POST" timeout="15">
+        <Say voice="Polly.Joanna">
+          This is the SocialScope study team. We are calling about your safety.
+          Press 1 if you are safe.
+          Press 2 to be connected to 988.
+          Press 3 for 988 plus emergency contact notification.
+        </Say>
+      </Gather>
+      <Say voice="Polly.Joanna">We did not receive a response. A member of our team will follow up with you shortly. If you are in crisis, please report to the nearest emergency room, call 911, or call 988. Goodbye.</Say>
     </Response>`;
 
     const call = await client.calls.create({
       twiml,
       from: fromNumber,
       to: participantPhone.startsWith("+") ? participantPhone : `+1${participantPhone}`,
-      timeout: 30,
+      timeout: 60,
     });
 
     console.log(`Call initiated to participant ${participantId}: ${call.sid}`);
@@ -542,7 +552,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
                     `Based on your recent check-in, we want to make sure you're safe. ` +
                     `A member of our team will be calling you shortly.\n\n` +
                     `If this was an error, reply ERROR or 1.\n\n` +
-                    `If you are in immediate danger, please call 988.`,
+                    `If you are in crisis, please report to the nearest emergency room, call 911, or call 988.`,
               from: fromNumber,
               to: participantPhone,
             });
@@ -568,23 +578,34 @@ exports[safetyAlertFnName] = onDocumentCreated(
           // No answer/no press = unable to reach
           try {
             const twiml = `<Response>
-              <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}" method="POST" timeout="15">
-                <Say voice="alice">
-                  Hello. This is the SocialScope study team from Dartmouth College calling about your recent check-in.
-                  We want to make sure you are safe.
+              <Pause length="2"/>
+              <Say voice="Polly.Joanna">SocialScope study team. Safety check-in call.</Say>
+              <Pause length="3"/>
+              <Say voice="Polly.Joanna">Hello, this is the SocialScope study team at Dartmouth College calling about your recent check-in. We want to make sure you are safe.</Say>
+              <Pause length="2"/>
+              <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}" method="POST" timeout="20">
+                <Say voice="Polly.Joanna">
                   Press 1 if you are safe and this was an error or accidental response.
                   Press 2 if you are experiencing a crisis and would like to be connected to the 988 Suicide and Crisis Lifeline.
                   Press 3 if you are experiencing a crisis and would also like us to notify your emergency contacts.
                 </Say>
               </Gather>
-              <Say voice="alice">We did not receive a response. A team member will follow up with you shortly. If you are in danger, please call 988.</Say>
+              <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}" method="POST" timeout="15">
+                <Say voice="Polly.Joanna">
+                  This is the SocialScope study team. We are calling about your safety.
+                  Press 1 if you are safe.
+                  Press 2 to be connected to 988.
+                  Press 3 for 988 plus emergency contact notification.
+                </Say>
+              </Gather>
+              <Say voice="Polly.Joanna">We did not receive a response. A member of our team will follow up with you shortly. If you are in crisis, please report to the nearest emergency room, call 911, or call 988. Goodbye.</Say>
             </Response>`;
 
             const call = await client.calls.create({
               twiml,
               from: fromNumber,
               to: participantPhone,
-              timeout: 30,
+              timeout: 60,
             });
             participantCallResult = { sid: call.sid, status: call.status, phone: participantInfo.phone };
           } catch (err) {

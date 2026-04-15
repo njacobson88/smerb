@@ -7,6 +7,7 @@ import 'features/browser/screens/browser_screen.dart';
 import 'features/debug/screens/debug_screen.dart';
 import 'features/storage/database/database.dart';
 import 'features/capture/services/capture_service.dart';
+import 'features/settings/services/pause_service.dart';
 import 'features/sync/services/upload_service.dart';
 import 'features/sync/services/background_sync_service.dart';
 import 'features/ocr/services/ocr_service.dart';
@@ -202,6 +203,9 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
       print('[App] Sync status: ${status.state.name} - '
           'pending: ${status.pendingEvents} events, ${status.pendingOcr} OCR');
     };
+
+    // Initialize pause service (restores persisted pause state)
+    await PauseService().init();
 
     // Start background sync
     _backgroundSyncService!.start();

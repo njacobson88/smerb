@@ -15,9 +15,37 @@
 #   GOOGLE_APPLICATION_CREDENTIALS - Path to Firebase service account JSON (optional on Cloud Run)
 
 import os
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_logger = logging.getLogger("socialscope-config")
+
+
+def _get_secret(secret_id: str, fallback_env: str = None) -> str:
+    """
+    Fetch a secret from GCP Secret Manager, falling back to env var.
+    Firebase Functions and the dashboard backend share the same GCP project secrets.
+    On Cloud Run, application default credentials grant access automatically.
+    For local dev, falls back to .env values.
+    """
+    # Check env var first (local dev / explicit override)
+    env_val = os.getenv(fallback_env or secret_id)
+    if env_val:
+        return env_val
+
+    # Try GCP Secret Manager
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        project_id = os.getenv("FIREBASE_PROJECT_ID", "r01-redditx-suicide")
+        name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8").strip()
+    except Exception as e:
+        _logger.debug(f"Could not fetch secret '{secret_id}' from Secret Manager: {e}")
+        return None
 
 # Firebase project ID - must match your Firebase console project
 # REQUIRED: Set via FIREBASE_PROJECT_ID environment variable
@@ -79,6 +107,12 @@ DEFAULT_CORS_ORIGINS = [
     "https://r01-redditx-suicide.web.app",
     "https://r01-redditx-suicide.firebaseapp.com",
 ]
+
+# Twilio configuration (for IVR safety calls and 988 warm transfer)
+# Reads from GCP Secret Manager (shared with Cloud Functions), falls back to .env
+TWILIO_ACCOUNT_SID = _get_secret("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = _get_secret("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = _get_secret("TWILIO_FROM_NUMBER")
 
 # REDCap API integration
 REDCAP_API_URL = os.getenv("REDCAP_API_URL")

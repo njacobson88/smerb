@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:image/image.dart' as img;
 import '../../storage/database/database.dart';
+import '../../settings/services/pause_service.dart';
 import 'package:drift/drift.dart' as drift;
 
 /// Top-level function for isolate-based JPEG compression.
@@ -46,6 +47,15 @@ class ScreenshotService {
   bool _isCapturing = false;
   String _currentPlatform = 'unknown';
   bool _diskSpacePaused = false;
+  bool _userPaused = false;
+  final PauseService _pauseService = PauseService();
+
+  /// Temporarily pause screenshot capture (e.g., 5-min privacy mode).
+  bool get isUserPaused => _userPaused;
+  void setUserPaused(bool paused) {
+    _userPaused = paused;
+    print('[ScreenshotService] User pause: $paused');
+  }
 
   // HTML change tracking
   String? _lastHtmlHash;
@@ -126,7 +136,7 @@ class ScreenshotService {
   /// Capture a screenshot and save if it's different from the last one
   Future<void> _captureScreenshot() async {
     if (_isCapturing || _controller == null) return;
-    if (_diskSpacePaused) return;
+    if (_diskSpacePaused || _userPaused || _pauseService.isPaused) return;
 
     // Periodically check disk space
     _capturesSinceLastCheck++;

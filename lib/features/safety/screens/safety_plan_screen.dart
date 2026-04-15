@@ -152,6 +152,28 @@ class _SafetyPlanScreenState extends State<SafetyPlanScreen> {
     );
   }
 
+  /// Helper to check if a field has displayable content.
+  bool _hasContent(dynamic value) {
+    if (value == null) return false;
+    if (value is String) return value.trim().isNotEmpty;
+    if (value is List) return value.isNotEmpty;
+    return true;
+  }
+
+  /// Build a list of info tiles from either a List or a single string.
+  List<Widget> _buildStringList(dynamic value) {
+    if (value is List) {
+      return value
+          .where((v) => v != null && v.toString().trim().isNotEmpty)
+          .map<Widget>((v) => _buildInfoTile(v.toString()))
+          .toList();
+    }
+    if (value is String && value.trim().isNotEmpty) {
+      return [_buildInfoTile(value)];
+    }
+    return [];
+  }
+
   Widget _buildPersonalizedPlan() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -162,56 +184,68 @@ class _SafetyPlanScreenState extends State<SafetyPlanScreen> {
           const SizedBox(height: 24),
 
           // Step 1: Warning Signs
-          if (_safetyPlan!['warningSignal'] != null)
-            _buildSection(
-              'Step 1: My Warning Signs',
-              Icons.warning_amber,
-              Colors.orange,
-              [_buildInfoTile(_safetyPlan!['warningSignal'])],
-            ),
+          if (_hasContent(_safetyPlan!['warningSigns']))
+            ...[
+              _buildSection(
+                'Step 1: My Warning Signs',
+                Icons.warning_amber,
+                Colors.orange,
+                _buildStringList(_safetyPlan!['warningSigns']),
+              ),
+              const SizedBox(height: 16),
+            ],
 
-          const SizedBox(height: 16),
-
-          // Step 2: Coping Strategies
-          if (_safetyPlan!['copingStrategies'] != null)
-            _buildSection(
-              'Step 2: My Coping Strategies',
-              Icons.psychology,
-              Colors.blue,
-              (_safetyPlan!['copingStrategies'] is List)
-                  ? (_safetyPlan!['copingStrategies'] as List)
-                      .map<Widget>((s) => _buildInfoTile(s.toString()))
-                      .toList()
-                  : [_buildInfoTile(_safetyPlan!['copingStrategies'].toString())],
-            ),
-
-          const SizedBox(height: 16),
+          // Step 2: Internal Coping Strategies
+          if (_hasContent(_safetyPlan!['copingStrategies']))
+            ...[
+              _buildSection(
+                'Step 2: My Coping Strategies',
+                Icons.psychology,
+                Colors.blue,
+                _buildStringList(_safetyPlan!['copingStrategies']),
+              ),
+              const SizedBox(height: 16),
+            ],
 
           // Step 3: People & Places for Distraction
-          if (_safetyPlan!['distractionContacts'] != null)
-            _buildSection(
-              'Step 3: People & Places for Distraction',
-              Icons.people,
-              Colors.green,
-              _buildContactList(_safetyPlan!['distractionContacts']),
-            ),
-
-          const SizedBox(height: 16),
+          if (_hasContent(_safetyPlan!['distractionContacts']) ||
+              _hasContent(_safetyPlan!['distractionPlaces']))
+            ...[
+              _buildSection(
+                'Step 3: People & Places for Distraction',
+                Icons.people,
+                Colors.green,
+                [
+                  ..._buildContactList(_safetyPlan!['distractionContacts'] ?? []),
+                  if (_hasContent(_safetyPlan!['distractionPlaces']))
+                    ...(_safetyPlan!['distractionPlaces'] as List).where((p) =>
+                        p is Map && (p['name']?.toString().trim().isNotEmpty ?? false))
+                        .map<Widget>((p) => _buildResourceTile(
+                              p['name'],
+                              'Place',
+                              Icons.place,
+                              null,
+                            )),
+                ],
+              ),
+              const SizedBox(height: 16),
+            ],
 
           // Step 4: Support Network
-          if (_safetyPlan!['supportContacts'] != null)
-            _buildSection(
-              'Step 4: People I Can Ask for Help',
-              Icons.support_agent,
-              Colors.teal,
-              _buildContactList(_safetyPlan!['supportContacts']),
-            ),
+          if (_hasContent(_safetyPlan!['supportContacts']))
+            ...[
+              _buildSection(
+                'Step 4: People I Can Ask for Help',
+                Icons.support_agent,
+                Colors.teal,
+                _buildContactList(_safetyPlan!['supportContacts']),
+              ),
+              const SizedBox(height: 16),
+            ],
 
-          const SizedBox(height: 16),
-
-          // Step 5: Crisis Resources
+          // Step 5: Professionals & Crisis Resources
           _buildSection(
-            'Step 5: Crisis Resources',
+            'Step 5: Professionals & Crisis Resources',
             Icons.emergency,
             Colors.red,
             [
@@ -227,20 +261,48 @@ class _SafetyPlanScreenState extends State<SafetyPlanScreen> {
                 Icons.message,
                 () => _launchUrl('sms:741741?body=HOME'),
               ),
-              if (_safetyPlan!['clinicianName'] != null)
+              if (_hasContent(_safetyPlan!['clinicianName']))
                 _buildResourceTile(
                   _safetyPlan!['clinicianName'],
-                  _safetyPlan!['clinicianPhone'] ?? 'Clinician',
+                  [
+                    if (_hasContent(_safetyPlan!['clinicianPhone']))
+                      _safetyPlan!['clinicianPhone'],
+                    if (_hasContent(_safetyPlan!['clinicianErContact']))
+                      'After-hours: ${_safetyPlan!['clinicianErContact']}',
+                  ].join(' | ').isEmpty
+                      ? 'Clinician'
+                      : [
+                          if (_hasContent(_safetyPlan!['clinicianPhone']))
+                            _safetyPlan!['clinicianPhone'],
+                          if (_hasContent(_safetyPlan!['clinicianErContact']))
+                            'After-hours: ${_safetyPlan!['clinicianErContact']}',
+                        ].join(' | '),
                   Icons.medical_services,
-                  _safetyPlan!['clinicianPhone'] != null
+                  _hasContent(_safetyPlan!['clinicianPhone'])
                       ? () => _launchUrl('tel:${_safetyPlan!['clinicianPhone']}')
+                      : null,
+                ),
+              if (_hasContent(_safetyPlan!['localErName']))
+                _buildResourceTile(
+                  _safetyPlan!['localErName'],
+                  [
+                    if (_hasContent(_safetyPlan!['localErPhone']))
+                      _safetyPlan!['localErPhone'],
+                    if (_hasContent(_safetyPlan!['localErAddress']))
+                      _safetyPlan!['localErAddress'],
+                  ].join(' — '),
+                  Icons.local_hospital,
+                  _hasContent(_safetyPlan!['localErPhone'])
+                      ? () => _launchUrl('tel:${_safetyPlan!['localErPhone']}')
                       : null,
                 ),
               _buildResourceTile(
                 '911 Emergency',
-                'Call for immediate help',
-                Icons.local_hospital,
-                () => _launchUrl('tel:911'),
+                _hasContent(_safetyPlan!['erServiceNumber'])
+                    ? _safetyPlan!['erServiceNumber']
+                    : 'Call for immediate help',
+                Icons.emergency_share,
+                () => _launchUrl('tel:${_safetyPlan!['erServiceNumber'] ?? '911'}'),
               ),
             ],
           ),
@@ -248,28 +310,27 @@ class _SafetyPlanScreenState extends State<SafetyPlanScreen> {
           const SizedBox(height: 16),
 
           // Step 6: Making the Environment Safe
-          if (_safetyPlan!['environmentSafety'] != null)
-            _buildSection(
-              'Step 6: Making My Environment Safe',
-              Icons.shield,
-              Colors.purple,
-              [_buildInfoTile(_safetyPlan!['environmentSafety'].toString())],
-            ),
+          if (_hasContent(_safetyPlan!['environmentSafety']))
+            ...[
+              _buildSection(
+                'Step 6: Making My Environment Safe',
+                Icons.shield,
+                Colors.purple,
+                _buildStringList(_safetyPlan!['environmentSafety']),
+              ),
+              const SizedBox(height: 16),
+            ],
 
-          const SizedBox(height: 16),
-
-          // Reasons to Live
-          if (_safetyPlan!['reasonsToLive'] != null)
-            _buildSection(
-              'My Reasons to Live',
-              Icons.favorite,
-              Colors.pink,
-              (_safetyPlan!['reasonsToLive'] is List)
-                  ? (_safetyPlan!['reasonsToLive'] as List)
-                      .map<Widget>((r) => _buildInfoTile(r.toString()))
-                      .toList()
-                  : [_buildInfoTile(_safetyPlan!['reasonsToLive'].toString())],
-            ),
+          // Step 7: Reasons for Living
+          if (_hasContent(_safetyPlan!['reasonsToLive']))
+            ...[
+              _buildSection(
+                'Step 7: My Reasons for Living',
+                Icons.favorite,
+                Colors.pink,
+                _buildStringList(_safetyPlan!['reasonsToLive']),
+              ),
+            ],
 
           const SizedBox(height: 32),
         ],

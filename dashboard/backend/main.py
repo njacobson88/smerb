@@ -60,6 +60,15 @@ if not config.SCHEDULER_SECRET:
 if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
     logger.warning("REDCAP_API_URL/TOKEN not set - REDCap integration will not work")
 
+if not config.TWILIO_ACCOUNT_SID or not config.TWILIO_AUTH_TOKEN:
+    logger.warning("TWILIO credentials not set - IVR/conference features will not work")
+
+# Initialize Twilio client (if credentials available)
+twilio_client = None
+if config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN:
+    from twilio.rest import Client as TwilioClient
+    twilio_client = TwilioClient(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
+
 if config.DEV_MODE:
     logger.warning("DEV_MODE is enabled - IP whitelist is BYPASSED")
 
@@ -126,6 +135,9 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
         "/api/redcap/data-entry-trigger",
         "/api/twilio/call-response",
         "/api/twilio/sms-reply",
+        "/api/twilio/hold-music",
+        "/api/twilio/join-conference",
+        "/api/twilio/conference-events",
         "/api/config/environment",
         "/api/install/links",
     ):
@@ -4009,6 +4021,88 @@ def complete_followup(
 
 
 # ============================================================================
+# 988 Conference / Warm Transfer Configuration
+# ============================================================================
+
+CONFERENCE_CONFIG_COLLECTION = config.col("conference_config")
+
+# Default conference config — stored in Firestore for dashboard editability
+DEFAULT_CONFERENCE_CONFIG = {
+    "enabled": True,
+    # TEMPORARY: Using (603) 646-7037 for testing. Replace with 988's dedicated partner line.
+    "bridge_number": "+16036467037",
+    "send_digits": "",  # DTMF sequence for 988's menu (e.g., "ww{phone}ww{area_code}")
+    "hold_message": (
+        "We hear you and we want to help. "
+        "We are connecting you to the 988 Suicide and Crisis Lifeline now. "
+        "Please stay on the line. This will just take a moment."
+    ),
+    "fallback_message": (
+        "If you were disconnected, please call 988 directly. Goodbye."
+    ),
+}
+
+
+def get_conference_config() -> dict:
+    """Get conference config from Firestore, falling back to defaults."""
+    try:
+        doc = db.collection(CONFERENCE_CONFIG_COLLECTION).document("settings").get()
+        if doc.exists:
+            stored = doc.to_dict()
+            # Merge with defaults so new fields are always present
+            return {**DEFAULT_CONFERENCE_CONFIG, **stored}
+        return DEFAULT_CONFERENCE_CONFIG.copy()
+    except Exception as e:
+        logger.error(f"Failed to get conference config: {e}")
+        return DEFAULT_CONFERENCE_CONFIG.copy()
+
+
+@app.get("/api/admin/conference-config")
+@limiter.limit("30/minute")
+def get_conference_config_endpoint(request: Request, user: dict = Depends(verify_firebase_token)):
+    """Get the current 988 conference/warm transfer configuration."""
+    conf = get_conference_config()
+    return {"config": conf}
+
+
+class ConferenceConfigUpdate(BaseModel):
+    bridge_number: Optional[str] = None
+    send_digits: Optional[str] = None
+    hold_message: Optional[str] = None
+    fallback_message: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@app.post("/api/admin/conference-config")
+@limiter.limit("10/minute")
+def update_conference_config(
+    request: Request,
+    body: ConferenceConfigUpdate,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Update the 988 conference/warm transfer configuration."""
+    try:
+        update_data = {k: v for k, v in body.dict().items() if v is not None}
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        update_data["updatedAt"] = datetime.utcnow()
+        update_data["updatedBy"] = user.get("email")
+
+        db.collection(CONFERENCE_CONFIG_COLLECTION).document("settings").set(
+            update_data, merge=True
+        )
+
+        logger.info(f"Conference config updated by {user.get('email')}: {list(update_data.keys())}")
+        return {"message": "Conference config updated", "config": get_conference_config()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update conference config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Twilio Call Response Webhook (IVR handler)
 # ============================================================================
 
@@ -4036,35 +4130,24 @@ async def twilio_call_response(
 
         logger.info(f"[Twilio IVR] Participant {participantId} pressed: {digits}, CallSid: {call_sid}")
 
-        # Find the safety event for this participant
-        events = list(db.collection(SAFETY_EVENTS_COLLECTION)
-            .where("participantId", "==", participantId)
-            .order_by("createdAt", direction=firestore.Query.DESCENDING)
-            .limit(1).stream())
-
-        event_ref = events[0].reference if events else None
-
         backend_url = os.getenv("BACKEND_URL", "https://socialscope-dashboard-api-436153481478.us-central1.run.app")
+
+        import threading
+
+        def _get_event_ref():
+            """Fetch safety event ref in background — do NOT block TwiML response."""
+            try:
+                events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+                    .where("participantId", "==", participantId)
+                    .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                    .limit(1).stream())
+                return events[0].reference if events else None
+            except Exception as e:
+                logger.warning(f"[Twilio IVR] Failed to find safety event: {e}")
+                return None
 
         if digits == "1":
             # Press 1: Error / accidental — stops escalation
-            if event_ref:
-                event_ref.update({
-                    "currentDisposition": "false_alarm",
-                    "escalationStopped": True,
-                    "participantResolved": True,
-                    "participantResolvedAt": datetime.utcnow(),
-                    "lastRespondedAt": datetime.utcnow(),
-                })
-                event_ref.collection("audit_trail").doc().set({
-                    "type": "participant_ivr_response",
-                    "response": "error_accidental",
-                    "digits": "1",
-                    "callSid": call_sid,
-                    "loggedBy": "system",
-                    "loggedAt": datetime.utcnow(),
-                })
-
             twiml = (
                 '<Response>'
                 '<Say voice="alice">Thank you. We are glad you are safe. '
@@ -4072,39 +4155,164 @@ async def twilio_call_response(
                 '</Response>'
             )
 
+            # Update safety event in background — don't block TwiML response
+            def update_event_press1():
+                event_ref = _get_event_ref()
+                if event_ref:
+                    event_ref.update({
+                        "currentDisposition": "false_alarm",
+                        "escalationStopped": True,
+                        "participantResolved": True,
+                        "participantResolvedAt": datetime.utcnow(),
+                        "lastRespondedAt": datetime.utcnow(),
+                    })
+                    event_ref.collection("audit_trail").document().set({
+                        "type": "participant_ivr_response",
+                        "response": "error_accidental",
+                        "digits": "1",
+                        "callSid": call_sid,
+                        "loggedBy": "system",
+                        "loggedAt": datetime.utcnow(),
+                    })
+            threading.Thread(target=update_event_press1, daemon=True).start()
+
         elif digits in ("2", "3"):
-            # Press 2 or 3: Crisis situation — warm handoff to 988
-            # + notify emergency contacts
-            notify_emergency = True  # Both 2 and 3 trigger emergency contact notification
+            # Press 2 or 3: Crisis situation — warm handoff to 988 via Conference
+            # Generate TwiML IMMEDIATELY — do not block on Firestore
+            conference_room = f"crisis-{participantId}-{alertId or uuid.uuid4().hex[:8]}"
 
-            if event_ref:
-                event_ref.update({
-                    "currentDisposition": "escalated_988",
-                    "adverseEventFlag": True,
-                    "participantConfirmedCrisis": True,
-                    "notifyEmergencyContacts": True,
-                })
-                event_ref.collection("audit_trail").doc().set({
-                    "type": "participant_ivr_response",
-                    "response": "crisis_confirmed_988",
-                    "digits": digits,
-                    "emergencyContactsRequested": True,
-                    "callSid": call_sid,
-                    "loggedBy": "system",
-                    "loggedAt": datetime.utcnow(),
-                })
+            # Load conference config (reads from Firestore doc, fast)
+            conf = get_conference_config()
 
-            # Warm handoff to 988
-            twiml = (
-                '<Response>'
-                '<Say voice="alice">We hear you and we want to help. '
-                'We are connecting you to the 988 Suicide and Crisis Lifeline now. '
-                'We are also notifying your emergency contacts. '
-                'Please stay on the line.</Say>'
-                '<Dial timeout="60">988</Dial>'
-                '<Say voice="alice">If you were disconnected, please call 988 directly. Goodbye.</Say>'
-                '</Response>'
-            )
+            if conf.get("enabled") and twilio_client and conf.get("bridge_number"):
+                # === CONFERENCE-BASED WARM TRANSFER ===
+                # Step 1: Place participant in conference with hold audio.
+                #   startConferenceOnEnter=false — participant hears hold message
+                #   endConferenceOnExit=true — conference ends if participant hangs up
+                # Step 2: Background task dials the bridge number (988's dedicated line)
+                #   via calls.create() with sendDigits. The bridge call is a SEPARATE
+                #   call leg — participant does NOT hear the IVR/DTMF navigation.
+                #   When the bridge answers and sendDigits completes, the url callback
+                #   fires and returns TwiML to join the conference.
+                #   startConferenceOnEnter=true on the bridge leg starts the conference,
+                #   stopping the participant's hold audio and connecting them.
+
+                twiml = (
+                    '<Response>'
+                    '<Dial>'
+                    f'<Conference startConferenceOnEnter="false" endConferenceOnExit="true" '
+                    f'waitUrl="{backend_url}/api/twilio/hold-music" '
+                    f'statusCallback="{backend_url}/api/twilio/conference-events'
+                    f'?participantId={participantId}&amp;alertId={alertId}" '
+                    f'statusCallbackEvent="join leave end" '
+                    f'beep="false">'
+                    f'{conference_room}'
+                    f'</Conference>'
+                    '</Dial>'
+                    f'<Say voice="alice">{conf.get("fallback_message", DEFAULT_CONFERENCE_CONFIG["fallback_message"])}</Say>'
+                    '</Response>'
+                )
+
+                # Step 2: Dial the bridge number in a background thread
+                # This is a separate call — audio is isolated from the conference
+                # until the join-conference callback fires after answer + sendDigits
+                # ALL Firestore work also happens here — do NOT block TwiML response
+
+                def dial_bridge_and_update():
+                    try:
+                        # DIAL FIRST — this is the time-critical part
+                        raw_digits = conf.get("send_digits", "")
+                        send_digits = ""
+
+                        if raw_digits and ("{phone}" in raw_digits or "{area_code}" in raw_digits):
+                            try:
+                                participant_doc = db.collection(config.col("participants")).document(participantId).get()
+                                if participant_doc.exists:
+                                    p_data = participant_doc.to_dict()
+                                    p_phone = (p_data.get("phone") or p_data.get("phoneNumber") or "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "")
+                                    p_area = p_phone[:3] if len(p_phone) >= 3 else ""
+                                    send_digits = raw_digits.replace("{phone}", p_phone).replace("{area_code}", p_area)
+                            except Exception as e:
+                                logger.warning(f"[Conference] Could not fetch participant phone for sendDigits: {e}")
+                                send_digits = raw_digits.replace("{phone}", "").replace("{area_code}", "")
+                        elif raw_digits:
+                            send_digits = raw_digits
+
+                        call_params = {
+                            "to": conf["bridge_number"],
+                            "from_": config.TWILIO_FROM_NUMBER,
+                            "url": (
+                                f"{backend_url}/api/twilio/join-conference"
+                                f"?room={conference_room}"
+                                f"&participantId={participantId}"
+                                f"&alertId={alertId}"
+                            ),
+                            "timeout": 60,
+                        }
+                        if send_digits:
+                            call_params["send_digits"] = send_digits
+
+                        bridge_call = twilio_client.calls.create(**call_params)
+
+                        logger.info(
+                            f"[Conference] Bridge call initiated: {bridge_call.sid} "
+                            f"to {conf['bridge_number']} for room {conference_room}"
+                        )
+
+                        # NOW do Firestore updates (after call is placed)
+                        event_ref = _get_event_ref()
+                        if event_ref:
+                            event_ref.update({
+                                "currentDisposition": "escalated_988",
+                                "adverseEventFlag": True,
+                                "participantConfirmedCrisis": True,
+                                "notifyEmergencyContacts": True,
+                                "conferenceRoom": conference_room,
+                                "bridgeCallSid": bridge_call.sid,
+                                "bridgeCallInitiatedAt": datetime.utcnow(),
+                            })
+                            event_ref.collection("audit_trail").document().set({
+                                "type": "participant_ivr_crisis_and_bridge",
+                                "response": "crisis_confirmed_988",
+                                "digits": digits,
+                                "callSid": call_sid,
+                                "bridgeCallSid": bridge_call.sid,
+                                "bridgeNumber": conf["bridge_number"],
+                                "conferenceRoom": conference_room,
+                                "loggedBy": "system",
+                                "loggedAt": datetime.utcnow(),
+                            })
+
+                    except Exception as e:
+                        logger.error(f"[Conference] Failed to dial bridge: {e}", exc_info=True)
+                        try:
+                            event_ref = _get_event_ref()
+                            if event_ref:
+                                event_ref.collection("audit_trail").document().set({
+                                    "type": "bridge_call_failed",
+                                    "error": str(e),
+                                    "conferenceRoom": conference_room,
+                                    "loggedBy": "system",
+                                    "loggedAt": datetime.utcnow(),
+                                })
+                        except Exception:
+                            pass
+
+                threading.Thread(target=dial_bridge_and_update, daemon=True).start()
+
+            else:
+                # Fallback: direct cold transfer if conference not enabled/configured
+                logger.warning("[Twilio IVR] Conference not enabled, falling back to direct <Dial>988</Dial>")
+                twiml = (
+                    '<Response>'
+                    '<Say voice="alice">We hear you and we want to help. '
+                    'We are connecting you to the 988 Suicide and Crisis Lifeline now. '
+                    'We are also notifying your emergency contacts. '
+                    'Please stay on the line.</Say>'
+                    '<Dial timeout="60">988</Dial>'
+                    '<Say voice="alice">If you were disconnected, please call 988 directly. Goodbye.</Say>'
+                    '</Response>'
+                )
 
         else:
             # Unrecognized input or no response — replay options
@@ -4122,17 +4330,19 @@ async def twilio_call_response(
                 '</Response>'
             )
 
-            # No response — mark as unable to reach for escalation
-            if event_ref and not digits:
-                event_ref.update({
-                    "participantCallNoResponse": True,
-                })
-                event_ref.collection("audit_trail").doc().set({
-                    "type": "participant_ivr_no_response",
-                    "callSid": call_sid,
-                    "loggedBy": "system",
-                    "loggedAt": datetime.utcnow(),
-                })
+            # No response — mark as unable to reach in background
+            if not digits:
+                def update_no_response():
+                    event_ref = _get_event_ref()
+                    if event_ref:
+                        event_ref.update({"participantCallNoResponse": True})
+                        event_ref.collection("audit_trail").document().set({
+                            "type": "participant_ivr_no_response",
+                            "callSid": call_sid,
+                            "loggedBy": "system",
+                            "loggedAt": datetime.utcnow(),
+                        })
+                threading.Thread(target=update_no_response, daemon=True).start()
 
         return Response(content=twiml, media_type="application/xml")
 
@@ -4142,6 +4352,148 @@ async def twilio_call_response(
             content='<Response><Say>An error occurred. Please call 988 if you need help.</Say></Response>',
             media_type="application/xml",
         )
+
+
+# ============================================================================
+# Twilio Conference Warm Transfer Webhooks
+# ============================================================================
+
+
+@app.post("/api/twilio/hold-music")
+async def twilio_hold_music(request: Request):
+    """
+    TwiML endpoint for conference hold audio.
+    Plays a reassuring message on loop while the 988 bridge call connects.
+    Called via the Conference waitUrl attribute.
+    """
+    conf = get_conference_config()
+    hold_msg = conf.get("hold_message", DEFAULT_CONFERENCE_CONFIG["hold_message"])
+
+    # <Redirect/> with empty URL loops back to this endpoint, replaying the message
+    twiml = (
+        '<Response>'
+        f'<Say voice="alice">{hold_msg}</Say>'
+        '<Pause length="3"/>'
+        '<Say voice="alice">Please continue to hold. We are connecting you now.</Say>'
+        '<Pause length="5"/>'
+        '<Redirect/>'
+        '</Response>'
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/api/twilio/join-conference")
+async def twilio_join_conference(
+    request: Request,
+    room: str = Query(None),
+    participantId: str = Query(None),
+    alertId: str = Query(None),
+):
+    """
+    TwiML callback for the bridge call (988's dedicated line).
+    Fires AFTER the bridge call is answered and sendDigits completes.
+    Returns Conference TwiML to join the participant's conference room.
+
+    startConferenceOnEnter=true causes the participant's hold audio to stop
+    and connects them to the bridge caller (988 counselor) seamlessly.
+    """
+    logger.info(f"[Conference] Bridge answered, joining room: {room} (participant: {participantId})")
+
+    # Log to audit trail
+    try:
+        events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+            .where("participantId", "==", participantId)
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .limit(1).stream())
+        if events:
+            events[0].reference.collection("audit_trail").document().set({
+                "type": "bridge_joined_conference",
+                "conferenceRoom": room,
+                "loggedBy": "system",
+                "loggedAt": datetime.utcnow(),
+            })
+    except Exception as e:
+        logger.error(f"[Conference] Failed to log bridge join: {e}")
+
+    backend_url = os.getenv("BACKEND_URL", "https://socialscope-dashboard-api-436153481478.us-central1.run.app")
+
+    twiml = (
+        '<Response>'
+        '<Dial>'
+        f'<Conference startConferenceOnEnter="true" endConferenceOnExit="true" '
+        f'beep="false" '
+        f'statusCallback="{backend_url}/api/twilio/conference-events'
+        f'?participantId={participantId}&amp;alertId={alertId}&amp;leg=bridge" '
+        f'statusCallbackEvent="join leave end">'
+        f'{room}'
+        f'</Conference>'
+        '</Dial>'
+        '</Response>'
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/api/twilio/conference-events")
+async def twilio_conference_events(
+    request: Request,
+    participantId: str = Query(None),
+    alertId: str = Query(None),
+    leg: str = Query(None),
+):
+    """
+    Status callback for conference events (join, leave, end).
+    Logs events to the safety event audit trail for DSMB reporting.
+    """
+    try:
+        form_data = await request.form()
+        event = form_data.get("StatusCallbackEvent", "")
+        conference_sid = form_data.get("ConferenceSid", "")
+        call_sid = form_data.get("CallSid", "")
+        friendly_name = form_data.get("FriendlyName", "")
+
+        logger.info(
+            f"[Conference Event] {event} | room={friendly_name} | "
+            f"participant={participantId} | leg={leg} | callSid={call_sid}"
+        )
+
+        # Log to safety event audit trail
+        if participantId:
+            events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+                .where("participantId", "==", participantId)
+                .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                .limit(1).stream())
+
+            if events:
+                event_ref = events[0].reference
+                audit_data = {
+                    "type": f"conference_{event}",
+                    "conferenceSid": conference_sid,
+                    "conferenceRoom": friendly_name,
+                    "callSid": call_sid,
+                    "leg": leg or "participant",
+                    "loggedBy": "system",
+                    "loggedAt": datetime.utcnow(),
+                }
+
+                # On conference end, record duration if possible
+                if event == "end":
+                    event_data = events[0].to_dict()
+                    bridge_initiated = event_data.get("bridgeCallInitiatedAt")
+                    if bridge_initiated:
+                        if hasattr(bridge_initiated, "timestamp"):
+                            duration = (datetime.utcnow() - datetime.fromtimestamp(bridge_initiated.timestamp())).total_seconds()
+                        else:
+                            duration = (datetime.utcnow() - bridge_initiated).total_seconds()
+                        audit_data["conferenceDurationSeconds"] = duration
+                        event_ref.update({"conferenceDurationSeconds": duration})
+
+                event_ref.collection("audit_trail").document().set(audit_data)
+
+    except Exception as e:
+        logger.error(f"[Conference Event] Error processing: {e}", exc_info=True)
+
+    # Twilio expects 200 OK for status callbacks
+    return Response(content="<Response/>", media_type="application/xml")
 
 
 # ============================================================================
@@ -4273,7 +4625,7 @@ async def twilio_sms_reply(request: Request):
         event_doc.reference.update(update_data)
 
         # Log to audit trail
-        event_doc.reference.collection("audit_trail").doc().set({
+        event_doc.reference.collection("audit_trail").document().set({
             "type": "sms_disposition",
             "disposition": disposition,
             "command": command,
@@ -4659,13 +5011,15 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
 async def redcap_data_entry_trigger(request: Request):
     """
     REDCap Data Entry Trigger endpoint.
-    Called by REDCap whenever a form is saved. Filters to only act when
-    the qualify_for_study instrument is saved with subject_qualified=Yes.
+    Called by REDCap whenever a form is saved. Handles four instruments:
+
+    1. qualify_for_study — generates app participant ID when subject_qualified=Yes
+    2. safety_plan — syncs safety plan data to Firestore on every save/revision
+    3. C-SSRS Screen (weekly) — syncs to Firestore, triggers crisis alert if Q4/Q5/Q6 endorsed
+    4. C-SSRS Pediatric (interview) — syncs to Firestore, triggers crisis alert if intent/plan/behavior endorsed
 
     This endpoint is NOT behind Firebase auth (REDCap can't send auth tokens),
     but it bypasses the IP whitelist (like the scheduler endpoint).
-    It verifies the request by checking the instrument name and fetching
-    the field value from REDCap before acting.
     """
     try:
         # REDCap sends form-encoded POST data
@@ -4692,9 +5046,77 @@ async def redcap_data_entry_trigger(request: Request):
             f"event={event_name}, project={project_id}"
         )
 
-        # Only act on the qualifying instrument
+        # ---- Safety Plan instrument: sync to Firestore on save ----
+        if instrument == "safety_plan":
+            logger.info(f"[REDCap DET] Safety plan saved for record {record_id}, syncing...")
+
+            if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+                raise HTTPException(status_code=500, detail="REDCap API not configured")
+
+            # Look up the participant's app ID from the REDCap record
+            mapping_doc = db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).get()
+            if not mapping_doc.exists:
+                logger.warning(f"[REDCap DET] No mapping for record {record_id}, cannot sync safety plan")
+                return {"status": "ignored", "reason": f"no app ID mapping for record {record_id}"}
+
+            participant_id = mapping_doc.to_dict().get("app_participant_id")
+            if not participant_id:
+                return {"status": "ignored", "reason": "mapping exists but no app_participant_id"}
+
+            # Fetch safety plan fields from REDCap
+            redcap_data = fetch_redcap_safety_plan(record_id, event_name or config.REDCAP_TRIGGER_EVENT)
+
+            # Transform and write to Firestore
+            safety_plan = transform_redcap_safety_plan(redcap_data)
+            safety_plan["syncedAt"] = datetime.utcnow()
+            safety_plan["syncedBy"] = "redcap_trigger"
+            safety_plan["redcapRecordId"] = record_id
+
+            participants_col = config.col("participants")
+            db.collection(participants_col).document(participant_id) \
+                .collection("safety_plan").document("current").set(safety_plan)
+
+            logger.info(
+                f"[REDCap DET] Safety plan synced for participant {participant_id} "
+                f"(REDCap record {record_id})"
+            )
+            return {
+                "status": "safety_plan_synced",
+                "participant_id": participant_id,
+                "redcap_record_id": record_id,
+            }
+
+        # ---- C-SSRS instruments: sync to Firestore + trigger crisis alerts ----
+        if instrument in (CSSRS_SCREEN_INSTRUMENT, CSSRS_PEDIATRIC_INSTRUMENT):
+            logger.info(f"[REDCap DET] C-SSRS ({instrument}) saved for record {record_id}, syncing...")
+
+            if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+                raise HTTPException(status_code=500, detail="REDCap API not configured")
+
+            mapping_doc = db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).get()
+            if not mapping_doc.exists:
+                logger.warning(f"[REDCap DET] No mapping for record {record_id}, cannot sync C-SSRS")
+                return {"status": "ignored", "reason": f"no app ID mapping for record {record_id}"}
+
+            participant_id = mapping_doc.to_dict().get("app_participant_id")
+            if not participant_id:
+                return {"status": "ignored", "reason": "mapping exists but no app_participant_id"}
+
+            result = sync_cssrs_from_redcap(
+                record_id=record_id,
+                instrument=instrument,
+                event_name=event_name or config.REDCAP_TRIGGER_EVENT,
+                participant_id=participant_id,
+                db=db,
+                config=config,
+                logger=logger,
+            )
+
+            return result
+
+        # ---- Qualifying instrument: generate app ID ----
         if instrument != config.REDCAP_TRIGGER_INSTRUMENT:
-            return {"status": "ignored", "reason": f"instrument '{instrument}' is not trigger"}
+            return {"status": "ignored", "reason": f"instrument '{instrument}' is not a trigger"}
 
         # Verify the participant actually qualified by checking the field value in REDCap
         if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
@@ -4789,6 +5211,286 @@ def get_redcap_mappings(request: Request, user: dict = Depends(verify_admin_toke
     except Exception as e:
         logger.error(f"Failed to get REDCap mappings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# REDCap Safety Plan Sync
+# ============================================================================
+
+# REDCap safety_plan instrument field names → Firestore document structure
+REDCAP_SAFETY_PLAN_FIELDS = [
+    "sp_warning_signs_1", "sp_warning_signs_2", "sp_warning_signs_3",
+    "sp_coping_1", "sp_coping_2", "sp_coping_3",
+    "sp_distraction_1", "sp_distraction_1phone",
+    "sp_distraction_2", "sp_distraction_2phone",
+    "sp_distraction_3", "sp_distraction_4",
+    "sp_support1", "sp_support1_phone",
+    "sp_support2", "sp_support2_phone",
+    "sp_support3", "sp_support3_phone",
+    "sp_clinician_name", "sp_clinician_phone", "sp_clinician_er_contact",
+    "sp_local_er_name", "sp_local_er_phone", "sp_local_er_address",
+    "sp_environment1", "sp_environment2",
+    "sp_reasons_live",
+    "subj_county", "sp_er_service_number",
+]
+
+
+def transform_redcap_safety_plan(redcap_data: dict) -> dict:
+    """
+    Transform REDCap safety plan fields into the Firestore document structure
+    that the Flutter app reads from participants/{id}/safety_plan/current.
+    """
+
+    def _nonempty(val):
+        """Return val if it's a non-empty string, else None."""
+        return val.strip() if val and val.strip() else None
+
+    def _collect_list(*values):
+        """Return list of non-empty values."""
+        return [v for v in values if v]
+
+    def _contact(name_val, phone_val):
+        """Build a contact dict if at least name is present."""
+        name = _nonempty(redcap_data.get(name_val, ""))
+        phone = _nonempty(redcap_data.get(phone_val, ""))
+        if name:
+            return {"name": name, "phone": phone}
+        return None
+
+    def _place(field):
+        """Build a place entry."""
+        val = _nonempty(redcap_data.get(field, ""))
+        if val:
+            return {"name": val}
+        return None
+
+    # Step 1: Warning Signs
+    warning_signs = _collect_list(
+        _nonempty(redcap_data.get("sp_warning_signs_1", "")),
+        _nonempty(redcap_data.get("sp_warning_signs_2", "")),
+        _nonempty(redcap_data.get("sp_warning_signs_3", "")),
+    )
+
+    # Step 2: Internal Coping Strategies
+    coping_strategies = _collect_list(
+        _nonempty(redcap_data.get("sp_coping_1", "")),
+        _nonempty(redcap_data.get("sp_coping_2", "")),
+        _nonempty(redcap_data.get("sp_coping_3", "")),
+    )
+
+    # Step 3: People & Places for Distraction
+    distraction_contacts = []
+    for c in [
+        _contact("sp_distraction_1", "sp_distraction_1phone"),
+        _contact("sp_distraction_2", "sp_distraction_2phone"),
+    ]:
+        if c:
+            distraction_contacts.append(c)
+
+    distraction_places = []
+    for p in [_place("sp_distraction_3"), _place("sp_distraction_4")]:
+        if p:
+            distraction_places.append(p)
+
+    # Step 4: Support Network
+    support_contacts = []
+    for c in [
+        _contact("sp_support1", "sp_support1_phone"),
+        _contact("sp_support2", "sp_support2_phone"),
+        _contact("sp_support3", "sp_support3_phone"),
+    ]:
+        if c:
+            support_contacts.append(c)
+
+    # Step 5: Professionals — clinician + local ER
+    clinician_name = _nonempty(redcap_data.get("sp_clinician_name", ""))
+    clinician_phone = _nonempty(redcap_data.get("sp_clinician_phone", ""))
+    clinician_er_contact = _nonempty(redcap_data.get("sp_clinician_er_contact", ""))
+
+    local_er_name = _nonempty(redcap_data.get("sp_local_er_name", ""))
+    local_er_phone = _nonempty(redcap_data.get("sp_local_er_phone", ""))
+    local_er_address = _nonempty(redcap_data.get("sp_local_er_address", ""))
+
+    # Step 6: Environment Safety
+    environment_safety = _collect_list(
+        _nonempty(redcap_data.get("sp_environment1", "")),
+        _nonempty(redcap_data.get("sp_environment2", "")),
+    )
+
+    # Step 7: Reasons for Living
+    reasons_to_live = _nonempty(redcap_data.get("sp_reasons_live", ""))
+
+    # Additional fields (hidden in REDCap, used by research team / app)
+    county = _nonempty(redcap_data.get("subj_county", ""))
+    er_service_number = _nonempty(redcap_data.get("sp_er_service_number", ""))
+
+    return {
+        "warningSigns": warning_signs,
+        "copingStrategies": coping_strategies,
+        "distractionContacts": distraction_contacts,
+        "distractionPlaces": distraction_places,
+        "supportContacts": support_contacts,
+        "clinicianName": clinician_name,
+        "clinicianPhone": clinician_phone,
+        "clinicianErContact": clinician_er_contact,
+        "localErName": local_er_name,
+        "localErPhone": local_er_phone,
+        "localErAddress": local_er_address,
+        "environmentSafety": environment_safety,
+        "reasonsToLive": reasons_to_live,
+        "county": county,
+        "erServiceNumber": er_service_number,
+    }
+
+
+def fetch_redcap_safety_plan(record_id: str, event_name: str = None) -> dict:
+    """Fetch safety plan fields from REDCap for a given record."""
+    if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+        raise Exception("REDCap API not configured")
+
+    resp = http_requests.post(config.REDCAP_API_URL, data={
+        "token": config.REDCAP_API_TOKEN,
+        "content": "record",
+        "format": "json",
+        "records[0]": record_id,
+        **{f"fields[{i}]": f for i, f in enumerate(REDCAP_SAFETY_PLAN_FIELDS)},
+        "events[0]": event_name or config.REDCAP_TRIGGER_EVENT,
+        "returnFormat": "json",
+    })
+
+    if resp.status_code != 200:
+        raise Exception(f"REDCap API error: {resp.status_code} {resp.text}")
+
+    records = resp.json()
+    if not records:
+        raise Exception(f"No record found in REDCap for record_id={record_id}")
+
+    return records[0]
+
+
+@app.post("/api/admin/safety-plan/sync/{participant_id}")
+@limiter.limit("30/minute")
+def sync_safety_plan(
+    request: Request,
+    participant_id: str,
+    user: dict = Depends(verify_firebase_token),
+):
+    """
+    Fetch safety plan from REDCap and write to Firestore for a participant.
+    Looks up the REDCap record_id via the redcap_mappings collection.
+    """
+    try:
+        # Look up REDCap record_id from participant's app ID
+        # Check redcap_mappings for a mapping where app_participant_id == participant_id
+        mappings = list(db.collection(REDCAP_MAPPINGS_COLLECTION)
+            .where("app_participant_id", "==", participant_id)
+            .limit(1).stream())
+
+        if not mappings:
+            # Also check valid_participants which stores redcap_record_id
+            vp_doc = db.collection(VALID_PARTICIPANTS_COLLECTION).document(participant_id).get()
+            if vp_doc.exists and vp_doc.to_dict().get("redcap_record_id"):
+                redcap_record_id = vp_doc.to_dict()["redcap_record_id"]
+            else:
+                raise HTTPException(status_code=404, detail=f"No REDCap mapping found for participant {participant_id}")
+        else:
+            redcap_record_id = mappings[0].id
+
+        # Fetch from REDCap
+        redcap_data = fetch_redcap_safety_plan(redcap_record_id)
+        logger.info(f"[SafetyPlan] Fetched {len(redcap_data)} fields from REDCap for record {redcap_record_id}")
+
+        # Transform to Firestore format
+        safety_plan = transform_redcap_safety_plan(redcap_data)
+        safety_plan["syncedAt"] = datetime.utcnow()
+        safety_plan["syncedBy"] = user.get("email")
+        safety_plan["redcapRecordId"] = redcap_record_id
+
+        # Write to Firestore
+        participants_col = config.col("participants")
+        db.collection(participants_col).document(participant_id) \
+            .collection("safety_plan").document("current").set(safety_plan)
+
+        logger.info(f"[SafetyPlan] Synced safety plan for participant {participant_id} (REDCap record {redcap_record_id})")
+
+        return {
+            "status": "synced",
+            "participant_id": participant_id,
+            "redcap_record_id": redcap_record_id,
+            "fields_populated": sum(1 for v in safety_plan.values() if v),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[SafetyPlan] Sync failed for {participant_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/safety-plan/sync-all")
+@limiter.limit("5/minute")
+def sync_all_safety_plans(
+    request: Request,
+    user: dict = Depends(verify_admin_token),
+):
+    """
+    Sync safety plans for ALL participants that have REDCap mappings.
+    Useful for bulk initial sync or after REDCap data is updated.
+    """
+    try:
+        results = {"synced": 0, "skipped": 0, "errors": []}
+        participants_col = config.col("participants")
+
+        for mapping_doc in db.collection(REDCAP_MAPPINGS_COLLECTION).stream():
+            redcap_record_id = mapping_doc.id
+            mapping_data = mapping_doc.to_dict()
+            participant_id = mapping_data.get("app_participant_id")
+
+            if not participant_id:
+                results["skipped"] += 1
+                continue
+
+            try:
+                redcap_data = fetch_redcap_safety_plan(redcap_record_id)
+                safety_plan = transform_redcap_safety_plan(redcap_data)
+                safety_plan["syncedAt"] = datetime.utcnow()
+                safety_plan["syncedBy"] = user.get("email")
+                safety_plan["redcapRecordId"] = redcap_record_id
+
+                db.collection(participants_col).document(participant_id) \
+                    .collection("safety_plan").document("current").set(safety_plan)
+
+                results["synced"] += 1
+            except Exception as e:
+                results["errors"].append({
+                    "participant_id": participant_id,
+                    "redcap_record_id": redcap_record_id,
+                    "error": str(e),
+                })
+
+        logger.info(
+            f"[SafetyPlan] Bulk sync by {user.get('email')}: "
+            f"{results['synced']} synced, {results['skipped']} skipped, "
+            f"{len(results['errors'])} errors"
+        )
+        return results
+
+    except Exception as e:
+        logger.error(f"[SafetyPlan] Bulk sync failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# C-SSRS Sync & Risk Assessment (modular — see cssrs_sync.py, risk_assessment.py)
+# ============================================================================
+
+from cssrs_sync import sync_cssrs_from_redcap, CSSRS_SCREEN_INSTRUMENT, CSSRS_PEDIATRIC_INSTRUMENT
+from risk_assessment import (
+    register_risk_assessment_routes,
+    auto_send_risk_pdf_if_needed,
+)
+
+register_risk_assessment_routes(app, db, limiter, verify_firebase_token, config, logger)
 
 
 # ============================================================================

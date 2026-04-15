@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../storage/database/database.dart';
 import '../../ocr/services/ocr_service.dart';
+import '../../settings/services/pause_service.dart';
 import 'upload_service.dart';
 
 /// Background sync service that automatically syncs data every 30 seconds.
@@ -15,6 +16,7 @@ class BackgroundSyncService {
   bool _isSyncing = false;
   bool _isProcessingOcr = false;
   bool _isRunning = false;
+  bool _userPaused = false;
   int _syncCycleCount = 0;
 
   // Sync interval
@@ -46,6 +48,13 @@ class BackgroundSyncService {
 
   /// Check if background service is running
   bool get isRunning => _isRunning;
+
+  /// Temporarily pause sync (e.g., 5-min privacy mode).
+  bool get isUserPaused => _userPaused;
+  void setUserPaused(bool paused) {
+    _userPaused = paused;
+    print('[BackgroundSync] User pause: $paused');
+  }
 
   /// Start the background sync service
   void start() {
@@ -95,6 +104,9 @@ class BackgroundSyncService {
   Future<void> _runSyncCycle() async {
     if (_isSyncing) {
       print('[BackgroundSync] Sync already in progress, skipping');
+      return;
+    }
+    if (_userPaused || PauseService().isPaused) {
       return;
     }
 

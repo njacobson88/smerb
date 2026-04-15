@@ -8,6 +8,7 @@ import DayDetailScreen from './DayDetailScreen';
 import Login, { auth, signOut, onAuthStateChanged, getIdToken } from './Login';
 import UserManagement from './UserManagement';
 import InstallPage from './InstallPage';
+import RiskAssessmentScreen from './RiskAssessmentScreen';
 
 // API Configuration
 // In production, REACT_APP_API_URL should point to the Cloud Run service
@@ -179,6 +180,11 @@ const SocialScopeDashboard = () => {
     setActiveTab('day');
   };
 
+  const goToRiskAssessment = (participantId) => {
+    setSelectedParticipant(participantId);
+    setActiveTab('risk-assessment');
+  };
+
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Dev Environment Banner */}
@@ -269,6 +275,14 @@ const SocialScopeDashboard = () => {
             goToOverallView={goToOverallView}
             goToParticipantView={goToParticipantView}
             goToDayView={goToDayView}
+            goToRiskAssessment={goToRiskAssessment}
+          />
+        )}
+
+        {activeTab === 'risk-assessment' && selectedParticipant && (
+          <RiskAssessmentScreen
+            participantId={selectedParticipant}
+            goToParticipantView={goToParticipantView}
           />
         )}
 
@@ -287,7 +301,7 @@ const SocialScopeDashboard = () => {
         )}
 
         {activeTab === 'alerts' && (
-          <AlertsScreen goToParticipantView={goToParticipantView} />
+          <AlertsScreen goToParticipantView={goToParticipantView} goToRiskAssessment={goToRiskAssessment} />
         )}
 
         {activeTab === 'users' && (
@@ -892,7 +906,7 @@ const ExportScreen = () => {
 
 
 // Alerts Screen Component
-const AlertsScreen = ({ goToParticipantView }) => {
+const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -908,6 +922,12 @@ const AlertsScreen = ({ goToParticipantView }) => {
 
   // Follow-ups state
   const [followups, setFollowups] = useState([]);
+
+  // Conference config state (988 warm transfer settings)
+  const [conferenceConfig, setConferenceConfig] = useState(null);
+  const [conferenceEditing, setConferenceEditing] = useState(false);
+  const [conferenceForm, setConferenceForm] = useState({ bridge_number: '', send_digits: '', enabled: true });
+  const [conferenceSaving, setConferenceSaving] = useState(false);
 
   // Disposition logging state
   const [expandedAlert, setExpandedAlert] = useState(null);
@@ -952,14 +972,38 @@ const AlertsScreen = ({ goToParticipantView }) => {
     } catch (e) { /* non-admin may not have access, that's ok */ }
   }, []);
 
+  const fetchConferenceConfig = React.useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/admin/conference-config`);
+      if (res.ok) { const data = await res.json(); setConferenceConfig(data.config || null); }
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  const saveConferenceConfig = async () => {
+    setConferenceSaving(true);
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/admin/conference-config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(conferenceForm),
+      });
+      if (res.ok) {
+        await fetchConferenceConfig();
+        setConferenceEditing(false);
+      }
+    } catch (e) { /* ignore */ }
+    finally { setConferenceSaving(false); }
+  };
+
   React.useEffect(() => {
     fetchAlerts();
     fetchRoster();
     fetchFollowups();
     fetchDashboardUsers();
+    fetchConferenceConfig();
     const interval = setInterval(fetchAlerts, 2 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [fetchAlerts, fetchRoster, fetchFollowups, fetchDashboardUsers]);
+  }, [fetchAlerts, fetchRoster, fetchFollowups, fetchDashboardUsers, fetchConferenceConfig]);
 
   const saveRosterRole = async (role) => {
     setRosterSaving(true);
@@ -1104,6 +1148,104 @@ const AlertsScreen = ({ goToParticipantView }) => {
         </div>
       </div>
 
+      {/* 988 Conference Settings */}
+      {conferenceConfig && (
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h2 className="text-lg font-bold text-gray-800 mb-3 flex items-center">
+            <AlertTriangle className="mr-2 text-purple-500" size={20} />
+            988 Conference Settings
+          </h2>
+          <p className="text-gray-500 text-xs mb-3">
+            Warm transfer configuration for connecting participants to 988 via Twilio Conference.
+            When a participant presses 2 or 3 during a safety IVR call, they are placed in a conference
+            and the bridge number is dialed separately to connect them.
+          </p>
+          {conferenceEditing ? (
+            <div className="space-y-3 max-w-lg">
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Bridge Number (988 dedicated line)</label>
+                <input
+                  value={conferenceForm.bridge_number}
+                  onChange={e => setConferenceForm(f => ({...f, bridge_number: e.target.value}))}
+                  placeholder="+16036467037"
+                  className="w-full border rounded px-3 py-2 text-sm"
+                />
+                <p className="text-xs text-gray-400 mt-1">Full phone number with country code (e.g., +16036467037)</p>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Send Digits (DTMF sequence)</label>
+                <input
+                  value={conferenceForm.send_digits}
+                  onChange={e => setConferenceForm(f => ({...f, send_digits: e.target.value}))}
+                  placeholder="ww{phone}ww{area_code}"
+                  className="w-full border rounded px-3 py-2 text-sm font-mono"
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  DTMF to navigate 988's menu. Use w for 0.5s pause, W for 1s pause.
+                  {'{phone}'} and {'{area_code}'} are replaced with participant data.
+                  Leave blank if no menu navigation needed.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={conferenceForm.enabled}
+                  onChange={e => setConferenceForm(f => ({...f, enabled: e.target.checked}))}
+                  id="conference-enabled"
+                  className="rounded"
+                />
+                <label htmlFor="conference-enabled" className="text-sm text-gray-700">
+                  Enable conference warm transfer (disable to fall back to cold transfer)
+                </label>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button onClick={saveConferenceConfig} disabled={conferenceSaving || !conferenceForm.bridge_number}
+                  className="px-4 py-2 bg-purple-600 text-white text-sm rounded hover:bg-purple-700 disabled:opacity-50">
+                  {conferenceSaving ? 'Saving...' : 'Save'}
+                </button>
+                <button onClick={() => setConferenceEditing(false)}
+                  className="px-4 py-2 bg-gray-300 text-gray-700 text-sm rounded hover:bg-gray-400">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <span className={`inline-block w-2 h-2 rounded-full ${conferenceConfig.enabled ? 'bg-green-500' : 'bg-gray-400'}`}></span>
+                <span className="text-sm font-medium text-gray-700">
+                  {conferenceConfig.enabled ? 'Enabled' : 'Disabled (using cold transfer)'}
+                </span>
+              </div>
+              <div className="text-sm text-gray-600">
+                <span className="font-medium">Bridge Number:</span>{' '}
+                <span className="font-mono">{conferenceConfig.bridge_number || '(not set)'}</span>
+              </div>
+              {conferenceConfig.send_digits && (
+                <div className="text-sm text-gray-600">
+                  <span className="font-medium">Send Digits:</span>{' '}
+                  <span className="font-mono">{conferenceConfig.send_digits}</span>
+                </div>
+              )}
+              {conferenceConfig.updatedBy && (
+                <div className="text-xs text-gray-400">
+                  Last updated by {conferenceConfig.updatedBy}
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  setConferenceForm({
+                    bridge_number: conferenceConfig.bridge_number || '',
+                    send_digits: conferenceConfig.send_digits || '',
+                    enabled: conferenceConfig.enabled !== false,
+                  });
+                  setConferenceEditing(true);
+                }}
+                className="mt-2 text-xs text-purple-600 hover:text-purple-800"
+              >Edit</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Upcoming Follow-ups */}
       {followups.length > 0 && (
         <div className="bg-white rounded-lg shadow-md p-6">
@@ -1195,7 +1337,7 @@ const AlertsScreen = ({ goToParticipantView }) => {
                   >
                     <div>
                       <span className="font-medium text-gray-800">Participant: </span>
-                      <button onClick={(e) => { e.stopPropagation(); goToParticipantView(alert.participantId); }} className="text-blue-600 hover:underline">
+                      <button onClick={(e) => { e.stopPropagation(); goToRiskAssessment(alert.participantId); }} className="text-blue-600 hover:underline" title="View Risk Assessment">
                         {alert.participantId}
                       </button>
                       <span className="text-gray-500 ml-4">{alert.date}</span>

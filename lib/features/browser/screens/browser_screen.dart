@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import '../../../features/capture/services/capture_service.dart';
 import '../../../features/capture/services/screenshot_service.dart';
 import '../../../features/storage/database/database.dart';
@@ -53,14 +55,31 @@ class _BrowserScreenState extends State<BrowserScreen> {
   bool _redditLoggedIn = false;
   bool _twitterLoggedIn = false;
 
+  // Emulator detection (disable HW accel to avoid GPU crash on emulator)
+  bool _isEmulator = false;
+  bool _ready = false;
+
   @override
   void initState() {
     super.initState();
     _checkinService = CheckinService(database: widget.database);
     _checkinService.participantId = widget.captureService.participantId;
     _checkinService.initialize();
+    _initializeAll();
+  }
+
+  Future<void> _initializeAll() async {
+    // Detect emulator BEFORE building the WebView
+    if (Platform.isAndroid) {
+      final info = await DeviceInfoPlugin().androidInfo;
+      _isEmulator = !info.isPhysicalDevice;
+      if (_isEmulator) {
+        print('[Browser] Running on emulator - HW acceleration disabled');
+      }
+    }
     _initializeCookies();
     _loadLoginStatus();
+    if (mounted) setState(() => _ready = true);
   }
 
   @override
@@ -371,9 +390,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ),
 
-          // WebView
+          // WebView (wait for emulator detection before creating)
           Expanded(
-            child: InAppWebView(
+            child: !_ready
+              ? const Center(child: CircularProgressIndicator())
+              : InAppWebView(
               initialUrlRequest: URLRequest(
                 url: WebUri(_currentUrl),
               ),
@@ -384,6 +405,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 useShouldOverrideUrlLoading: false,
                 mediaPlaybackRequiresUserGesture: false,
                 allowsInlineMediaPlayback: true,
+                // Use hybrid composition on emulator to avoid Chromium GPU crash
+                useHybridComposition: _isEmulator,
                 userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                     'AppleWebKit/605.1.15 (KHTML, like Gecko) '
                     'Version/17.2 Safari/605.1.15',
@@ -520,24 +543,30 @@ class _BrowserScreenState extends State<BrowserScreen> {
               ],
             ),
             child: SafeArea(
-              child: Row(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.arrow_back),
+                    icon: const Icon(Icons.arrow_back, size: 20),
                     onPressed: _goBack,
                     tooltip: 'Back',
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: EdgeInsets.zero,
                   ),
                   IconButton(
-                    icon: const Icon(Icons.arrow_forward),
+                    icon: const Icon(Icons.arrow_forward, size: 20),
                     onPressed: _goForward,
                     tooltip: 'Forward',
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: EdgeInsets.zero,
                   ),
                   // Check-in button
                   GestureDetector(
                     onTap: _openCheckin,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                       decoration: BoxDecoration(
                         color: const Color(0xFF4A6CF7),
                         borderRadius: BorderRadius.circular(16),
@@ -545,13 +574,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.check_circle_outline, color: Colors.white, size: 18),
-                          SizedBox(width: 4),
+                          Icon(Icons.check_circle_outline, color: Colors.white, size: 16),
+                          SizedBox(width: 3),
                           Text(
                             'Check-in',
                             style: TextStyle(
                               color: Colors.white,
-                              fontSize: 12,
+                              fontSize: 11,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
@@ -565,10 +594,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: IconButton(
-                      icon: const Icon(Icons.reddit),
+                      icon: const Icon(Icons.reddit, size: 22),
                       onPressed: _navigateToReddit,
                       tooltip: 'Reddit',
                       color: _currentPlatform == 'reddit' ? const Color(0xFF4A6CF7) : null,
+                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                      padding: EdgeInsets.zero,
                     ),
                   ),
                   Container(
@@ -577,28 +608,37 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: IconButton(
-                      icon: const Text('𝕏', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      icon: const Text('𝕏', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                       onPressed: _navigateToTwitter,
                       tooltip: 'X (Twitter)',
                       color: _currentPlatform == 'twitter' ? const Color(0xFF4A6CF7) : null,
+                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                      padding: EdgeInsets.zero,
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.refresh),
+                    icon: const Icon(Icons.refresh, size: 20),
                     onPressed: _reload,
                     tooltip: 'Reload',
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: EdgeInsets.zero,
                   ),
                   IconButton(
-                    icon: const Icon(Icons.health_and_safety),
+                    icon: const Icon(Icons.health_and_safety, size: 20),
                     onPressed: _openSafetyPlan,
                     tooltip: 'Safety Plan',
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: EdgeInsets.zero,
                   ),
                   IconButton(
-                    icon: const Icon(Icons.settings),
+                    icon: const Icon(Icons.settings, size: 20),
                     onPressed: _openSettings,
                     tooltip: 'Settings',
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: EdgeInsets.zero,
                   ),
                 ],
+              ),
               ),
             ),
           ),

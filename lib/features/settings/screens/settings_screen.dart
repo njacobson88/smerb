@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../checkin/services/checkin_service.dart';
+import '../services/pause_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   final CheckinService checkinService;
@@ -16,6 +18,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _notificationsEnabled = true;
   bool _loaded = false;
 
+  // Pause data collection state
+  final PauseService _pauseService = PauseService();
+  bool _isPaused = false;
+  Timer? _countdownTimer;
+  Duration _remaining = Duration.zero;
+
   @override
   void initState() {
     super.initState();
@@ -28,6 +36,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final parts = wakeStr.split(':');
     final notifs = prefs.getBool('checkin_notifications_enabled') ?? true;
 
+    _isPaused = _pauseService.isPaused;
+    _remaining = _pauseService.remainingTime;
+    if (_isPaused) _startCountdown();
+
     setState(() {
       _wakeUpTime = TimeOfDay(
         hour: int.parse(parts[0]),
@@ -36,6 +48,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _notificationsEnabled = notifs;
       _loaded = true;
     });
+  }
+
+  Future<void> _togglePause() async {
+    if (_isPaused) {
+      await _pauseService.resume();
+      _countdownTimer?.cancel();
+      setState(() {
+        _isPaused = false;
+        _remaining = Duration.zero;
+      });
+    } else {
+      await _pauseService.pause();
+      _startCountdown();
+      setState(() {
+        _isPaused = true;
+        _remaining = PauseService.pauseDuration;
+      });
+    }
+  }
+
+  void _startCountdown() {
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final rem = _pauseService.remainingTime;
+      if (rem.inSeconds <= 0) {
+        _countdownTimer?.cancel();
+        if (mounted) setState(() { _isPaused = false; _remaining = Duration.zero; });
+      } else {
+        if (mounted) setState(() { _remaining = rem; });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _saveWakeUpTime(TimeOfDay time) async {
@@ -205,6 +254,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
             activeColor: const Color(0xFF4A6CF7),
             onChanged: _toggleNotifications,
           ),
+          const SizedBox(height: 24),
+          // Pause data collection — buried at bottom of settings
+          _buildSectionHeader('PRIVACY'),
+          ListTile(
+            leading: Icon(
+              _isPaused ? Icons.pause_circle_filled : Icons.shield_outlined,
+              color: _isPaused ? Colors.orange : Colors.grey[400],
+            ),
+            title: Text(
+              _isPaused ? 'Data Collection Paused' : 'Pause Data Collection',
+              style: TextStyle(
+                color: _isPaused ? Colors.orange[800] : Colors.grey[700],
+              ),
+            ),
+            subtitle: Text(
+              _isPaused
+                  ? 'Resumes in ${_remaining.inMinutes}:${(_remaining.inSeconds % 60).toString().padLeft(2, '0')}'
+                  : 'Temporarily stop screenshots and uploads for 5 minutes',
+              style: TextStyle(
+                color: _isPaused ? Colors.orange[600] : Colors.grey[500],
+                fontSize: 13,
+              ),
+            ),
+            trailing: TextButton(
+              onPressed: _togglePause,
+              child: Text(
+                _isPaused ? 'Resume' : 'Pause',
+                style: TextStyle(
+                  color: _isPaused ? Colors.green : Colors.grey[600],
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 32),
         ],
       ),
     );

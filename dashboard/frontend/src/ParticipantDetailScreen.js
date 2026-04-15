@@ -32,7 +32,8 @@ const ParticipantDetailScreen = ({
   participantList,
   goToOverallView,
   goToParticipantView,
-  goToDayView
+  goToDayView,
+  goToRiskAssessment,
 }) => {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1118,6 +1119,19 @@ const ParticipantDetailScreen = ({
           </div>
         </div>
       </div>
+
+      {/* Risk Assessment Summary — navigates to full page */}
+      <button onClick={() => goToRiskAssessment(currentParticipantId)}
+        className="w-full bg-white rounded-lg shadow p-4 hover:bg-red-50 hover:border-red-300 border-2 border-transparent transition-colors flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <AlertTriangle size={22} className="text-red-500" />
+          <div className="text-left">
+            <div className="font-semibold text-gray-800">Risk Assessment Summary</div>
+            <div className="text-xs text-gray-500">EMA, C-SSRS, safety plan, contact info, alert history</div>
+          </div>
+        </div>
+        <ChevronRight size={20} className="text-gray-400" />
+      </button>
 
       {/* Loading State */}
       {loading && (
