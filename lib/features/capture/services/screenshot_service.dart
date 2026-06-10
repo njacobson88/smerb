@@ -61,6 +61,14 @@ class ScreenshotService {
   String? _lastHtmlHash;
   String? _lastHtmlCaptureId;
 
+  // Screenshot dedupe: content hash → saved file path. The consecutive
+  // _hasChanged check misses screens revisited later (login pages, profile
+  // pages, idle screens) — ~18% of stored screenshots were exact duplicates.
+  // Reusing the file path keeps the full event timeline (every viewing is
+  // still recorded) while storing the identical bytes only once.
+  final Map<String, ({String path, String eventId})> _jpegHashToPath = {};
+  static const int _maxDedupeEntries = 5000;
+
   // Capture interval — 3 seconds balances data resolution vs storage/performance
   static const int captureIntervalSeconds = 3;
 
@@ -100,6 +108,7 @@ class ScreenshotService {
     _lastScreenshot = null;
     _lastHtmlHash = null;
     _lastHtmlCaptureId = null;
+    _jpegHashToPath.clear();
     print('[ScreenshotService] Stopped screenshot capture');
   }
 
@@ -220,20 +229,34 @@ class ScreenshotService {
       // Generate unique filename
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final filename = 'screenshot_$timestamp.jpg'; // Changed to .jpg
-      final filePath = '${screenshotsDir.path}/$filename';
+      String filePath = '${screenshotsDir.path}/$filename';
 
       // Downscale from Retina resolution and compress to JPEG
       final compressedBytes = await _compressToJpeg(screenshot, quality: 70);
 
-      // Save screenshot to file
-      final file = File(filePath);
-      await file.writeAsBytes(compressedBytes);
+      // Dedupe: identical bytes already saved this session → reuse that file.
+      // The event below is still recorded, so the timeline is fully preserved.
+      final contentHash = sha256.convert(compressedBytes).toString();
+      final existing = _jpegHashToPath[contentHash];
+      final isDuplicate = existing != null;
+      final eventId = const Uuid().v4();
+
+      if (isDuplicate) {
+        filePath = existing.path;
+      } else {
+        final file = File(filePath);
+        await file.writeAsBytes(compressedBytes);
+        if (_jpegHashToPath.length >= _maxDedupeEntries) {
+          _jpegHashToPath.remove(_jpegHashToPath.keys.first);
+        }
+        _jpegHashToPath[contentHash] = (path: filePath, eventId: eventId);
+      }
 
       // Calculate compression ratio for logging
       final compressionRatio = ((1 - (compressedBytes.length / screenshot.length)) * 100).toStringAsFixed(1);
 
       // Record in database
-      final eventId = const Uuid().v4();
+      final dedupField = isDuplicate ? ', "dedupOfEventId": "${existing.eventId}"' : '';
       final event = EventsCompanion(
         id: drift.Value(eventId),
         sessionId: drift.Value(sessionId),
@@ -242,12 +265,14 @@ class ScreenshotService {
         timestamp: drift.Value(DateTime.now()),  // Local time for participant
         platform: drift.Value(_currentPlatform),
         url: drift.Value(url?.toString()),
-        data: drift.Value('{"filePath": "$filePath", "timestamp": $timestamp, "fileSize": ${compressedBytes.length}, "originalSize": ${screenshot.length}, "compressionRatio": "$compressionRatio%"}'),
+        data: drift.Value('{"filePath": "$filePath", "timestamp": $timestamp, "fileSize": ${compressedBytes.length}, "originalSize": ${screenshot.length}, "compressionRatio": "$compressionRatio%", "contentHash": "$contentHash", "dedup": $isDuplicate$dedupField}'),
       );
 
       await database.insertEvent(event);
 
-      print('[ScreenshotService] Saved screenshot: $filename (${compressedBytes.length} bytes, $compressionRatio% compression)');
+      print('[ScreenshotService] Saved screenshot: ${filePath.split('/').last} '
+          '(${compressedBytes.length} bytes, $compressionRatio% compression'
+          '${isDuplicate ? ", deduped" : ""})');
 
       // Capture HTML from the page
       await _captureHtml(

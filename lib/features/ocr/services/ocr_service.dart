@@ -60,6 +60,31 @@ class OcrService {
         return null;
       }
 
+      // Deduped screenshot: identical bytes → identical text. Copy the
+      // original event's OCR result instead of re-running OCR (and the
+      // shared file may already have been uploaded and deleted).
+      final dedupOfEventId = eventData['dedupOfEventId'] as String?;
+      if (dedupOfEventId != null) {
+        final original = await database.getOcrResultForEvent(dedupOfEventId);
+        if (original != null) {
+          final result = OcrResultsCompanion(
+            id: Value(const Uuid().v4()),
+            eventId: Value(event.id),
+            participantId: Value(event.participantId),
+            sessionId: Value(event.sessionId),
+            extractedText: Value(original.extractedText),
+            wordCount: Value(original.wordCount),
+            processingTimeMs: const Value(0),
+            capturedAt: Value(event.timestamp),
+          );
+          await database.insertOcrResult(result);
+          print('[OcrService] Copied OCR from deduped original $dedupOfEventId');
+          return database.getOcrResultForEvent(event.id);
+        }
+        // Original OCR not ready yet — fall through to normal extraction
+        // (works while the shared file still exists locally)
+      }
+
       final stopwatch = Stopwatch()..start();
 
       // Extract text

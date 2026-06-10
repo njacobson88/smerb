@@ -1242,6 +1242,8 @@ exports.optimizeScreenshot = onObjectFinalized(
         destination: name,
         metadata: {
           contentType: "image/jpeg",
+          // Immutable content — long browser cache cuts repeat-view egress
+          cacheControl: "private, max-age=31536000, immutable",
           metadata: { ...(object.metadata || {}), losslessOptimized: "true" },
         },
       });

@@ -20,6 +20,9 @@ class UploadService {
   int _screenshotsUploaded = 0;
   int _totalBytesUploaded = 0;
 
+  // Storage paths already uploaded (deduped events share one object)
+  final Map<String, String> _uploadedUrlCache = {};
+
   /// Total bytes uploaded in the current/last sync cycle
   int get totalBytesUploaded => _totalBytesUploaded;
 
@@ -238,22 +241,42 @@ class UploadService {
       return null;
     }
 
+    // Deduped events share a filePath — the same storage object backs all of
+    // them. Reuse the URL if this path was already uploaded this run.
+    final filename = filePath.split('/').last;
+    final storagePath = 'screenshots/${event.participantId}/${event.sessionId}/$filename';
+    final cachedUrl = _uploadedUrlCache[storagePath];
+    if (cachedUrl != null) {
+      return cachedUrl;
+    }
+
     final file = File(filePath);
     if (!await file.exists()) {
-      print('[UploadService] Screenshot file not found: $filePath');
-      return null;
+      // The shared file may have been deleted after its first upload (or
+      // pruned after sync) — reuse the existing Storage object if present.
+      try {
+        final url = await _storage
+            .ref()
+            .child(storagePath)
+            .getDownloadURL()
+            .timeout(const Duration(seconds: 10));
+        _uploadedUrlCache[storagePath] = url;
+        print('[UploadService] Reusing existing storage object: $storagePath');
+        return url;
+      } catch (_) {
+        print('[UploadService] Screenshot file not found: $filePath');
+        return null;
+      }
     }
 
     try {
-      // Upload path: screenshots/{participantId}/{sessionId}/{filename}
-      final filename = filePath.split('/').last;
-      final storagePath = 'screenshots/${event.participantId}/${event.sessionId}/$filename';
-
       final ref = _storage.ref().child(storagePath);
 
-      // Upload with metadata
+      // Upload with metadata. Screenshots are immutable — long cache lifetime
+      // lets dashboard browsers cache them, cutting repeat-view egress.
       final metadata = SettableMetadata(
         contentType: 'image/jpeg',
+        cacheControl: 'private, max-age=31536000, immutable',
         customMetadata: {
           'eventId': event.id,
           'sessionId': event.sessionId,
@@ -275,6 +298,7 @@ class UploadService {
 
       final downloadUrl = await snapshot.ref.getDownloadURL();
       _totalBytesUploaded += snapshot.totalBytes;
+      _uploadedUrlCache[storagePath] = downloadUrl;
 
       print('[UploadService] Uploaded screenshot: $storagePath (${snapshot.totalBytes} bytes)');
 
@@ -455,6 +479,7 @@ class UploadService {
     final metadata = SettableMetadata(
       contentType: isGzipped ? 'application/gzip' : 'text/html',
       contentEncoding: isGzipped ? 'gzip' : null,
+      cacheControl: 'private, max-age=31536000, immutable',
       customMetadata: {
         'eventId': capture.eventId,
         'sessionId': capture.sessionId,
