@@ -23,6 +23,10 @@ class UploadService {
   // Storage paths already uploaded (deduped events share one object)
   final Map<String, String> _uploadedUrlCache = {};
 
+  // Local files whose upload succeeded — deleted only after the event doc
+  // write lands, so a crash in between can't strand the event unsyncable
+  final Map<String, bool> _pendingLocalDeletes = {};
+
   /// Total bytes uploaded in the current/last sync cycle
   int get totalBytesUploaded => _totalBytesUploaded;
 
@@ -211,9 +215,14 @@ class UploadService {
       'syncedAt': FieldValue.serverTimestamp(),
     };
 
-    // Add storage URL for screenshots
+    // Add storage URL + durable path for screenshots
     if (storageUrl != null) {
       docData['screenshotUrl'] = storageUrl;
+      final sp = eventData['filePath'] as String?;
+      if (sp != null) {
+        docData['screenshotStoragePath'] =
+            'screenshots/${event.participantId}/${event.sessionId}/${sp.split('/').last}';
+      }
     }
 
     // Add OCR data for screenshots
@@ -229,6 +238,16 @@ class UploadService {
         .collection('events')
         .doc(event.id)
         .set(docData);
+
+    // Event doc is durable — now the local screenshot file can go
+    final uploadedPath = eventData['filePath'] as String?;
+    if (uploadedPath != null && _pendingLocalDeletes.remove(uploadedPath) == true) {
+      try {
+        await File(uploadedPath).delete();
+      } catch (e) {
+        print('[UploadService] Warning: could not delete local screenshot: $e');
+      }
+    }
 
     print('[UploadService] Uploaded event: ${event.eventType} (${event.id})');
   }
@@ -254,19 +273,29 @@ class UploadService {
     if (!await file.exists()) {
       // The shared file may have been deleted after its first upload (or
       // pruned after sync) — reuse the existing Storage object if present.
-      try {
-        final url = await _storage
-            .ref()
-            .child(storagePath)
-            .getDownloadURL()
-            .timeout(const Duration(seconds: 10));
-        _uploadedUrlCache[storagePath] = url;
-        print('[UploadService] Reusing existing storage object: $storagePath');
-        return url;
-      } catch (_) {
-        print('[UploadService] Screenshot file not found: $filePath');
-        return null;
+      final candidates = <String>[
+        storagePath,
+        if (storagePath.endsWith('.jpg'))
+          // The hourly Cloud Function converts .jpg to .jxl and removes the
+          // original — the bytes live on under the twin path.
+          '${storagePath.substring(0, storagePath.length - 4)}.jxl',
+      ];
+      for (final candidate in candidates) {
+        try {
+          final url = await _storage
+              .ref()
+              .child(candidate)
+              .getDownloadURL()
+              .timeout(const Duration(seconds: 10));
+          _uploadedUrlCache[storagePath] = url;
+          print('[UploadService] Reusing existing storage object: $candidate');
+          return url;
+        } catch (_) {
+          // try next candidate
+        }
       }
+      print('[UploadService] Screenshot file not found: $filePath');
+      return null;
     }
 
     try {
@@ -299,15 +328,9 @@ class UploadService {
       final downloadUrl = await snapshot.ref.getDownloadURL();
       _totalBytesUploaded += snapshot.totalBytes;
       _uploadedUrlCache[storagePath] = downloadUrl;
+      _pendingLocalDeletes[filePath] = true;
 
       print('[UploadService] Uploaded screenshot: $storagePath (${snapshot.totalBytes} bytes)');
-
-      // Delete local file after confirmed upload
-      try {
-        await file.delete();
-      } catch (e) {
-        print('[UploadService] Warning: could not delete local screenshot: $e');
-      }
 
       return downloadUrl;
     } catch (e) {
@@ -506,11 +529,16 @@ class UploadService {
         .collection('events')
         .doc(capture.eventId)
         .set({
-      'html.storageUrl': downloadUrl,
-      'html.charCount': capture.charCount,
-      'html.hash': capture.htmlHash,
-      'html.changed': true,
-      'html.capturedAt': Timestamp.fromDate(capture.capturedAt),
+      // Nested map, NOT dotted keys: set(merge) treats dotted keys as literal
+      // field names, which breaks the Cloud Functions' update("html.x") calls
+      'html': {
+        'storageUrl': downloadUrl,
+        'storagePath': storagePath,
+        'charCount': capture.charCount,
+        'hash': capture.htmlHash,
+        'changed': true,
+        'capturedAt': Timestamp.fromDate(capture.capturedAt),
+      },
       'htmlSyncedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
 

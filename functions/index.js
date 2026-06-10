@@ -940,22 +940,30 @@ exports[escalationFnName] = onSchedule(
     try {
       const now = new Date();  // Re-declare for this scope
 
-      // Get all open (unresolved) safety events — filter in code to avoid
-      // needing composite indexes for inequality + inequality queries
+      // Bound by creation time (single-field index, no composite needed) and
+      // filter escalationStopped in code — only the last hour is actionable,
+      // so never-closed historical events don't inflate reads forever.
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
       const allOpenEvents = await admin.firestore()
         .collection(col("safety_events"))
-        .where("escalationStopped", "==", false)
+        .where("createdAt", ">=", oneHourAgo)
         .get();
 
       for (const doc of allOpenEvents.docs) {
         const eventData = doc.data();
 
+        // Filtered in code (query is time-bounded on a single-field index)
+        if (eventData.escalationStopped === true) continue;
+
         // Skip if participant already resolved (replied ERROR via SMS, or pressed 2/3 on IVR)
         if (eventData.participantResolved === true) continue;
 
-        // Skip if participant confirmed crisis on IVR (pressed 1 = transfer to 988) —
-        // the IVR flow handles those (conference bridge to 988, emergency contact notification)
-        if (eventData.participantConfirmedCrisis === true) continue;
+        // NOTE: events with participantConfirmedCrisis (pressed 1 = transfer
+        // to 988) are intentionally NOT skipped. The press-1 handler records
+        // notifyEmergencyContacts:true intent but no other code path performs
+        // that outreach, so the 5/8-minute auto-notification below is what
+        // actually contacts them. Only an explicit resolution (press 2/3 or
+        // SMS ERROR → participantResolved above) stops it.
 
         // Skip if this isn't a confirmed danger event that was texted
         if (!eventData.participantPhone) continue;
@@ -982,10 +990,12 @@ exports[escalationFnName] = onSchedule(
             const client = getTwilioClient();
             const fromNumber = twilioFromNumber.value();
             const participantName = participantInfo.name || `Study participant ${eventData.participantId}`;
-            const textResults = [];
-
-            for (const contact of participantInfo.emergencyContacts) {
-              if (!contact.phone) continue;
+            // Contacts are independent — send in parallel so retry backoff on
+            // one slow contact can't push the run past its timeout (which would
+            // re-send duplicate crisis texts on the next run).
+            const textResults = await Promise.all(participantInfo.emergencyContacts
+              .filter((c) => c.phone)
+              .map(async (contact) => {
               const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
               const contactName = contact.name || "emergency contact";
 
@@ -1001,13 +1011,13 @@ exports[escalationFnName] = onSchedule(
                   from: fromNumber,
                   to: contactPhone,
                 }));
-                textResults.push({ name: contactName, phone: contact.phone, sid: smsResult.sid });
                 console.log(`[EmergencyContactAuto] Text sent to ${contactName} (${contact.phone}): ${smsResult.sid}`);
+                return { name: contactName, phone: contact.phone, sid: smsResult.sid };
               } catch (err) {
-                textResults.push({ name: contactName, phone: contact.phone, error: err.message });
                 console.error(`[EmergencyContactAuto] Text failed to ${contactName}: ${err.message}`);
+                return { name: contactName, phone: contact.phone, error: err.message };
               }
-            }
+            }));
 
             // Mark as sent so we don't repeat
             await doc.ref.update({
@@ -1041,10 +1051,10 @@ exports[escalationFnName] = onSchedule(
             const client = getTwilioClient();
             const fromNumber = twilioFromNumber.value();
             const participantName = participantInfo.name || `Study participant ${eventData.participantId}`;
-            const callResults = [];
-
-            for (const contact of participantInfo.emergencyContacts) {
-              if (!contact.phone) continue;
+            // Parallel for the same reason as the text branch above
+            const callResults = await Promise.all(participantInfo.emergencyContacts
+              .filter((c) => c.phone)
+              .map(async (contact) => {
               const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
               const contactName = contact.name || "emergency contact";
 
@@ -1068,13 +1078,13 @@ exports[escalationFnName] = onSchedule(
                   to: contactPhone,
                   timeout: 60,
                 }));
-                callResults.push({ name: contactName, phone: contact.phone, sid: callResult.sid });
                 console.log(`[EmergencyContactAuto] Call placed to ${contactName} (${contact.phone}): ${callResult.sid}`);
+                return { name: contactName, phone: contact.phone, sid: callResult.sid };
               } catch (err) {
-                callResults.push({ name: contactName, phone: contact.phone, error: err.message });
                 console.error(`[EmergencyContactAuto] Call failed to ${contactName}: ${err.message}`);
+                return { name: contactName, phone: contact.phone, error: err.message };
               }
-            }
+            }));
 
             // Mark as sent
             await doc.ref.update({
@@ -1319,6 +1329,22 @@ function downloadUrlFor(bucketName, objectPath, token) {
 // Update an event doc trying both prod and dev collections (the function is
 // deployed once but data may come from either environment). update() only —
 // never set(merge), which would create orphan docs in the wrong collection.
+// List at most `cap` objects matching a glob, without buffering the whole
+// prefix (the listing would otherwise grow unbounded over the study's life).
+function listFilesBounded(bucket, prefix, glob, cap) {
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const stream = bucket.getFilesStream({ prefix, matchGlob: glob });
+    stream.on("data", (file) => {
+      out.push(file);
+      if (out.length >= cap) stream.destroy();
+    });
+    stream.on("close", () => resolve(out));
+    stream.on("end", () => resolve(out));
+    stream.on("error", reject);
+  });
+}
+
 async function updateEventDocBothEnvs(participantId, eventId, fields) {
   for (const collection of ["participants", "dev_participants"]) {
     try {
@@ -1336,12 +1362,14 @@ exports.htmlBrotliTranscode = onSchedule(
   { schedule: "10 * * * *", timeZone: "UTC", region: "us-central1", memory: "1GiB", timeoutSeconds: 540 },
   async () => {
     const bucket = admin.storage().bucket(LIVE_BUCKET);
-    const [files] = await bucket.getFiles({ prefix: "html/" });
+    // Server-side filter to unconverted captures only (.html / .html.gz, not .br)
+    const files = await listFilesBounded(bucket, "html/", "html/**/page_*.html{,.gz}", 5000);
     const cutoff = Date.now() - 60 * 60 * 1000;
     let converted = 0, skipped = 0, failed = 0;
 
     for (const file of files) {
-      if (!file.name.endsWith(".html.gz")) { skipped++; continue; }
+      // .html.gz (gzipped) and legacy plain .html both transcode to .html.br
+      if (!file.name.endsWith(".html.gz") && !file.name.endsWith(".html")) { skipped++; continue; }
       if (new Date(file.metadata.timeCreated).getTime() > cutoff) { skipped++; continue; }
       if (converted >= 500) break; // cap per run; hourly schedule drains backlog
 
@@ -1360,7 +1388,7 @@ exports.htmlBrotliTranscode = onSchedule(
         const meta = file.metadata.metadata || {};
         const token = meta.firebaseStorageDownloadTokens ||
           crypto.randomUUID();
-        const newName = file.name.replace(/\.html\.gz$/, ".html.br");
+        const newName = file.name.replace(/\.html(\.gz)?$/, ".html.br");
 
         const newFile = bucket.file(newName);
         await newFile.save(brBytes, {
@@ -1386,10 +1414,28 @@ exports.htmlBrotliTranscode = onSchedule(
 
         // Point the event doc at the new object, then remove the original
         if (meta.eventId && meta.participantId) {
-          await updateEventDocBothEnvs(meta.participantId, meta.eventId, {
+          const updated = await updateEventDocBothEnvs(meta.participantId, meta.eventId, {
             "html.storageUrl": downloadUrlFor(LIVE_BUCKET, newName, token),
+            "html.storagePath": newName,
             "html.compression": "br",
           });
+          if (updated) {
+            // Older app builds wrote a LITERAL top-level "html.storageUrl"
+            // field via set(merge) (dots are not paths in set()). Clear it so
+            // no stale .gz pointer remains. Literal field names require the
+            // varargs update(FieldPath, value) form.
+            await admin.firestore().collection(updated).doc(meta.participantId)
+              .collection("events").doc(meta.eventId)
+              .update(
+                new admin.firestore.FieldPath("html.storageUrl"),
+                admin.firestore.FieldValue.delete()
+              ).catch(() => { /* field may not exist on newer docs */ });
+          }
+          if (!updated) {
+            console.warn(`[HtmlBrotli] no event doc for ${file.name} — original kept alongside .br`);
+            converted++;
+            continue;
+          }
         }
         await file.delete();
         converted++;
@@ -1468,13 +1514,13 @@ exports.compactOldHtml = onSchedule(
   { schedule: "30 10 * * *", timeZone: "UTC", region: "us-central1", memory: "2GiB", timeoutSeconds: 1800 },
   async () => {
     const bucket = admin.storage().bucket(LIVE_BUCKET);
-    const [files] = await bucket.getFiles({ prefix: "html/" });
+    const files = await listFilesBounded(bucket, "html/", "html/**/page_*.html*", 50000);
     const cutoff = Date.now() - COMPACT_AFTER_DAYS * 24 * 60 * 60 * 1000;
 
     // Group eligible captures by participant + UTC date (from filename ms timestamp)
     const groups = new Map();
     for (const f of files) {
-      const m = f.name.match(/^html\/([^/]+)\/([^/]+)\/page_(\d+)\.html\.(br|gz)$/);
+      const m = f.name.match(/^html\/([^/]+)\/([^/]+)\/page_(\d+)\.html(\.br|\.gz)?$/);
       if (!m) continue;
       const ts = Number(m[3]);
       if (ts > cutoff) continue;
@@ -1526,11 +1572,22 @@ exports.compactOldHtml = onSchedule(
           // Repoint event docs, then remove the individual objects
           for (const m of batch) {
             if (m.eventId && m.participantId) {
-              await updateEventDocBothEnvs(m.participantId, m.eventId, {
-                "html.archive": `gs://${LIVE_BUCKET}/${archivePath}`,
-                "html.archiveMember": m.tarPath,
-                "html.storageUrl": admin.firestore.FieldValue.delete(),
-              }).catch((e) => console.error(`[HtmlCompact] doc update failed for ${m.eventId}: ${e.message}`));
+              let updated = null;
+              try {
+                updated = await updateEventDocBothEnvs(m.participantId, m.eventId, {
+                  "html.archive": `gs://${LIVE_BUCKET}/${archivePath}`,
+                  "html.archiveMember": m.tarPath,
+                  "html.storageUrl": admin.firestore.FieldValue.delete(),
+                });
+              } catch (e) {
+                console.error(`[HtmlCompact] doc update failed for ${m.eventId}: ${e.message}`);
+              }
+              if (!updated) {
+                // Doc missing or update failed — the member is in the archive
+                // but keep the individual object so no reference ever dies.
+                console.warn(`[HtmlCompact] keeping ${m.file.name} (doc not repointed)`);
+                continue;
+              }
             }
             await m.file.delete();
           }
@@ -1547,7 +1604,7 @@ exports.compactOldHtml = onSchedule(
           const meta = f.metadata.metadata || {};
           batch.push({
             file: f,
-            tarPath: f.name.replace(/^html\//, "").replace(/\.(br|gz)$/, ""),
+            tarPath: f.name.replace(/^html\//, "").replace(/\.(br|gz)$/, ""),  // plain .html keeps its name
             content,
             hash: crypto.createHash("sha256").update(content).digest("hex"),
             eventId: meta.eventId,
@@ -1593,7 +1650,9 @@ exports.convertScreenshotsToJxl = onSchedule(
   { schedule: "40 * * * *", timeZone: "UTC", region: "us-central1", memory: "1GiB", timeoutSeconds: 1200 },
   async () => {
     const bucket = admin.storage().bucket(LIVE_BUCKET);
-    const [files] = await bucket.getFiles({ prefix: "screenshots/" });
+    // matchGlob filters server-side to unconverted .jpg only — without it the
+    // hourly listing grows unbounded as converted .jxl files accumulate.
+    const files = await listFilesBounded(bucket, "screenshots/", "screenshots/**/*.jpg", 5000);
     const cutoff = Date.now() - 60 * 60 * 1000;
     let converted = 0, failed = 0;
 
@@ -1636,12 +1695,38 @@ exports.convertScreenshotsToJxl = onSchedule(
           },
         });
 
-        // Repoint the event doc at the display proxy, then remove the .jpg
+        // Repoint the event doc at the display proxy, then remove the .jpg.
+        // Store the durable storage path + token alongside the absolute URL so
+        // the backend can rebuild URLs if the service ever moves domains.
         if (meta.eventId && meta.participantId) {
-          await updateEventDocBothEnvs(meta.participantId, meta.eventId, {
+          const newFields = {
             screenshotUrl: `${BACKEND_URL}/api/screenshot-view?path=${encodeURIComponent(newName)}&token=${token}`,
+            screenshotStoragePath: newName,
+            screenshotToken: token,
             screenshotFormat: "jxl",
-          });
+          };
+          const updated = await updateEventDocBothEnvs(meta.participantId, meta.eventId, newFields);
+
+          // Deduped sibling events share this object and carry the same .jpg
+          // URL — repoint every one of them or their images die with the .jpg.
+          const oldUrl = downloadUrlFor(LIVE_BUCKET, file.name, token);
+          for (const collection of ["participants", "dev_participants"]) {
+            const siblings = await admin.firestore().collection(collection)
+              .doc(meta.participantId).collection("events")
+              .where("screenshotUrl", "==", oldUrl).get();
+            for (const sib of siblings.docs) {
+              await sib.ref.update(newFields).catch((e) =>
+                console.error(`[JxlConvert] sibling repoint failed ${sib.id}: ${e.message}`));
+            }
+          }
+
+          if (!updated) {
+            // Event doc not found in either env (e.g., device offline, event
+            // not yet synced) — keep BOTH objects so no stored URL ever dies.
+            console.warn(`[JxlConvert] no event doc for ${file.name} — original kept alongside .jxl`);
+            converted++;
+            continue;
+          }
         }
         await file.delete();
         converted++;

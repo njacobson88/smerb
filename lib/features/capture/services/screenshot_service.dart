@@ -14,25 +14,28 @@ import 'package:drift/drift.dart' as drift;
 
 /// Top-level function for isolate-based JPEG compression.
 /// Must be top-level (not a method) for compute() to work.
-Uint8List _compressToJpegIsolate(Map<String, dynamic> params) {
+Map<String, dynamic> _compressToJpegIsolate(Map<String, dynamic> params) {
   final pngBytes = params['pngBytes'] as Uint8List;
   final quality = params['quality'] as int;
   final maxWidth = params['maxWidth'] as int;
 
+  Uint8List bytes;
   try {
     final image = img.decodeImage(pngBytes);
-    if (image == null) return pngBytes;
-
-    img.Image processed = image;
-    if (image.width > maxWidth) {
-      processed = img.copyResize(image, width: maxWidth);
+    if (image == null) {
+      bytes = pngBytes;
+    } else {
+      img.Image processed = image;
+      if (image.width > maxWidth) {
+        processed = img.copyResize(image, width: maxWidth);
+      }
+      bytes = Uint8List.fromList(img.encodeJpg(processed, quality: quality));
     }
-
-    final jpegBytes = img.encodeJpg(processed, quality: quality);
-    return Uint8List.fromList(jpegBytes);
   } catch (_) {
-    return pngBytes;
+    bytes = pngBytes;
   }
+  // Hash here too — sha256 on the UI isolate steals frame budget every 3s
+  return {'bytes': bytes, 'hash': sha256.convert(bytes).toString()};
 }
 
 /// Service that captures screenshots every second and saves them if they've changed
@@ -231,12 +234,14 @@ class ScreenshotService {
       final filename = 'screenshot_$timestamp.jpg'; // Changed to .jpg
       String filePath = '${screenshotsDir.path}/$filename';
 
-      // Downscale from Retina resolution and compress to JPEG
-      final compressedBytes = await _compressToJpeg(screenshot, quality: 70);
+      // Downscale from Retina resolution and compress to JPEG (hash computed
+      // on the same background isolate)
+      final compressed = await _compressToJpeg(screenshot, quality: 70);
+      final compressedBytes = compressed.bytes;
 
       // Dedupe: identical bytes already saved this session → reuse that file.
       // The event below is still recorded, so the timeline is fully preserved.
-      final contentHash = sha256.convert(compressedBytes).toString();
+      final contentHash = compressed.hash;
       final existing = _jpegHashToPath[contentHash];
       final isDuplicate = existing != null;
       final eventId = const Uuid().v4();
@@ -289,16 +294,17 @@ class ScreenshotService {
   /// This prevents UI jank since image decoding/encoding is CPU-intensive.
   static const int _maxScreenshotWidth = 750;
 
-  Future<Uint8List> _compressToJpeg(Uint8List pngBytes, {int quality = 70}) async {
+  Future<({Uint8List bytes, String hash})> _compressToJpeg(Uint8List pngBytes, {int quality = 70}) async {
     try {
-      return await compute(_compressToJpegIsolate, {
+      final r = await compute(_compressToJpegIsolate, {
         'pngBytes': pngBytes,
         'quality': quality,
         'maxWidth': _maxScreenshotWidth,
       });
+      return (bytes: r['bytes'] as Uint8List, hash: r['hash'] as String);
     } catch (e) {
       print('[ScreenshotService] Error compressing to JPEG: $e');
-      return pngBytes;
+      return (bytes: pngBytes, hash: sha256.convert(pngBytes).toString());
     }
   }
 

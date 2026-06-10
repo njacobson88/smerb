@@ -62,7 +62,6 @@ class _CheckinScreenState extends State<CheckinScreen>
 
   // 5-minute completion nudge (fires while the check-in is still open)
   Timer? _nudgeTimer;
-  bool _nudgeShown = false;
 
   @override
   void initState() {
@@ -187,7 +186,6 @@ class _CheckinScreenState extends State<CheckinScreen>
     _nudgeTimer = Timer(const Duration(minutes: 5), () {
       if (!mounted) return;
       if (_safetyCheckDone || _confirmationResolved) return; // Already completed
-      _nudgeShown = true;
 
       // Show a gentle local notification nudging them to finish
       final notifications = FlutterLocalNotificationsPlugin();
@@ -563,7 +561,9 @@ class _CheckinScreenState extends State<CheckinScreen>
       // check-in is still open. If the participant closed the screen before the
       // 5-minute mark, deliver the nudge as a scheduled notification instead so
       // it isn't silently lost.
-      if (!_nudgeShown && _firstThresholdExceededAt != null) {
+      // (If the in-screen timer already fired, remaining is <= 0 and the
+      // guard below skips scheduling — no separate flag needed.)
+      if (_firstThresholdExceededAt != null) {
         final remaining = _firstThresholdExceededAt!
             .add(const Duration(minutes: 5))
             .difference(DateTime.now());

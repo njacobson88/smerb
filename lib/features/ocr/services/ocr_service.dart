@@ -81,8 +81,13 @@ class OcrService {
           print('[OcrService] Copied OCR from deduped original $dedupOfEventId');
           return database.getOcrResultForEvent(event.id);
         }
-        // Original OCR not ready yet — fall through to normal extraction
-        // (works while the shared file still exists locally)
+        // Original OCR not ready yet. If the shared file is already gone
+        // (uploaded + deleted), saving an empty result now would be permanent —
+        // return null so this event is retried after the original's OCR lands.
+        if (!File(filePath).existsSync()) {
+          print('[OcrService] Dedup original OCR pending and file gone — retry later');
+          return null;
+        }
       }
 
       final stopwatch = Stopwatch()..start();

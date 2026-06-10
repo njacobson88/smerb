@@ -2484,8 +2484,10 @@ def download_single_screenshot(ss_info: Dict[str, Any], bucket, session) -> Tupl
                 except Exception as e:
                     logger.debug(f"Storage API (extracted path) failed for {event_id}: {e}")
 
-        # Fallback to HTTP download with shared session
-        if not img_data and url and url.startswith("http"):
+        # Fallback to HTTP download with shared session.
+        # Proxy URLs are excluded: they sit behind the Dartmouth IP whitelist,
+        # which Cloud Run's own egress is not part of — the request would 403.
+        if not img_data and url and url.startswith("http") and "/api/screenshot-view" not in url:
             response = session.get(url, timeout=30)
             if response.status_code == 200:
                 img_data = response.content
@@ -3513,7 +3515,7 @@ def archive_and_clear_exports(
         from google.cloud import storage as gcs
 
         client = gcs.Client()
-        src_bucket = client.bucket(f"{config.FIREBASE_PROJECT_ID}.firebasestorage.app")
+        src_bucket = client.bucket(get_storage_bucket().name)
         dst_bucket = client.bucket(ARCHIVE_BACKUP_BUCKET)
 
         ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
@@ -4409,15 +4411,20 @@ async def twilio_call_response(
                 # Background thread: read config + dial bridge — NO blocking the TwiML
                 def _redirect_participant_to_direct_988(reason: str):
                     """Fallback: pull the participant out of the conference hold loop
-                    and dial 988 directly. Without this, a participant whose bridge
-                    call can't be placed would sit on hold indefinitely."""
+                    and dial the Lifeline directly. Without this, a participant whose
+                    bridge call can't be placed would sit on hold indefinitely.
+                    NOTE: Twilio cannot <Dial> the 988 short code — PSTN dialing
+                    requires E.164, so use the configured bridge number or the
+                    Lifeline's underlying toll-free number."""
                     try:
+                        fallback_number = (get_conference_config().get("bridge_number")
+                                           or "+18002738255")  # 988 Lifeline E.164
                         twilio_client.calls(call_sid).update(
                             twiml=(
                                 '<Response>'
                                 '<Say voice="Polly.Joanna">We are connecting you directly to the '
                                 '988 Suicide and Crisis Lifeline now. Please stay on the line.</Say>'
-                                '<Dial timeout="60">988</Dial>'
+                                f'<Dial timeout="60">{fallback_number}</Dial>'
                                 '<Say voice="Polly.Joanna">If you were disconnected, please call 988 directly. '
                                 'If you are in immediate danger, please call 911. Goodbye.</Say>'
                                 '</Response>'
@@ -4476,7 +4483,8 @@ async def twilio_call_response(
                             f"&alertId={alertId}"
                         )
                         if dtmf_audio_url:
-                            join_url += f"&dtmf_audio_url={dtmf_audio_url}"
+                            from urllib.parse import quote
+                            join_url += f"&dtmf_audio_url={quote(dtmf_audio_url, safe='')}"
 
                         call_params = {
                             "to": conf["bridge_number"],
@@ -4548,7 +4556,7 @@ async def twilio_call_response(
                     '988 Suicide and Crisis Lifeline. Please stay on the line. '
                     'If the call does not connect, you can call or text 988 directly at any time. '
                     'If you are in immediate danger, please call 911 now.</Say>'
-                    '<Dial timeout="60">988</Dial>'
+                    '<Dial timeout="60">+18002738255</Dial>'  # 988 Lifeline E.164 (Twilio cannot dial short codes)
                     '<Say voice="Polly.Joanna">If you were disconnected, please call 988 directly. Goodbye.</Say>'
                     '</Response>'
                 )
@@ -4876,7 +4884,8 @@ def _find_participant_by_phone(phone_number: str):
     participants_ref = db.collection(config.col("participants"))
 
     # Try with the normalized number (various stored formats)
-    for phone_field in ["phone", "phoneNumber"]:
+    # Fast path: indexed equality on common stored formats (incl. normalized field)
+    for phone_field in ["phoneNormalized", "phone", "phoneNumber"]:
         for fmt in [normalized, f"+1{normalized}", f"1{normalized}"]:
             try:
                 docs = list(participants_ref.where(phone_field, "==", fmt).limit(1).stream())
@@ -4884,6 +4893,21 @@ def _find_participant_by_phone(phone_number: str):
                     return docs[0].id, docs[0].to_dict()
             except Exception:
                 pass
+
+    # Fallback: stored phones may carry formatting ("(603) 555-1234") that
+    # equality can never match — scan and compare digits-only. Participant
+    # counts are small (hundreds), and this runs in a webhook worker thread.
+    try:
+        for doc in participants_ref.stream():
+            data = doc.to_dict()
+            for field in ("phone", "phoneNumber"):
+                stored = "".join(c for c in str(data.get(field) or "") if c.isdigit())
+                if stored.startswith("1") and len(stored) == 11:
+                    stored = stored[1:]
+                if stored and stored == normalized:
+                    return doc.id, data
+    except Exception as e:
+        logger.warning(f"[SMS Reply] Fallback phone scan failed: {e}")
 
     return None, None
 
@@ -4912,7 +4936,8 @@ async def twilio_sms_reply(request: Request):
         logger.info(f"[SMS Reply] From: {from_number}, Body: '{body}'")
 
         # ─── STEP 1: Check if sender is a participant ───
-        participant_id, participant_data = _find_participant_by_phone(from_number)
+        from fastapi.concurrency import run_in_threadpool
+        participant_id, participant_data = await run_in_threadpool(_find_participant_by_phone, from_number)
 
         if participant_id:
             logger.info(f"[SMS Reply] Identified as participant: {participant_id}")
@@ -4925,11 +4950,16 @@ async def twilio_sms_reply(request: Request):
 
                 def _stop_escalation():
                     try:
-                        events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+                        # NOTE: only (participantId, createdAt) has a composite index —
+                        # adding escalationStopped to the query throws FAILED_PRECONDITION.
+                        # Fetch latest events and filter in code instead.
+                        events = [
+                            e for e in db.collection(SAFETY_EVENTS_COLLECTION)
                             .where("participantId", "==", participant_id)
-                            .where("escalationStopped", "==", False)
                             .order_by("createdAt", direction=firestore.Query.DESCENDING)
-                            .limit(1).stream())
+                            .limit(5).stream()
+                            if not e.to_dict().get("escalationStopped")
+                        ][:1]
 
                         if events:
                             event_ref = events[0].reference
@@ -5585,6 +5615,11 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
                 participant_data["email"] = email
             if phone:
                 participant_data["phone"] = phone
+                # Digits-only normalized copy so SMS-reply matching always works
+                digits = "".join(c for c in phone if c.isdigit())
+                if len(digits) == 11 and digits.startswith("1"):
+                    digits = digits[1:]
+                participant_data["phoneNormalized"] = digits
 
             db.collection(participants_col).document(app_id).set(participant_data, merge=True)
             logger.info(f"[AutoEnroll] Participant {app_id} registered on dashboard (email={email}, phone={phone})")
