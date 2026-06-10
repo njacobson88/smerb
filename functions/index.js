@@ -1294,3 +1294,364 @@ exports.dailyFirestoreBackup = onSchedule(
     console.log(`[FirestoreBackup] Export started -> ${outputUriPrefix} (operation: ${res.data.name})`);
   }
 );
+
+
+// ============================================================================
+// HTML Brotli Transcode (hourly)
+//
+// Re-compresses uploaded HTML captures from gzip to brotli (~32% smaller,
+// browsers decompress contentEncoding:br natively). Runs on a schedule and
+// only touches objects older than 1 hour so the app has definitely finished
+// writing the event doc (avoids racing upload_service's set(merge)).
+// Every conversion is verified (decompress + hash match) before the original
+// is removed. The daily backup mirror retains originals permanently.
+// ============================================================================
+const zlib = require("zlib");
+const crypto = require("crypto");
+
+const LIVE_BUCKET = "r01-redditx-suicide.firebasestorage.app";
+
+function downloadUrlFor(bucketName, objectPath, token) {
+  return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/` +
+    `${encodeURIComponent(objectPath)}?alt=media&token=${token}`;
+}
+
+// Update an event doc trying both prod and dev collections (the function is
+// deployed once but data may come from either environment). update() only —
+// never set(merge), which would create orphan docs in the wrong collection.
+async function updateEventDocBothEnvs(participantId, eventId, fields) {
+  for (const collection of ["participants", "dev_participants"]) {
+    try {
+      await admin.firestore().collection(collection).doc(participantId)
+        .collection("events").doc(eventId).update(fields);
+      return collection;
+    } catch (err) {
+      if (err.code !== 5) throw err; // 5 = NOT_FOUND, try next collection
+    }
+  }
+  return null;
+}
+
+exports.htmlBrotliTranscode = onSchedule(
+  { schedule: "10 * * * *", timeZone: "UTC", region: "us-central1", memory: "1GiB", timeoutSeconds: 540 },
+  async () => {
+    const bucket = admin.storage().bucket(LIVE_BUCKET);
+    const [files] = await bucket.getFiles({ prefix: "html/" });
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    let converted = 0, skipped = 0, failed = 0;
+
+    for (const file of files) {
+      if (!file.name.endsWith(".html.gz")) { skipped++; continue; }
+      if (new Date(file.metadata.timeCreated).getTime() > cutoff) { skipped++; continue; }
+      if (converted >= 500) break; // cap per run; hourly schedule drains backlog
+
+      try {
+        // Node storage client transparently gunzips contentEncoding:gzip objects
+        const [rawHtml] = await file.download();
+        const rawHash = crypto.createHash("sha256").update(rawHtml).digest("hex");
+
+        const brBytes = zlib.brotliCompressSync(rawHtml, {
+          params: {
+            [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
+            [zlib.constants.BROTLI_PARAM_SIZE_HINT]: rawHtml.length,
+          },
+        });
+
+        const meta = file.metadata.metadata || {};
+        const token = meta.firebaseStorageDownloadTokens ||
+          crypto.randomUUID();
+        const newName = file.name.replace(/\.html\.gz$/, ".html.br");
+
+        const newFile = bucket.file(newName);
+        await newFile.save(brBytes, {
+          resumable: false,
+          metadata: {
+            contentType: "text/html",
+            contentEncoding: "br",
+            cacheControl: "private, max-age=31536000, immutable",
+            metadata: { ...meta, firebaseStorageDownloadTokens: token, brotliTranscoded: "true" },
+          },
+        });
+
+        // Verify the stored brotli decompresses to the identical HTML
+        const [storedBr] = await newFile.download({ decompress: false });
+        const roundtrip = zlib.brotliDecompressSync(storedBr);
+        const ok = crypto.createHash("sha256").update(roundtrip).digest("hex") === rawHash;
+        if (!ok) {
+          console.error(`[HtmlBrotli] VERIFY FAILED for ${file.name} — original kept`);
+          await newFile.delete().catch(() => {});
+          failed++;
+          continue;
+        }
+
+        // Point the event doc at the new object, then remove the original
+        if (meta.eventId && meta.participantId) {
+          await updateEventDocBothEnvs(meta.participantId, meta.eventId, {
+            "html.storageUrl": downloadUrlFor(LIVE_BUCKET, newName, token),
+            "html.compression": "br",
+          });
+        }
+        await file.delete();
+        converted++;
+      } catch (err) {
+        failed++;
+        console.error(`[HtmlBrotli] Failed for ${file.name}: ${err.message}`);
+      }
+    }
+    console.log(`[HtmlBrotli] converted=${converted} skipped=${skipped} failed=${failed}`);
+  }
+);
+
+
+// ============================================================================
+// HTML Solid Compaction (daily)
+//
+// HTML captures of the same feeds are highly redundant ACROSS files: solid
+// archives (tar of raw HTML, brotli-compressed as one stream) measured 5.2x
+// smaller than individually-gzipped files on real study data. Captures older
+// than 30 days are bundled into per-participant per-day archives:
+//   html-archives/{participantId}/{YYYY-MM-DD}[-partN].tar.br
+// Each member is verified (hash match after re-download + untar) before its
+// individual object is removed, and event docs are repointed first. The daily
+// backup mirror retains every original individual file permanently.
+// ============================================================================
+const tarStream = require("tar-stream");
+
+const COMPACT_AFTER_DAYS = 30;
+const COMPACT_MAX_GROUPS_PER_RUN = 15;
+const COMPACT_MAX_RAW_BYTES = 300 * 1024 * 1024;
+
+async function decompressMember(file) {
+  // .br objects need manual decompression; gzip is transparent in the client
+  if (file.name.endsWith(".br")) {
+    const [raw] = await file.download({ decompress: false });
+    return zlib.brotliDecompressSync(raw);
+  }
+  const [raw] = await file.download();
+  return raw;
+}
+
+function buildTar(members) {
+  return new Promise((resolve, reject) => {
+    const pack = tarStream.pack();
+    const chunks = [];
+    pack.on("data", (c) => chunks.push(c));
+    pack.on("end", () => resolve(Buffer.concat(chunks)));
+    pack.on("error", reject);
+    const manifest = members.map((m) => ({
+      path: m.tarPath, bytes: m.content.length, sha256: m.hash,
+      eventId: m.eventId || null, sessionId: m.sessionId || null,
+    }));
+    pack.entry({ name: "manifest.json" }, JSON.stringify(manifest, null, 2));
+    for (const m of members) pack.entry({ name: m.tarPath }, m.content);
+    pack.finalize();
+  });
+}
+
+function parseTar(buf) {
+  return new Promise((resolve, reject) => {
+    const extract = tarStream.extract();
+    const out = {};
+    extract.on("entry", (header, stream, next) => {
+      const chunks = [];
+      stream.on("data", (c) => chunks.push(c));
+      stream.on("end", () => { out[header.name] = Buffer.concat(chunks); next(); });
+      stream.resume();
+    });
+    extract.on("finish", () => resolve(out));
+    extract.on("error", reject);
+    extract.end(buf);
+  });
+}
+
+exports.compactOldHtml = onSchedule(
+  { schedule: "30 10 * * *", timeZone: "UTC", region: "us-central1", memory: "2GiB", timeoutSeconds: 1800 },
+  async () => {
+    const bucket = admin.storage().bucket(LIVE_BUCKET);
+    const [files] = await bucket.getFiles({ prefix: "html/" });
+    const cutoff = Date.now() - COMPACT_AFTER_DAYS * 24 * 60 * 60 * 1000;
+
+    // Group eligible captures by participant + UTC date (from filename ms timestamp)
+    const groups = new Map();
+    for (const f of files) {
+      const m = f.name.match(/^html\/([^/]+)\/([^/]+)\/page_(\d+)\.html\.(br|gz)$/);
+      if (!m) continue;
+      const ts = Number(m[3]);
+      if (ts > cutoff) continue;
+      const date = new Date(ts).toISOString().slice(0, 10);
+      const key = `${m[1]}|${date}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(f);
+    }
+
+    let processed = 0;
+    for (const [key, groupFiles] of groups) {
+      if (processed >= COMPACT_MAX_GROUPS_PER_RUN) break;
+      const [participantId, date] = key.split("|");
+
+      // Split the group into parts under the raw-size cap
+      let part = 0, batch = [], batchBytes = 0;
+      const flushBatch = async () => {
+        if (!batch.length) return;
+        part++;
+        const suffix = part === 1 ? "" : `-part${part}`;
+        const archivePath = `html-archives/${participantId}/${date}${suffix}.tar.br`;
+        try {
+          const tarBuf = await buildTar(batch);
+          const brBuf = zlib.brotliCompressSync(tarBuf, {
+            params: {
+              [zlib.constants.BROTLI_PARAM_QUALITY]: 10,
+              [zlib.constants.BROTLI_PARAM_LGWIN]: 24,
+              [zlib.constants.BROTLI_PARAM_SIZE_HINT]: tarBuf.length,
+            },
+          });
+          const archiveFile = bucket.file(archivePath);
+          await archiveFile.save(brBuf, {
+            resumable: false,
+            metadata: {
+              contentType: "application/x-tar+br",
+              metadata: { participantId, date, members: String(batch.length) },
+            },
+          });
+
+          // VERIFY: re-download, decompress, untar, hash-match every member
+          const [stored] = await archiveFile.download({ decompress: false });
+          const entries = await parseTar(zlib.brotliDecompressSync(stored));
+          for (const m of batch) {
+            const got = entries[m.tarPath];
+            const ok = got && crypto.createHash("sha256").update(got).digest("hex") === m.hash;
+            if (!ok) throw new Error(`verification failed for ${m.tarPath}`);
+          }
+
+          // Repoint event docs, then remove the individual objects
+          for (const m of batch) {
+            if (m.eventId && m.participantId) {
+              await updateEventDocBothEnvs(m.participantId, m.eventId, {
+                "html.archive": `gs://${LIVE_BUCKET}/${archivePath}`,
+                "html.archiveMember": m.tarPath,
+                "html.storageUrl": admin.firestore.FieldValue.delete(),
+              }).catch((e) => console.error(`[HtmlCompact] doc update failed for ${m.eventId}: ${e.message}`));
+            }
+            await m.file.delete();
+          }
+          console.log(`[HtmlCompact] ${archivePath}: ${batch.length} files, raw ${(batchBytes / 1e6).toFixed(1)}MB -> ${(brBuf.length / 1e6).toFixed(1)}MB`);
+        } catch (err) {
+          console.error(`[HtmlCompact] FAILED ${archivePath}: ${err.message} — originals kept`);
+        }
+        batch = []; batchBytes = 0;
+      };
+
+      for (const f of groupFiles) {
+        try {
+          const content = await decompressMember(f);
+          const meta = f.metadata.metadata || {};
+          batch.push({
+            file: f,
+            tarPath: f.name.replace(/^html\//, "").replace(/\.(br|gz)$/, ""),
+            content,
+            hash: crypto.createHash("sha256").update(content).digest("hex"),
+            eventId: meta.eventId,
+            sessionId: meta.sessionId,
+            participantId: meta.participantId || participantId,
+          });
+          batchBytes += content.length;
+          if (batchBytes >= COMPACT_MAX_RAW_BYTES) await flushBatch();
+        } catch (err) {
+          console.error(`[HtmlCompact] skip ${f.name}: ${err.message}`);
+        }
+      }
+      await flushBatch();
+      processed++;
+    }
+    console.log(`[HtmlCompact] processed ${processed} participant-day groups`);
+  }
+);
+
+
+// ============================================================================
+// Screenshot JXL Conversion (hourly)
+//
+// Losslessly transcodes screenshot JPEGs to JPEG XL (~19-21% smaller). The
+// JXL container is BYTE-EXACT reversible — djxl reconstructs the identical
+// original .jpg file, which is verified here before the original is removed.
+// Event docs are repointed to the backend display proxy
+// (/api/screenshot-view), which reconstructs a standard JPEG on the fly so
+// Chrome/Safari/everything renders exactly as before.
+// DO NOT deploy this function before the backend proxy endpoint is live.
+// ============================================================================
+const { execFile: execFileCb } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFileCb);
+
+function jxlTool(name) {
+  const p = path.join(__dirname, "bin", name);
+  try { fs.chmodSync(p, 0o755); } catch (_) { /* best effort */ }
+  return p;
+}
+
+exports.convertScreenshotsToJxl = onSchedule(
+  { schedule: "40 * * * *", timeZone: "UTC", region: "us-central1", memory: "1GiB", timeoutSeconds: 1200 },
+  async () => {
+    const bucket = admin.storage().bucket(LIVE_BUCKET);
+    const [files] = await bucket.getFiles({ prefix: "screenshots/" });
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    let converted = 0, failed = 0;
+
+    for (const file of files) {
+      if (!file.name.endsWith(".jpg")) continue;
+      if (new Date(file.metadata.timeCreated).getTime() > cutoff) continue;
+      const meta = file.metadata.metadata || {};
+      if (meta.jxlSkipped === "true") continue;
+      if (converted >= 300) break; // hourly schedule drains backlog
+
+      const stamp = `${Date.now()}_${Math.round(Math.random() * 1e6)}`;
+      const tmpJpg = path.join(os.tmpdir(), `jx_${stamp}.jpg`);
+      const tmpJxl = path.join(os.tmpdir(), `jx_${stamp}.jxl`);
+      const tmpRec = path.join(os.tmpdir(), `jx_${stamp}_rec.jpg`);
+
+      try {
+        await file.download({ destination: tmpJpg });
+        await execFileAsync(jxlTool("cjxl"), [tmpJpg, tmpJxl, "--lossless_jpeg=1", "-e", "7"]);
+
+        // VERIFY byte-exact reconstruction before touching the original
+        await execFileAsync(jxlTool("djxl"), [tmpJxl, tmpRec]);
+        const original = fs.readFileSync(tmpJpg);
+        const roundtrip = fs.readFileSync(tmpRec);
+        if (!original.equals(roundtrip)) throw new Error("roundtrip not byte-exact");
+
+        const jxlBytes = fs.readFileSync(tmpJxl);
+        if (jxlBytes.length >= original.length) {
+          await file.setMetadata({ metadata: { jxlSkipped: "true" } });
+          continue;
+        }
+
+        const token = meta.firebaseStorageDownloadTokens || crypto.randomUUID();
+        const newName = file.name.replace(/\.jpg$/, ".jxl");
+        await bucket.file(newName).save(jxlBytes, {
+          resumable: false,
+          metadata: {
+            contentType: "image/jxl",
+            cacheControl: "private, max-age=31536000, immutable",
+            metadata: { ...meta, firebaseStorageDownloadTokens: token, jxlOfJpeg: "true" },
+          },
+        });
+
+        // Repoint the event doc at the display proxy, then remove the .jpg
+        if (meta.eventId && meta.participantId) {
+          await updateEventDocBothEnvs(meta.participantId, meta.eventId, {
+            screenshotUrl: `${BACKEND_URL}/api/screenshot-view?path=${encodeURIComponent(newName)}&token=${token}`,
+            screenshotFormat: "jxl",
+          });
+        }
+        await file.delete();
+        converted++;
+      } catch (err) {
+        failed++;
+        console.error(`[JxlConvert] Failed for ${file.name}: ${err.message} — original kept`);
+      } finally {
+        for (const f of [tmpJpg, tmpJxl, tmpRec]) { try { fs.unlinkSync(f); } catch (_) { /* ok */ } }
+      }
+    }
+    console.log(`[JxlConvert] converted=${converted} failed=${failed}`);
+  }
+);
