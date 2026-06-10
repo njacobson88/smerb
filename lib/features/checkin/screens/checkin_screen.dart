@@ -49,7 +49,6 @@ class _CheckinScreenState extends State<CheckinScreen>
 
   // Safety confirmation tracking — only shown once at end of check-in
   bool _safetyConfirmationShowing = false;
-  bool _confirmedYes = false; // True if they said "Yes, I am in immediate danger"
   bool _safetyCheckDone = false; // True after they answered the end-of-checkin safety question
 
   // Unresolved high-risk tracking (for walk-away detection)
@@ -60,6 +59,10 @@ class _CheckinScreenState extends State<CheckinScreen>
   // Walk-away notification IDs (so we can cancel them if resolved)
   static const int _notifId5Min = 9001;
   static const int _notifId10Min = 9002;
+
+  // 5-minute completion nudge (fires while the check-in is still open)
+  Timer? _nudgeTimer;
+  bool _nudgeShown = false;
 
   @override
   void initState() {
@@ -100,7 +103,7 @@ class _CheckinScreenState extends State<CheckinScreen>
 
     // Clamp _maxReachedIndex if visible questions changed (skip logic toggled)
     if (_maxReachedIndex >= _visibleQuestions.length) {
-      _maxReachedIndex = _visibleQuestions.length - 1;
+      _maxReachedIndex = _visibleQuestions.isEmpty ? 0 : _visibleQuestions.length - 1;
     }
   }
 
@@ -156,12 +159,35 @@ class _CheckinScreenState extends State<CheckinScreen>
     }
   }
 
+  /// Retry a safety-critical Firestore write with exponential backoff so a
+  /// transient network blip doesn't silently drop it. Returns true on success.
+  Future<bool> _retryFirestoreWrite(
+    Future<void> Function() write, {
+    int attempts = 3,
+    String label = 'write',
+  }) async {
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await write();
+        return true;
+      } catch (e) {
+        print('[CheckIn] $label failed (attempt $attempt/$attempts): $e');
+        if (attempt < attempts) {
+          await Future.delayed(Duration(seconds: 1 << (attempt - 1)));
+        }
+      }
+    }
+    return false;
+  }
+
   /// Start a 5-minute timer that nudges the participant to complete their EMA
   /// if a safety threshold was exceeded but the check-in isn't finished yet.
   void _startCompletionNudgeTimer() {
-    Future.delayed(const Duration(minutes: 5), () {
+    _nudgeTimer?.cancel();
+    _nudgeTimer = Timer(const Duration(minutes: 5), () {
       if (!mounted) return;
       if (_safetyCheckDone || _confirmationResolved) return; // Already completed
+      _nudgeShown = true;
 
       // Show a gentle local notification nudging them to finish
       final notifications = FlutterLocalNotificationsPlugin();
@@ -198,16 +224,16 @@ class _CheckinScreenState extends State<CheckinScreen>
   /// knows a participant exceeded a threshold but hasn't confirmed yet.
   /// If they walk away, the backend can trigger follow-up after 15 minutes.
   Future<void> _writePendingConfirmation() async {
-    try {
-      final docId = const Uuid().v4();
-      _pendingConfirmationDocId = docId;
+    final docId = const Uuid().v4();
+    _pendingConfirmationDocId = docId;
 
-      final triggerQuestions = <String>[];
-      for (final q in _config!.questions) {
-        if (_isQuestionAboveThreshold(q)) triggerQuestions.add(q.id);
-      }
+    final triggerQuestions = <String>[];
+    for (final q in _config!.questions) {
+      if (_isQuestionAboveThreshold(q)) triggerQuestions.add(q.id);
+    }
 
-      await FirebaseFirestore.instance
+    final ok = await _retryFirestoreWrite(
+      () => FirebaseFirestore.instance
           .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('pending_safety_confirmations')
@@ -221,11 +247,12 @@ class _CheckinScreenState extends State<CheckinScreen>
         'resolved': false,
         'resolvedAt': null,
         'resolution': null, // will be "confirmed_danger", "denied_danger", "completed_checkin", "walk_away_alert_sent"
-      }).timeout(const Duration(seconds: 5));
+      }).timeout(const Duration(seconds: 5)),
+      label: 'Pending confirmation write',
+    );
 
+    if (ok) {
       print('[CheckIn] Pending confirmation written: $docId');
-    } catch (e) {
-      print('[CheckIn] Failed to write pending confirmation: $e');
     }
   }
 
@@ -237,8 +264,8 @@ class _CheckinScreenState extends State<CheckinScreen>
     // Cancel any pending walk-away notifications
     _cancelWalkAwayNotifications();
 
-    try {
-      await FirebaseFirestore.instance
+    final ok = await _retryFirestoreWrite(
+      () => FirebaseFirestore.instance
           .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('pending_safety_confirmations')
@@ -247,11 +274,12 @@ class _CheckinScreenState extends State<CheckinScreen>
         'resolved': true,
         'resolvedAt': FieldValue.serverTimestamp(),
         'resolution': resolution,
-      }).timeout(const Duration(seconds: 5));
+      }).timeout(const Duration(seconds: 5)),
+      label: 'Pending confirmation resolve',
+    );
 
+    if (ok) {
       print('[CheckIn] Pending confirmation resolved: $resolution');
-    } catch (e) {
-      print('[CheckIn] Failed to resolve pending confirmation: $e');
     }
   }
 
@@ -340,7 +368,6 @@ class _CheckinScreenState extends State<CheckinScreen>
 
   void _onSafetyConfirmationYes() {
     setState(() {
-      _confirmedYes = true;
       _crisisTriggered = true;
       _safetyCheckDone = true;
       _safetyConfirmationShowing = false;
@@ -408,10 +435,10 @@ class _CheckinScreenState extends State<CheckinScreen>
       print('[CheckIn] CRITICAL: Failed to persist safety alert locally: $e');
     }
 
-    // Step 2: Attempt immediate Firestore write (for fastest notification)
-    bool firestoreSuccess = false;
-    try {
-      await FirebaseFirestore.instance
+    // Step 2: Attempt immediate Firestore write (for fastest notification),
+    // retrying with backoff before falling back to background sync.
+    final firestoreSuccess = await _retryFirestoreWrite(
+      () => FirebaseFirestore.instance
           .collection(EnvConfig.col('participants'))
           .doc(widget.participantId)
           .collection('safety_alerts')
@@ -424,15 +451,20 @@ class _CheckinScreenState extends State<CheckinScreen>
         'confirmedDanger': true,
         'confirmationNumber': 1,
         'handled': false,
-      }).timeout(const Duration(seconds: 10));
+      }).timeout(const Duration(seconds: 10)),
+      label: 'Safety alert Firestore write',
+    );
 
-      firestoreSuccess = true;
+    if (firestoreSuccess) {
       print('[CheckIn] Safety alert sent to Firestore: $alertId');
-
       // Mark local copy as synced
-      await widget.database.markSafetyAlertsSynced([alertId]);
-    } catch (e) {
-      print('[CheckIn] Firestore write failed (will retry via sync): $e');
+      try {
+        await widget.database.markSafetyAlertsSynced([alertId]);
+      } catch (e) {
+        print('[CheckIn] Failed to mark alert synced (will re-sync): $e');
+      }
+    } else {
+      print('[CheckIn] Firestore write failed after retries (will retry via sync)');
 
       // Show warning to user — alert is saved locally but team may not be notified yet
       if (mounted) {
@@ -491,6 +523,7 @@ class _CheckinScreenState extends State<CheckinScreen>
       _scheduleWalkAwayNotifications();
     }
 
+    _nudgeTimer?.cancel();
     _crisisFlashController.dispose();
     super.dispose();
   }
@@ -526,7 +559,38 @@ class _CheckinScreenState extends State<CheckinScreen>
         }
       }
 
-      // 10-minute walk-away notification (the 5-min nudge fires during the check-in itself)
+      // 5-minute completion nudge — the in-screen timer only fires while the
+      // check-in is still open. If the participant closed the screen before the
+      // 5-minute mark, deliver the nudge as a scheduled notification instead so
+      // it isn't silently lost.
+      if (!_nudgeShown && _firstThresholdExceededAt != null) {
+        final remaining = _firstThresholdExceededAt!
+            .add(const Duration(minutes: 5))
+            .difference(DateTime.now());
+        if (remaining > const Duration(seconds: 10)) {
+          final scheduledAt5 = tz.TZDateTime.now(tz.local).add(remaining);
+          notifications.zonedSchedule(
+            _notifId5Min,
+            'Please finish your check-in',
+            'We noticed you haven\'t completed your check-in yet. '
+            'Your responses are important to us and help us make sure you\'re doing okay. '
+            'Please take a moment to finish — it only takes a few seconds.',
+            scheduledAt5,
+            details,
+            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+            uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+          );
+
+          _logNotificationEvent('walk_away_notification_scheduled', {
+            'notificationId': _notifId5Min,
+            'delayMinutes': 5,
+            'scheduledDeliveryTime': scheduledAt5.toIso8601String(),
+            'triggerQuestions': exceededQuestions,
+          });
+        }
+      }
+
+      // 10-minute walk-away notification
       final scheduledAt10 = tz.TZDateTime.now(tz.local).add(const Duration(minutes: 10));
       notifications.zonedSchedule(
         _notifId10Min,
@@ -837,7 +901,7 @@ class _CheckinScreenState extends State<CheckinScreen>
             ),
             if (hasInteracted)
               Text(
-                response!.round().toString(),
+                response.round().toString(),
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                       color: const Color(0xFF4A6CF7),
                       fontWeight: FontWeight.bold,

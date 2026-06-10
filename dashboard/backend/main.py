@@ -402,7 +402,7 @@ def send_distribution_invite(
         add_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/testers:batchAdd"
         add_resp = http_requests.post(add_url, headers=headers, json={
             "emails": [email]
-        })
+        }, timeout=30)
 
         if add_resp.status_code not in (200, 409):  # 409 = already exists
             logger.error(f"Failed to add tester {email}: {add_resp.status_code} {add_resp.text}")
@@ -413,19 +413,19 @@ def send_distribution_invite(
         # Step 2: Add tester to the "testers" group
         group_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups/testers"
         # First check if group exists, create if not
-        group_check = http_requests.get(group_url, headers=headers)
+        group_check = http_requests.get(group_url, headers=headers, timeout=30)
         if group_check.status_code == 404:
             create_group_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups"
             http_requests.post(create_group_url, headers=headers, json={
                 "name": f"projects/{project_number}/groups/testers",
                 "displayName": "testers",
-            })
+            }, timeout=30)
 
         # Add tester to group
         group_add_url = f"{group_url}:batchJoin"
         http_requests.post(group_add_url, headers=headers, json={
             "emails": [email]
-        })
+        }, timeout=30)
 
         # Update participant record
         doc_ref = db.collection(config.col("participants")).document(participant_id)
@@ -4109,6 +4109,48 @@ def update_conference_config(
 # ============================================================================
 
 from fastapi import Form as FastAPIForm
+from twilio.request_validator import RequestValidator
+
+# Twilio webhook signature validation. These endpoints bypass the Dartmouth IP
+# whitelist, so without this anyone who knows the URL could spoof a webhook
+# (e.g., POST a fake "ERROR" SMS reply to stop a safety escalation).
+# Set TWILIO_VALIDATE_WEBHOOKS=false only for local development/testing.
+TWILIO_VALIDATE_WEBHOOKS = os.getenv("TWILIO_VALIDATE_WEBHOOKS", "true").lower() == "true"
+
+
+async def _twilio_webhook_is_valid(request: Request) -> bool:
+    """Validate the X-Twilio-Signature header on an incoming Twilio webhook."""
+    if not TWILIO_VALIDATE_WEBHOOKS:
+        return True
+    if not config.TWILIO_AUTH_TOKEN:
+        logger.error("[Twilio] TWILIO_AUTH_TOKEN not configured — rejecting webhook")
+        return False
+
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        logger.warning(f"[Twilio] Missing X-Twilio-Signature on {request.url.path}")
+        return False
+
+    # Reconstruct the public URL Twilio signed — Cloud Run terminates TLS at the
+    # proxy, so the ASGI scheme may be http while Twilio signed the https URL.
+    url = str(request.url)
+    forwarded_proto = request.headers.get("X-Forwarded-Proto")
+    if forwarded_proto == "https" and url.startswith("http://"):
+        url = "https://" + url[len("http://"):]
+
+    params = {}
+    if request.method == "POST":
+        form = await request.form()  # Starlette caches this — handlers can re-read it
+        params = dict(form)
+
+    valid = RequestValidator(config.TWILIO_AUTH_TOKEN).validate(url, params, signature)
+    if not valid:
+        logger.warning(f"[Twilio] Invalid webhook signature on {request.url.path} (url={url})")
+    return valid
+
+
+def _twilio_forbidden() -> Response:
+    return Response(content="<Response/>", media_type="application/xml", status_code=403)
 
 
 @app.post("/api/twilio/call-response")
@@ -4119,11 +4161,14 @@ async def twilio_call_response(
 ):
     """
     Twilio webhook for handling IVR responses during safety calls.
-    Press 1 = Error / accidental (stops escalation)
-    Press 2 = Crisis — warm handoff to 988 + notify emergency contacts
-    Press 3 = Crisis — warm handoff to 988 + notify emergency contacts
+    Press 1 = Transfer to 988 (warm handoff via conference)
+    Press 2 = Error / not currently in crisis (stops escalation)
+    Press 3 = Was in crisis, already received support (stops escalation)
     No answer = unable to reach → on-call paged with full history
     """
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+
     try:
         # Parse Twilio's POST form data
         form_data = await request.form()
@@ -4174,6 +4219,35 @@ async def twilio_call_response(
                 )
 
                 # Background thread: read config + dial bridge — NO blocking the TwiML
+                def _redirect_participant_to_direct_988(reason: str):
+                    """Fallback: pull the participant out of the conference hold loop
+                    and dial 988 directly. Without this, a participant whose bridge
+                    call can't be placed would sit on hold indefinitely."""
+                    try:
+                        twilio_client.calls(call_sid).update(
+                            twiml=(
+                                '<Response>'
+                                '<Say voice="Polly.Joanna">We are connecting you directly to the '
+                                '988 Suicide and Crisis Lifeline now. Please stay on the line.</Say>'
+                                '<Dial timeout="60">988</Dial>'
+                                '<Say voice="Polly.Joanna">If you were disconnected, please call 988 directly. '
+                                'If you are in immediate danger, please call 911. Goodbye.</Say>'
+                                '</Response>'
+                            )
+                        )
+                        logger.warning(f"[Conference] Direct 988 fallback for {participantId}: {reason}")
+                        event_ref = _get_event_ref()
+                        if event_ref:
+                            event_ref.collection("audit_trail").document().set({
+                                "type": "direct_988_fallback",
+                                "reason": reason,
+                                "callSid": call_sid,
+                                "loggedBy": "system",
+                                "loggedAt": datetime.utcnow(),
+                            })
+                    except Exception as redirect_err:
+                        logger.error(f"[Conference] Failed to redirect participant to direct 988: {redirect_err}", exc_info=True)
+
                 def dial_bridge_and_update():
                     try:
                         # Read conference config IN the background thread
@@ -4181,6 +4255,7 @@ async def twilio_call_response(
 
                         if not conf.get("enabled") or not conf.get("bridge_number"):
                             logger.warning("[Conference] Conference not enabled or no bridge number")
+                            _redirect_participant_to_direct_988("conference_disabled_or_no_bridge_number")
                             return
 
                         # DIAL FIRST — this is the time-critical part
@@ -4259,6 +4334,8 @@ async def twilio_call_response(
 
                     except Exception as e:
                         logger.error(f"[Conference] Failed to dial bridge: {e}", exc_info=True)
+                        # Don't leave the participant on infinite hold — dial 988 directly
+                        _redirect_participant_to_direct_988(f"bridge_dial_failed: {e}")
                         try:
                             event_ref = _get_event_ref()
                             if event_ref:
@@ -4411,6 +4488,9 @@ async def twilio_hold_music(request: Request):
     Plays reassuring messages on loop while the 988 bridge call connects.
     Called via the Conference waitUrl attribute. Loops indefinitely via <Redirect/>.
     """
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+
     # Rotate through reassuring messages so it doesn't feel like a broken recording
     twiml = (
         '<Response>'
@@ -4456,6 +4536,9 @@ async def twilio_join_conference(
     startConferenceOnEnter=true causes the participant's hold audio to stop
     and connects them to the bridge caller (988 counselor) seamlessly.
     """
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+
     logger.info(f"[Conference] Bridge answered, joining room: {room} (participant: {participantId})")
 
     # Log to audit trail
@@ -4514,6 +4597,9 @@ async def twilio_conference_events(
     Status callback for conference events (join, leave, end).
     Logs events to the safety event audit trail for DSMB reporting.
     """
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+
     try:
         form_data = await request.form()
         event = form_data.get("StatusCallbackEvent", "")
@@ -4626,6 +4712,9 @@ async def twilio_sms_reply(request: Request):
        - ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, ONGOING → disposition commands
     3. Unknown sender → generic response
     """
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+
     try:
         form_data = await request.form()
         body = form_data.get("Body", "").strip()
@@ -4834,6 +4923,9 @@ async def twilio_incoming_call(request: Request):
     Twilio webhook for incoming voice calls to the study number.
     Plays a message explaining this is an automated system and provides crisis resources.
     """
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+
     logger.info("[Twilio Incoming Call] Received incoming call")
 
     twiml = (
@@ -5149,21 +5241,21 @@ def _send_auto_invite(participant_id: str, email: str):
 
         # Step 1: Add tester
         add_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/testers:batchAdd"
-        add_resp = http_requests.post(add_url, headers=headers, json={"emails": [email]})
+        add_resp = http_requests.post(add_url, headers=headers, json={"emails": [email]}, timeout=30)
         if add_resp.status_code not in (200, 409):
             logger.error(f"[AutoInvite] Failed to add tester {email}: {add_resp.status_code} {add_resp.text}")
             return
 
         # Step 2: Add to testers group
         group_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups/testers"
-        group_check = http_requests.get(group_url, headers=headers)
+        group_check = http_requests.get(group_url, headers=headers, timeout=30)
         if group_check.status_code == 404:
             create_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups"
             http_requests.post(create_url, headers=headers, json={
                 "name": f"projects/{project_number}/groups/testers",
                 "displayName": "testers",
-            })
-        http_requests.post(f"{group_url}:batchJoin", headers=headers, json={"emails": [email]})
+            }, timeout=30)
+        http_requests.post(f"{group_url}:batchJoin", headers=headers, json={"emails": [email]}, timeout=30)
 
         # Update participant record with invite status
         participants_col = config.col("participants")
@@ -5213,7 +5305,7 @@ def write_id_to_redcap(record_id: str, app_id: str, event_name: str = None) -> b
         "data": json.dumps(record_data),
         "returnContent": "count",
         "returnFormat": "json",
-    })
+    }, timeout=30)
 
     if resp.status_code == 200:
         logger.info(f"[REDCap] Wrote app ID {app_id} to record {record_id}")
@@ -5280,7 +5372,7 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
             }
             for i, f in enumerate(enroll_fields):
                 req_data[f"fields[{i}]"] = f
-            resp = http_requests.post(config.REDCAP_API_URL, data=req_data)
+            resp = http_requests.post(config.REDCAP_API_URL, data=req_data, timeout=30)
 
             email = None
             phone = None
@@ -5453,7 +5545,7 @@ async def redcap_data_entry_trigger(request: Request):
             "fields[1]": config.REDCAP_APP_ID_FIELD,
             "events[0]": event_name or config.REDCAP_TRIGGER_EVENT,
             "returnFormat": "json",
-        })
+        }, timeout=30)
 
         if resp.status_code != 200:
             logger.error(f"[REDCap DET] Failed to fetch record: {resp.status_code} {resp.text}")
@@ -5693,7 +5785,7 @@ def fetch_redcap_safety_plan(record_id: str, event_name: str = None) -> dict:
         **{f"fields[{i}]": f for i, f in enumerate(REDCAP_SAFETY_PLAN_FIELDS)},
         "events[0]": event_name or config.REDCAP_TRIGGER_EVENT,
         "returnFormat": "json",
-    })
+    }, timeout=30)
 
     if resp.status_code != 200:
         raise Exception(f"REDCap API error: {resp.status_code} {resp.text}")
@@ -5760,7 +5852,8 @@ def sync_safety_plan(
         if safety_plan.get("erServiceNumber"):
             participant_update["erServiceNumber"] = safety_plan["erServiceNumber"]
         if participant_update:
-            p_ref.update(participant_update)
+            # set(merge=True) — update() throws if the participant doc doesn't exist yet
+            p_ref.set(participant_update, merge=True)
 
         logger.info(f"[SafetyPlan] Synced safety plan for participant {participant_id} (REDCap record {redcap_record_id})")
 

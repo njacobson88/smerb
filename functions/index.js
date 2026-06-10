@@ -56,6 +56,27 @@ function getTwilioClient() {
 }
 
 // ============================================================================
+// Helper: Retry a Twilio API call with exponential backoff (1s, 2s).
+// Used on safety-critical sends so a transient API failure doesn't silently
+// drop an alert, escalation page, or emergency contact notification.
+// ============================================================================
+async function twilioWithRetry(label, fn, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      console.error(`[TwilioRetry] ${label} failed (attempt ${attempt}/${maxAttempts}): ${err.message}`);
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt - 1) * 1000));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// ============================================================================
 // Helper: Create a safety event in the audit trail system
 // ============================================================================
 async function createSafetyEvent(alertData, participantId, alertId) {
@@ -119,13 +140,13 @@ async function smsParticipant(client, participantId, fromNumber) {
   }
 
   try {
-    const result = await client.messages.create({
+    const result = await twilioWithRetry("messages.create", () => client.messages.create({
       body: `This is the SocialScope study team. Based on your recent check-in, ` +
             `we want to make sure you're safe. A member of our team will be calling ` +
             `you shortly.\n\nIf you are in crisis, please report to the nearest emergency room, call 911, or call 988.`,
       from: fromNumber,
       to: participantPhone.startsWith("+") ? participantPhone : `+1${participantPhone}`,
-    });
+    }));
     console.log(`SMS sent to participant ${participantId}: ${result.sid}`);
     return { sid: result.sid, status: result.status, phone: participantPhone };
   } catch (err) {
@@ -176,12 +197,12 @@ async function callParticipant(client, participantId, fromNumber) {
       <Say voice="Polly.Joanna">We did not receive a response. A member of our team will follow up with you shortly. If you are in crisis, please report to the nearest emergency room, call 911, or call 988. Goodbye.</Say>
     </Response>`;
 
-    const call = await client.calls.create({
+    const call = await twilioWithRetry("calls.create", () => client.calls.create({
       twiml,
       from: fromNumber,
       to: participantPhone.startsWith("+") ? participantPhone : `+1${participantPhone}`,
       timeout: 60,
-    });
+    }));
 
     console.log(`Call initiated to participant ${participantId}: ${call.sid}`);
     return { sid: call.sid, status: call.status, phone: participantPhone };
@@ -212,14 +233,14 @@ async function contactEmergencyContact(client, participantId, fromNumber) {
 
   try {
     // SMS emergency contact
-    const smsResult = await client.messages.create({
+    const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
       body: `This is the SocialScope research study team at Dartmouth College. ` +
             `We are trying to reach a study participant who listed you as an ` +
             `emergency contact. Please contact us as soon as possible. ` +
             `If you believe this person is in immediate danger, please call 911.`,
       from: fromNumber,
       to: emergencyPhone.startsWith("+") ? emergencyPhone : `+1${emergencyPhone}`,
-    });
+    }));
 
     console.log(`Emergency contact SMS sent for ${participantId}: ${smsResult.sid}`);
     return {
@@ -288,7 +309,7 @@ async function notifyEmergencyContacts(client, participantId, participantInfo, f
 
     // SMS first
     try {
-      const smsResult = await client.messages.create({
+      const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
         body: `This is the SocialScope research study team at Dartmouth College. ` +
               `${participantName} has designated you (${contact.name}) as an emergency contact ` +
               `and has indicated they are currently experiencing a mental health crisis. ` +
@@ -297,7 +318,7 @@ async function notifyEmergencyContacts(client, participantId, participantInfo, f
               `You can also call the 988 Suicide & Crisis Lifeline.`,
         from: fromNumber,
         to: contactPhone,
-      });
+      }));
       results.push({ name: contact.name, phone: contact.phone, smsSid: smsResult.sid, type: "sms" });
     } catch (err) {
       results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "sms" });
@@ -305,7 +326,7 @@ async function notifyEmergencyContacts(client, participantId, participantInfo, f
 
     // Voice call with voicemail
     try {
-      const callResult = await client.calls.create({
+      const callResult = await twilioWithRetry("calls.create", () => client.calls.create({
         twiml: `<Response><Say voice="alice">` +
           `Hello ${contact.name}. This is the SocialScope research study team at Dartmouth College. ` +
           `${participantName} has designated you as an emergency contact and has indicated ` +
@@ -316,7 +337,7 @@ async function notifyEmergencyContacts(client, participantId, participantInfo, f
         from: fromNumber,
         to: contactPhone,
         timeout: 30,
-      });
+      }));
       results.push({ name: contact.name, phone: contact.phone, callSid: callResult.sid, type: "call" });
     } catch (err) {
       results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "call" });
@@ -492,11 +513,11 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
         for (const recipient of recipients) {
           try {
-            const result = await client.messages.create({
+            const result = await twilioWithRetry("messages.create", () => client.messages.create({
               body: smsBody,
               from: twilioFromNumber.value(),
               to: `+1${recipient.phone}`,
-            });
+            }));
             smsResults.push({
               phone: recipient.phone,
               name: recipient.name,
@@ -547,7 +568,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
           const participantPhone = participantInfo.phone.startsWith("+")
             ? participantInfo.phone : `+1${participantInfo.phone}`;
           try {
-            const smsResult = await client.messages.create({
+            const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
               body: `This is the SocialScope study team at Dartmouth College. ` +
                     `Based on your recent check-in, we want to make sure you're safe. ` +
                     `A member of our team will be calling you shortly.\n\n` +
@@ -555,7 +576,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
                     `If you are in crisis, please report to the nearest emergency room, call 911, or call 988.`,
               from: fromNumber,
               to: participantPhone,
-            });
+            }));
             participantSmsResult = { sid: smsResult.sid, status: smsResult.status, phone: participantInfo.phone };
           } catch (err) {
             participantSmsResult = { error: err.message };
@@ -636,12 +657,12 @@ exports[safetyAlertFnName] = onDocumentCreated(
               <Say voice="Polly.Joanna">We did not receive a valid response. Because your earlier response indicated that you may need immediate support, we encourage you to call or text 988 now, or call 911 if you are in immediate danger. Goodbye.</Say>
             </Response>`;
 
-            const call = await client.calls.create({
+            const call = await twilioWithRetry("calls.create", () => client.calls.create({
               twiml,
               from: fromNumber,
               to: participantPhone,
               timeout: 60,
-            });
+            }));
             participantCallResult = { sid: call.sid, status: call.status, phone: participantInfo.phone };
           } catch (err) {
             participantCallResult = { error: err.message };
@@ -792,7 +813,7 @@ exports[escalationFnName] = onSchedule(
 
           if (escalationTarget && escalationTarget.phone) {
             try {
-              await client.messages.create({
+              await twilioWithRetry("messages.create", () => client.messages.create({
                 body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
                       `Safety event for participant ${eventData.participantId} ` +
                       `has NOT been acknowledged in ${Math.round(minutesSinceCreation)} min.\n` +
@@ -801,7 +822,7 @@ exports[escalationFnName] = onSchedule(
                       `Dashboard: ${DASHBOARD_URL}`,
                 from: fromNumber,
                 to: `+1${escalationTarget.phone}`,
-              });
+              }));
 
               const updateData = {};
               updateData[`${escalationLevel}Escalated`] = true;
@@ -835,7 +856,7 @@ exports[escalationFnName] = onSchedule(
             const primary = roster.primary;
             if (primary && primary.phone && !eventData[`hourlyReminder_${Math.floor(minutesSinceCreation / 60)}`]) {
               try {
-                await client.messages.create({
+                await twilioWithRetry("messages.create", () => client.messages.create({
                   body: `[SocialScope CHECK-IN REMINDER]\n` +
                         `Your ongoing event for participant ${eventData.participantId} ` +
                         `needs an update (${Math.round(minutesSinceCreation)} min since alert).\n` +
@@ -844,7 +865,7 @@ exports[escalationFnName] = onSchedule(
                         `If no response in 15 min, backup will be paged.`,
                   from: fromNumber,
                   to: `+1${primary.phone}`,
-                });
+                }));
 
                 const hourKey = `hourlyReminder_${Math.floor(minutesSinceCreation / 60)}`;
                 await doc.ref.update({ [hourKey]: admin.firestore.FieldValue.serverTimestamp() });
@@ -869,14 +890,14 @@ exports[escalationFnName] = onSchedule(
 
               if (escalationTarget && escalationTarget.phone) {
                 try {
-                  await client.messages.create({
+                  await twilioWithRetry("messages.create", () => client.messages.create({
                     body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
                           `Ongoing safety event for ${eventData.participantId} ` +
                           `— primary on-call has not checked in for ${Math.round(minutesSinceLastCheckIn)} min.\n` +
                           `Reply ACK, ONGOING, SAFE, SUPPORT, 988, or ER.`,
                     from: fromNumber,
                     to: `+1${escalationTarget.phone}`,
-                  });
+                  }));
 
                   await doc.ref.update({
                     [`${escalationLevel}EscalatedOngoing`]: true,
@@ -929,11 +950,11 @@ exports[escalationFnName] = onSchedule(
       for (const doc of allOpenEvents.docs) {
         const eventData = doc.data();
 
-        // Skip if participant already resolved (replied ERROR/1 via SMS or pressed 1 on IVR)
+        // Skip if participant already resolved (replied ERROR via SMS, or pressed 2/3 on IVR)
         if (eventData.participantResolved === true) continue;
 
-        // Skip if participant confirmed crisis on IVR (press 2/3) — those are handled
-        // by the IVR flow itself (conference call to 988, explicit emergency contact notification)
+        // Skip if participant confirmed crisis on IVR (pressed 1 = transfer to 988) —
+        // the IVR flow handles those (conference bridge to 988, emergency contact notification)
         if (eventData.participantConfirmedCrisis === true) continue;
 
         // Skip if this isn't a confirmed danger event that was texted
@@ -969,7 +990,7 @@ exports[escalationFnName] = onSchedule(
               const contactName = contact.name || "emergency contact";
 
               try {
-                const smsResult = await client.messages.create({
+                const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
                   body: `This is the SocialScope research study team at Dartmouth College. ` +
                         `${participantName} has designated you (${contactName}) as an emergency contact ` +
                         `and has reported that they are currently experiencing a mental health crisis to our study team. ` +
@@ -979,7 +1000,7 @@ exports[escalationFnName] = onSchedule(
                         `Thank you for your help.`,
                   from: fromNumber,
                   to: contactPhone,
-                });
+                }));
                 textResults.push({ name: contactName, phone: contact.phone, sid: smsResult.sid });
                 console.log(`[EmergencyContactAuto] Text sent to ${contactName} (${contact.phone}): ${smsResult.sid}`);
               } catch (err) {
@@ -1028,7 +1049,7 @@ exports[escalationFnName] = onSchedule(
               const contactName = contact.name || "emergency contact";
 
               try {
-                const callResult = await client.calls.create({
+                const callResult = await twilioWithRetry("calls.create", () => client.calls.create({
                   twiml: `<Response>` +
                     `<Pause length="2"/>` +
                     `<Say voice="Polly.Joanna">Hello ${contactName}. This is the SocialScope research study team at Dartmouth College.</Say>` +
@@ -1046,7 +1067,7 @@ exports[escalationFnName] = onSchedule(
                   from: fromNumber,
                   to: contactPhone,
                   timeout: 60,
-                });
+                }));
                 callResults.push({ name: contactName, phone: contact.phone, sid: callResult.sid });
                 console.log(`[EmergencyContactAuto] Call placed to ${contactName} (${contact.phone}): ${callResult.sid}`);
               } catch (err) {

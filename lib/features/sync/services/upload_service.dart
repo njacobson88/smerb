@@ -274,9 +274,9 @@ class UploadService {
       );
 
       final downloadUrl = await snapshot.ref.getDownloadURL();
-      _totalBytesUploaded += snapshot.totalBytes ?? 0;
+      _totalBytesUploaded += snapshot.totalBytes;
 
-      print('[UploadService] Uploaded screenshot: $storagePath (${snapshot.totalBytes ?? 0} bytes)');
+      print('[UploadService] Uploaded screenshot: $storagePath (${snapshot.totalBytes} bytes)');
 
       // Delete local file after confirmed upload
       try {
