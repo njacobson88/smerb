@@ -1171,3 +1171,92 @@ exports[escalationFnName] = onSchedule(
     }
   }
 );
+
+
+// ============================================================================
+// Lossless Screenshot Optimizer
+//
+// Storage-triggered: every uploaded screenshot JPEG is re-compressed with
+// jpegtran (-optimize -progressive) — identical pixels, ~9-12% fewer bytes.
+// This is NOT environment-prefixed: Storage paths are shared between dev and
+// prod (screenshots/{participantId}/...), so exactly one instance should be
+// deployed. The losslessOptimized metadata flag makes reprocessing a no-op,
+// so a stray duplicate deployment is harmless.
+// ============================================================================
+const { onObjectFinalized } = require("firebase-functions/v2/storage");
+const path = require("path");
+const os = require("os");
+const fs = require("fs");
+const { execFile } = require("child_process");
+
+function runJpegtran(inPath, outPath) {
+  // jpegtran-bin v7 is ESM — the binary path is on .default under require()
+  const jpegtranMod = require("jpegtran-bin");
+  const jpegtranPath = jpegtranMod.default || jpegtranMod;
+  return new Promise((resolve, reject) => {
+    execFile(
+      jpegtranPath,
+      ["-optimize", "-progressive", "-copy", "all", "-outfile", outPath, inPath],
+      (err) => (err ? reject(err) : resolve())
+    );
+  });
+}
+
+exports.optimizeScreenshot = onObjectFinalized(
+  { region: "us-central1", memory: "512MiB", timeoutSeconds: 120 },
+  async (event) => {
+    const object = event.data;
+    const name = object.name || "";
+
+    // Only screenshot JPEGs, within sane size bounds
+    if (!name.startsWith("screenshots/")) return;
+    if (object.contentType !== "image/jpeg") return;
+    const size = Number(object.size || 0);
+    if (size < 5000 || size > 20000000) return;
+
+    // Loop guard: our own re-upload triggers finalize again — exit on the flag
+    if (object.metadata && object.metadata.losslessOptimized === "true") return;
+
+    const bucket = admin.storage().bucket(object.bucket);
+    const file = bucket.file(name);
+    const stamp = `${Date.now()}_${Math.round(Math.random() * 1e6)}`;
+    const tmpIn = path.join(os.tmpdir(), `opt_in_${stamp}.jpg`);
+    const tmpOut = path.join(os.tmpdir(), `opt_out_${stamp}.jpg`);
+
+    try {
+      await file.download({ destination: tmpIn });
+      await runJpegtran(tmpIn, tmpOut);
+      const optimizedSize = fs.statSync(tmpOut).size;
+
+      if (optimizedSize >= size) {
+        // No gain — flag it so it's never reprocessed. A metadata patch does
+        // not create a new generation, so this does not retrigger finalize.
+        await file.setMetadata({ metadata: { losslessOptimized: "true" } });
+        return;
+      }
+
+      // Overwrite with optimized bytes. Spreading object.metadata preserves
+      // the app's custom fields AND firebaseStorageDownloadTokens, so any
+      // previously issued download URL keeps working.
+      await bucket.upload(tmpOut, {
+        destination: name,
+        metadata: {
+          contentType: "image/jpeg",
+          metadata: { ...(object.metadata || {}), losslessOptimized: "true" },
+        },
+      });
+
+      console.log(
+        `[OptimizeScreenshot] ${name}: ${size} -> ${optimizedSize} bytes ` +
+        `(-${(100 * (1 - optimizedSize / size)).toFixed(1)}%)`
+      );
+    } catch (err) {
+      // Never fail loudly — the original object is untouched on any error
+      console.error(`[OptimizeScreenshot] Failed for ${name}: ${err.message}`);
+    } finally {
+      for (const f of [tmpIn, tmpOut]) {
+        try { fs.unlinkSync(f); } catch (_) { /* tmp cleanup best-effort */ }
+      }
+    }
+  }
+);
