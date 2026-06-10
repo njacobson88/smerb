@@ -2397,14 +2397,60 @@ def extract_storage_path_from_url(url: str) -> Optional[str]:
     return None
 
 
+# ============================================================================
+# JPEG XL support — screenshots are stored as byte-exact reversible .jxl
+# (converted by the convertScreenshotsToJxl Cloud Function). djxl reconstructs
+# the IDENTICAL original .jpg file. The vendored static binary lives in bin/.
+# ============================================================================
+
+DJXL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "djxl")
+
+
+def reconstruct_jpeg_from_jxl(jxl_bytes: bytes) -> bytes:
+    """Byte-exact reconstruction of the original JPEG from a JXL container."""
+    import subprocess
+    import tempfile
+
+    try:
+        os.chmod(DJXL_PATH, 0o755)
+    except OSError:
+        pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "in.jxl")
+        dst = os.path.join(tmp, "out.jpg")
+        with open(src, "wb") as f:
+            f.write(jxl_bytes)
+        subprocess.run([DJXL_PATH, src, dst], check=True, capture_output=True, timeout=30)
+        with open(dst, "rb") as f:
+            return f.read()
+
+
+def _proxy_url_storage_path(url: str) -> Optional[str]:
+    """Extract the storage path from a /api/screenshot-view proxy URL."""
+    if "/api/screenshot-view" not in (url or ""):
+        return None
+    from urllib.parse import urlparse, parse_qs
+    try:
+        qs = parse_qs(urlparse(url).query)
+        return qs.get("path", [None])[0]
+    except Exception:
+        return None
+
+
 def download_single_screenshot(ss_info: Dict[str, Any], bucket, session) -> Tuple[str, Optional[bytes], str]:
     """
     Download a single screenshot, trying Storage API first, then HTTP.
+    JXL-stored screenshots are reconstructed to their byte-exact original JPEG.
     Returns: (event_id, image_bytes or None, extension)
     """
     event_id = ss_info.get("event_id", "unknown")
     url = ss_info.get("url", "")
     storage_path = ss_info.get("storagePath")  # Direct path if available
+
+    # Proxy URLs (post-JXL-conversion) carry the storage path as a query param
+    if not storage_path:
+        storage_path = _proxy_url_storage_path(url)
 
     img_data = None
     ext = ".jpg"
@@ -2415,7 +2461,9 @@ def download_single_screenshot(ss_info: Dict[str, Any], bucket, session) -> Tupl
             try:
                 blob = bucket.blob(storage_path)
                 img_data = blob.download_as_bytes()
-                if ".png" in storage_path.lower():
+                if storage_path.endswith(".jxl"):
+                    img_data = reconstruct_jpeg_from_jxl(img_data)
+                elif ".png" in storage_path.lower():
                     ext = ".png"
                 return (event_id, img_data, ext)
             except Exception as e:
@@ -2428,7 +2476,9 @@ def download_single_screenshot(ss_info: Dict[str, Any], bucket, session) -> Tupl
                 try:
                     blob = bucket.blob(extracted_path)
                     img_data = blob.download_as_bytes()
-                    if ".png" in extracted_path.lower():
+                    if extracted_path.endswith(".jxl"):
+                        img_data = reconstruct_jpeg_from_jxl(img_data)
+                    elif ".png" in extracted_path.lower():
                         ext = ".png"
                     return (event_id, img_data, ext)
                 except Exception as e:
@@ -2492,6 +2542,46 @@ def download_screenshots_concurrent(
                 logger.warning(f"Error processing screenshot download: {e}")
 
     return results
+
+
+# ============================================================================
+# Screenshot Display Proxy
+# Serves JXL-stored screenshots as standard JPEGs so every browser (Chrome
+# included) renders them exactly as before. Auth: the object's own Firebase
+# download token must be supplied (same capability model as direct download
+# URLs), and the endpoint sits behind the Dartmouth IP whitelist.
+# ============================================================================
+
+@app.get("/api/screenshot-view")
+def screenshot_view(path: str = Query(...), token: str = Query(...)):
+    """Serve a stored screenshot (JXL or JPEG) as image/jpeg for display."""
+    if not path.startswith("screenshots/") or ".." in path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    try:
+        bucket = get_storage_bucket()
+        blob = bucket.get_blob(path)
+        if blob is None:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        stored_token = (blob.metadata or {}).get("firebaseStorageDownloadTokens", "")
+        if not stored_token or token not in stored_token.split(","):
+            raise HTTPException(status_code=403, detail="Invalid token")
+
+        data = blob.download_as_bytes()
+        if path.endswith(".jxl"):
+            data = reconstruct_jpeg_from_jxl(data)
+
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[ScreenshotView] Failed for {path}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load screenshot")
 
 
 # Export Jobs Collection for async exports
