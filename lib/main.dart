@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
 import 'core/config/environment_config.dart';
@@ -28,6 +30,27 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Activate Firebase App Check — device attestation for the app's direct
+  // Firestore/Storage writes (safety alerts, EMA responses, events).
+  // App Check runs in MONITORING mode until enforcement is turned on in the
+  // Firebase console, so attestation failures never block participants.
+  // Debug builds use the debug provider (register its token in the console).
+  if (!kIsWeb) {
+    try {
+      await FirebaseAppCheck.instance.activate(
+        androidProvider:
+            kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+        appleProvider: kDebugMode
+            ? AppleProvider.debug
+            : AppleProvider.appAttestWithDeviceCheckFallback,
+      );
+      print('[AppCheck] Activated');
+    } catch (e) {
+      // Never block app startup (and the safety pipeline) on attestation
+      print('[AppCheck] Activation failed (non-fatal): $e');
+    }
+  }
 
   // Register background message handler
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
