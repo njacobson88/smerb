@@ -81,3 +81,12 @@ dashboard/backend/venv/
 # Large binary files in deprecated folder
 old_potentially_deprecated/ios_pods/
 old_potentially_deprecated/tessdata/**/*.traineddata
+
+# Reference repos kept locally for adaptation - not part of this codebase
+other_github_repos_for_adaptation/
+
+# Grant/progress report documents - not code
+progress_report/
+
+# Accidental literal '~' directory (from misquoted shell paths)
+/~/
