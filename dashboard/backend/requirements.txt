@@ -1,7 +1,8 @@
 # SocialScope Dashboard Backend Dependencies
 fastapi>=0.109.0
 uvicorn>=0.27.0
-firebase-admin>=6.4.0
+firebase-admin>=6.4.0,<7.0.0
+google-cloud-firestore>=2.16.0,<2.19.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 python-multipart>=0.0.6
@@ -11,6 +12,5 @@ google-cloud-storage>=2.14.0
 google-cloud-secret-manager>=2.18.0
 google-auth>=2.27.0
 sendgrid>=6.11.0
-firebase-admin>=6.4.0
 twilio>=9.0.0
 fpdf2>=2.7.0

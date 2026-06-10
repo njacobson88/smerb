@@ -115,6 +115,9 @@ const RiskAssessmentPanel = ({ participantId }) => {
             {assessment.contactInfo.address && (
               <div className="col-span-2"><span className="text-gray-500">Address:</span> <span className="font-medium">{assessment.contactInfo.address}</span></div>
             )}
+            {assessment.contactInfo.homeType && (
+              <div><span className="text-gray-500">Home Type:</span> <span className="font-medium">{assessment.contactInfo.homeType}</span></div>
+            )}
             {assessment.contactInfo.county && (
               <div><span className="text-gray-500">County:</span> <span className="font-medium">{assessment.contactInfo.county}</span></div>
             )}

@@ -572,33 +572,68 @@ exports[safetyAlertFnName] = onDocumentCreated(
           }
 
           // 4b. IVR call to participant
-          // Press 1 = error/accidental
-          // Press 2 = crisis situation → warm handoff to 988 + notify emergency contacts
-          // Press 3 = crisis + please contact emergency contacts
+          // Press 1 = transfer to 988
+          // Press 2 = error / not in crisis
+          // Press 3 = was in crisis, already received support
           // No answer/no press = unable to reach
           try {
+            const actionUrl = `${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}`;
             const twiml = `<Response>
               <Pause length="2"/>
-              <Say voice="Polly.Joanna">SocialScope study team. Safety check-in call.</Say>
-              <Pause length="3"/>
-              <Say voice="Polly.Joanna">Hello, this is the SocialScope study team at Dartmouth College calling about your recent check-in. We want to make sure you are safe.</Say>
+              <Say voice="Polly.Joanna">Hello. Thank you for picking up this call. This is an automated call from the SocialScope study.</Say>
+              <Pause length="1"/>
+              <Say voice="Polly.Joanna">We are calling because we recently received a response from you indicating that you may be experiencing a mental health crisis or may need additional immediate support. Your safety is very important to us. This call is intended to help you connect with support right away or let us know if the response was no longer accurate.</Say>
+              <Pause length="1"/>
+              <Say voice="Polly.Joanna">If you are in immediate danger or need emergency medical help, please hang up and call 911 now or go to the nearest emergency department.</Say>
               <Pause length="2"/>
-              <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}" method="POST" timeout="20">
+              <Say voice="Polly.Joanna">You will now hear three options. Please listen carefully.</Say>
+              <Pause length="1"/>
+              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">
                 <Say voice="Polly.Joanna">
-                  Press 1 if you are safe and this was an error or accidental response.
-                  Press 2 if you are experiencing a crisis and would like to be connected to the 988 Suicide and Crisis Lifeline.
-                  Press 3 if you are experiencing a crisis and would also like us to notify your emergency contacts.
+                  Press 1 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline, where trained crisis counselors are available to provide immediate support.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 2 if your response was an error and you are not currently in a crisis state.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support, such as from an emergency contact, 988, a therapist, a healthcare provider, or another trusted person.
                 </Say>
               </Gather>
-              <Gather numDigits="1" action="${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}" method="POST" timeout="15">
+              <Say voice="Polly.Joanna">Again, please listen to the options.</Say>
+              <Pause length="1"/>
+              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">
                 <Say voice="Polly.Joanna">
-                  This is the SocialScope study team. We are calling about your safety.
-                  Press 1 if you are safe.
-                  Press 2 to be connected to 988.
-                  Press 3 for 988 plus emergency contact notification.
+                  Press 1 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 2 if your response was an error and you are not currently in a crisis state.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support.
                 </Say>
               </Gather>
-              <Say voice="Polly.Joanna">We did not receive a response. A member of our team will follow up with you shortly. If you are in crisis, please report to the nearest emergency room, call 911, or call 988. Goodbye.</Say>
+              <Say voice="Polly.Joanna">For a third and final time, here are the options.</Say>
+              <Pause length="1"/>
+              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">
+                <Say voice="Polly.Joanna">
+                  Press 1 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 2 if your response was an error and you are not currently in a crisis state.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support.
+                </Say>
+              </Gather>
+              <Say voice="Polly.Joanna">Please make your selection now.</Say>
+              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="10"/>
+              <Say voice="Polly.Joanna">We did not receive a valid response. Because your earlier response indicated that you may need immediate support, we encourage you to call or text 988 now, or call 911 if you are in immediate danger. Goodbye.</Say>
             </Response>`;
 
             const call = await client.calls.create({
@@ -616,7 +651,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
             await safetyEventRef.collection("audit_trail").doc().set({
               type: "participant_call_initiated",
               result: participantCallResult,
-              message: "IVR call: 1=error, 2=crisis+988, 3=crisis+emergency contacts",
+              message: "IVR call: 1=transfer to 988, 2=error/not in crisis, 3=resolved with support",
               loggedBy: "system",
               loggedAt: admin.firestore.FieldValue.serverTimestamp(),
             });
@@ -868,11 +903,190 @@ exports[escalationFnName] = onSchedule(
     }
 
     // ================================================================
+    // Emergency Contact Auto-Notification (5-minute no-reply escalation)
+    //
+    // After the initial crisis SMS is sent to a participant, if they do NOT
+    // reply ERROR/1 within 5 minutes, automatically notify their emergency
+    // contacts via text (at 5 min) and voice call (at ~8 min / 3 min after text).
+    //
+    // The message tells the emergency contact:
+    //   - The participant's name
+    //   - They have been designated as an emergency contact
+    //   - The participant reported experiencing a mental health crisis
+    //   - Encourage them to reach out and support the participant
+    //   - If in immediate danger → call 911
+    // ================================================================
+    try {
+      const now = new Date();  // Re-declare for this scope
+
+      // Get all open (unresolved) safety events — filter in code to avoid
+      // needing composite indexes for inequality + inequality queries
+      const allOpenEvents = await admin.firestore()
+        .collection(col("safety_events"))
+        .where("escalationStopped", "==", false)
+        .get();
+
+      for (const doc of allOpenEvents.docs) {
+        const eventData = doc.data();
+
+        // Skip if participant already resolved (replied ERROR/1 via SMS or pressed 1 on IVR)
+        if (eventData.participantResolved === true) continue;
+
+        // Skip if participant confirmed crisis on IVR (press 2/3) — those are handled
+        // by the IVR flow itself (conference call to 988, explicit emergency contact notification)
+        if (eventData.participantConfirmedCrisis === true) continue;
+
+        // Skip if this isn't a confirmed danger event that was texted
+        if (!eventData.participantPhone) continue;
+
+        // Determine when the participant was first contacted (SMS sent timestamp)
+        const createdAt = eventData.createdAt?.toDate?.() || null;
+        if (!createdAt) continue;
+
+        const minutesSinceCreation = (now.getTime() - createdAt.getTime()) / (60 * 1000);
+
+        // Only auto-notify for events created within the last 60 minutes.
+        // Older events are stale — if they weren't resolved within an hour,
+        // the on-call escalation pathway has already taken over.
+        if (minutesSinceCreation > 60) continue;
+
+        // ─── TEXT emergency contacts at 5+ minutes ───
+        if (minutesSinceCreation >= 5 && !eventData.emergencyContactAutoTextSent) {
+          console.log(`[EmergencyContactAuto] 5+ min elapsed for ${eventData.participantId}, sending texts to emergency contacts`);
+
+          // Get participant info for emergency contacts
+          const participantInfo = await getParticipantInfo(eventData.participantId);
+
+          if (participantInfo.emergencyContacts && participantInfo.emergencyContacts.length > 0) {
+            const client = getTwilioClient();
+            const fromNumber = twilioFromNumber.value();
+            const participantName = participantInfo.name || `Study participant ${eventData.participantId}`;
+            const textResults = [];
+
+            for (const contact of participantInfo.emergencyContacts) {
+              if (!contact.phone) continue;
+              const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
+              const contactName = contact.name || "emergency contact";
+
+              try {
+                const smsResult = await client.messages.create({
+                  body: `This is the SocialScope research study team at Dartmouth College. ` +
+                        `${participantName} has designated you (${contactName}) as an emergency contact ` +
+                        `and has reported that they are currently experiencing a mental health crisis to our study team. ` +
+                        `We encourage you to reach out to ${participantName} to try to check in on them and provide support. ` +
+                        `If you believe they are in immediate danger, please call 911. ` +
+                        `You can also encourage them to call 988 (Suicide & Crisis Lifeline). ` +
+                        `Thank you for your help.`,
+                  from: fromNumber,
+                  to: contactPhone,
+                });
+                textResults.push({ name: contactName, phone: contact.phone, sid: smsResult.sid });
+                console.log(`[EmergencyContactAuto] Text sent to ${contactName} (${contact.phone}): ${smsResult.sid}`);
+              } catch (err) {
+                textResults.push({ name: contactName, phone: contact.phone, error: err.message });
+                console.error(`[EmergencyContactAuto] Text failed to ${contactName}: ${err.message}`);
+              }
+            }
+
+            // Mark as sent so we don't repeat
+            await doc.ref.update({
+              emergencyContactAutoTextSent: true,
+              emergencyContactAutoTextSentAt: admin.firestore.FieldValue.serverTimestamp(),
+              emergencyContactAutoTextResults: textResults,
+            });
+
+            await doc.ref.collection("audit_trail").doc().set({
+              type: "emergency_contact_auto_text",
+              reason: "participant_no_reply_5min",
+              minutesSinceAlert: Math.round(minutesSinceCreation),
+              contactsNotified: textResults.length,
+              results: textResults,
+              loggedBy: "system",
+              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          } else {
+            console.log(`[EmergencyContactAuto] No emergency contacts found for ${eventData.participantId}`);
+            await doc.ref.update({ emergencyContactAutoTextSent: true, emergencyContactAutoTextSkipped: "no_contacts" });
+          }
+        }
+
+        // ─── CALL emergency contacts at 8+ minutes (3 min after text) ───
+        if (minutesSinceCreation >= 8 && eventData.emergencyContactAutoTextSent && !eventData.emergencyContactAutoCallSent) {
+          console.log(`[EmergencyContactAuto] 8+ min elapsed for ${eventData.participantId}, calling emergency contacts`);
+
+          const participantInfo = await getParticipantInfo(eventData.participantId);
+
+          if (participantInfo.emergencyContacts && participantInfo.emergencyContacts.length > 0) {
+            const client = getTwilioClient();
+            const fromNumber = twilioFromNumber.value();
+            const participantName = participantInfo.name || `Study participant ${eventData.participantId}`;
+            const callResults = [];
+
+            for (const contact of participantInfo.emergencyContacts) {
+              if (!contact.phone) continue;
+              const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
+              const contactName = contact.name || "emergency contact";
+
+              try {
+                const callResult = await client.calls.create({
+                  twiml: `<Response>` +
+                    `<Pause length="2"/>` +
+                    `<Say voice="Polly.Joanna">Hello ${contactName}. This is the SocialScope research study team at Dartmouth College.</Say>` +
+                    `<Pause length="1"/>` +
+                    `<Say voice="Polly.Joanna">${participantName} has designated you as an emergency contact for our study, ` +
+                    `and has reported that they are currently experiencing a mental health crisis to our study team.</Say>` +
+                    `<Pause length="1"/>` +
+                    `<Say voice="Polly.Joanna">We encourage you to reach out to ${participantName} to try to check in on them and provide support.</Say>` +
+                    `<Pause length="1"/>` +
+                    `<Say voice="Polly.Joanna">If you believe they are in immediate danger, please call 911. ` +
+                    `You can also encourage them to call 988, the Suicide and Crisis Lifeline.</Say>` +
+                    `<Pause length="1"/>` +
+                    `<Say voice="Polly.Joanna">Thank you for your help. Goodbye.</Say>` +
+                    `</Response>`,
+                  from: fromNumber,
+                  to: contactPhone,
+                  timeout: 60,
+                });
+                callResults.push({ name: contactName, phone: contact.phone, sid: callResult.sid });
+                console.log(`[EmergencyContactAuto] Call placed to ${contactName} (${contact.phone}): ${callResult.sid}`);
+              } catch (err) {
+                callResults.push({ name: contactName, phone: contact.phone, error: err.message });
+                console.error(`[EmergencyContactAuto] Call failed to ${contactName}: ${err.message}`);
+              }
+            }
+
+            // Mark as sent
+            await doc.ref.update({
+              emergencyContactAutoCallSent: true,
+              emergencyContactAutoCallSentAt: admin.firestore.FieldValue.serverTimestamp(),
+              emergencyContactAutoCallResults: callResults,
+            });
+
+            await doc.ref.collection("audit_trail").doc().set({
+              type: "emergency_contact_auto_call",
+              reason: "participant_no_reply_8min",
+              minutesSinceAlert: Math.round(minutesSinceCreation),
+              contactsCalled: callResults.length,
+              results: callResults,
+              loggedBy: "system",
+              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          } else {
+            await doc.ref.update({ emergencyContactAutoCallSent: true, emergencyContactAutoCallSkipped: "no_contacts" });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Emergency contact auto-notification error:", err);
+    }
+
+    // ================================================================
     // Check for unresolved pending safety confirmations (walk-away detection)
     // If a participant exceeded a threshold but walked away without
     // answering the yes/no, send a "potential risk" alert after 15 minutes.
     // ================================================================
     try {
+      const now = new Date();  // Re-declare for this scope
       const fifteenMinAgo = new Date(now.getTime() - 15 * 60 * 1000);
 
       // Get all participants

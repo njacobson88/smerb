@@ -138,6 +138,7 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
         "/api/twilio/hold-music",
         "/api/twilio/join-conference",
         "/api/twilio/conference-events",
+        "/api/twilio/incoming-call",
         "/api/config/environment",
         "/api/install/links",
     ):
@@ -730,12 +731,13 @@ def get_all_participant_ids(enrolled_only: bool = True) -> list:
 
             data = doc.to_dict()
 
-            # Filter to only enrolled participants if requested
+            # Filter to only enrolled/registered participants if requested
             if enrolled_only:
                 is_enrolled = (
                     data.get("inUse") == True or
                     data.get("enrolledAt") is not None or
-                    data.get("lastEnrolledAt") is not None
+                    data.get("lastEnrolledAt") is not None or
+                    data.get("enrolledViaRedcap") == True
                 )
                 if not is_enrolled:
                     continue
@@ -4147,58 +4149,16 @@ async def twilio_call_response(
                 return None
 
         if digits == "1":
-            # Press 1: Error / accidental — stops escalation
-            twiml = (
-                '<Response>'
-                '<Say voice="alice">Thank you. We are glad you are safe. '
-                'If you need support at any time, please call 988. Goodbye.</Say>'
-                '</Response>'
-            )
-
-            # Update safety event in background — don't block TwiML response
-            def update_event_press1():
-                event_ref = _get_event_ref()
-                if event_ref:
-                    event_ref.update({
-                        "currentDisposition": "false_alarm",
-                        "escalationStopped": True,
-                        "participantResolved": True,
-                        "participantResolvedAt": datetime.utcnow(),
-                        "lastRespondedAt": datetime.utcnow(),
-                    })
-                    event_ref.collection("audit_trail").document().set({
-                        "type": "participant_ivr_response",
-                        "response": "error_accidental",
-                        "digits": "1",
-                        "callSid": call_sid,
-                        "loggedBy": "system",
-                        "loggedAt": datetime.utcnow(),
-                    })
-            threading.Thread(target=update_event_press1, daemon=True).start()
-
-        elif digits in ("2", "3"):
-            # Press 2 or 3: Crisis situation — warm handoff to 988 via Conference
-            # Generate TwiML IMMEDIATELY — do not block on Firestore
+            # Press 1: Transfer to 988 Suicide & Crisis Lifeline
+            # ZERO Firestore reads here — return TwiML INSTANTLY
             conference_room = f"crisis-{participantId}-{alertId or uuid.uuid4().hex[:8]}"
 
-            # Load conference config (reads from Firestore doc, fast)
-            conf = get_conference_config()
-
-            if conf.get("enabled") and twilio_client and conf.get("bridge_number"):
-                # === CONFERENCE-BASED WARM TRANSFER ===
-                # Step 1: Place participant in conference with hold audio.
-                #   startConferenceOnEnter=false — participant hears hold message
-                #   endConferenceOnExit=true — conference ends if participant hangs up
-                # Step 2: Background task dials the bridge number (988's dedicated line)
-                #   via calls.create() with sendDigits. The bridge call is a SEPARATE
-                #   call leg — participant does NOT hear the IVR/DTMF navigation.
-                #   When the bridge answers and sendDigits completes, the url callback
-                #   fires and returns TwiML to join the conference.
-                #   startConferenceOnEnter=true on the bridge leg starts the conference,
-                #   stopping the participant's hold audio and connecting them.
-
+            if twilio_client:
+                # Place participant in conference with hold audio immediately
                 twiml = (
                     '<Response>'
+                    '<Say voice="Polly.Joanna">Thank you. We will now try to transfer you to the '
+                    '988 Suicide and Crisis Lifeline. Please stay on the line.</Say>'
                     '<Dial>'
                     f'<Conference startConferenceOnEnter="false" endConferenceOnExit="true" '
                     f'waitUrl="{backend_url}/api/twilio/hold-music" '
@@ -4209,17 +4169,20 @@ async def twilio_call_response(
                     f'{conference_room}'
                     f'</Conference>'
                     '</Dial>'
-                    f'<Say voice="alice">{conf.get("fallback_message", DEFAULT_CONFERENCE_CONFIG["fallback_message"])}</Say>'
+                    '<Say voice="Polly.Joanna">If you were disconnected, please call 988 directly. Goodbye.</Say>'
                     '</Response>'
                 )
 
-                # Step 2: Dial the bridge number in a background thread
-                # This is a separate call — audio is isolated from the conference
-                # until the join-conference callback fires after answer + sendDigits
-                # ALL Firestore work also happens here — do NOT block TwiML response
-
+                # Background thread: read config + dial bridge — NO blocking the TwiML
                 def dial_bridge_and_update():
                     try:
+                        # Read conference config IN the background thread
+                        conf = get_conference_config()
+
+                        if not conf.get("enabled") or not conf.get("bridge_number"):
+                            logger.warning("[Conference] Conference not enabled or no bridge number")
+                            return
+
                         # DIAL FIRST — this is the time-critical part
                         raw_digits = conf.get("send_digits", "")
                         send_digits = ""
@@ -4229,27 +4192,38 @@ async def twilio_call_response(
                                 participant_doc = db.collection(config.col("participants")).document(participantId).get()
                                 if participant_doc.exists:
                                     p_data = participant_doc.to_dict()
-                                    p_phone = (p_data.get("phone") or p_data.get("phoneNumber") or "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "")
+                                    p_phone = (p_data.get("phone") or p_data.get("phoneNumber") or "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
                                     p_area = p_phone[:3] if len(p_phone) >= 3 else ""
-                                    send_digits = raw_digits.replace("{phone}", p_phone).replace("{area_code}", p_area)
+                                    # Interleave 'w' (0.5s pause) between each digit for IVR reliability
+                                    phone_spaced = "w".join(list(p_phone))
+                                    area_spaced = "w".join(list(p_area))
+                                    send_digits = raw_digits.replace("{phone}", phone_spaced).replace("{area_code}", area_spaced)
                             except Exception as e:
                                 logger.warning(f"[Conference] Could not fetch participant phone for sendDigits: {e}")
                                 send_digits = raw_digits.replace("{phone}", "").replace("{area_code}", "")
                         elif raw_digits:
                             send_digits = raw_digits
 
+                        # Build join-conference callback URL
+                        dtmf_audio_url = conf.get("dtmf_audio_url", "")
+                        join_url = (
+                            f"{backend_url}/api/twilio/join-conference"
+                            f"?room={conference_room}"
+                            f"&participantId={participantId}"
+                            f"&alertId={alertId}"
+                        )
+                        if dtmf_audio_url:
+                            join_url += f"&dtmf_audio_url={dtmf_audio_url}"
+
                         call_params = {
                             "to": conf["bridge_number"],
                             "from_": config.TWILIO_FROM_NUMBER,
-                            "url": (
-                                f"{backend_url}/api/twilio/join-conference"
-                                f"?room={conference_room}"
-                                f"&participantId={participantId}"
-                                f"&alertId={alertId}"
-                            ),
+                            "url": join_url,
                             "timeout": 60,
                         }
-                        if send_digits:
+                        # Use send_digits for IVR signaling (inaudible DTMF)
+                        # unless dtmf_audio_url is set (audible audio tones instead)
+                        if send_digits and not dtmf_audio_url:
                             call_params["send_digits"] = send_digits
 
                         bridge_call = twilio_client.calls.create(**call_params)
@@ -4301,32 +4275,103 @@ async def twilio_call_response(
                 threading.Thread(target=dial_bridge_and_update, daemon=True).start()
 
             else:
-                # Fallback: direct cold transfer if conference not enabled/configured
-                logger.warning("[Twilio IVR] Conference not enabled, falling back to direct <Dial>988</Dial>")
+                # Fallback: no Twilio client available — direct cold transfer
+                logger.warning("[Twilio IVR] No Twilio client, falling back to direct <Dial>988</Dial>")
                 twiml = (
                     '<Response>'
-                    '<Say voice="alice">We hear you and we want to help. '
-                    'We are connecting you to the 988 Suicide and Crisis Lifeline now. '
-                    'We are also notifying your emergency contacts. '
-                    'Please stay on the line.</Say>'
+                    '<Say voice="Polly.Joanna">Thank you. We will now try to transfer you to the '
+                    '988 Suicide and Crisis Lifeline. Please stay on the line. '
+                    'If the call does not connect, you can call or text 988 directly at any time. '
+                    'If you are in immediate danger, please call 911 now.</Say>'
                     '<Dial timeout="60">988</Dial>'
-                    '<Say voice="alice">If you were disconnected, please call 988 directly. Goodbye.</Say>'
+                    '<Say voice="Polly.Joanna">If you were disconnected, please call 988 directly. Goodbye.</Say>'
                     '</Response>'
                 )
 
+        elif digits == "2":
+            # Press 2: Error — not currently in a crisis state
+            twiml = (
+                '<Response>'
+                '<Say voice="Polly.Joanna">'
+                'Thank you for letting us know. We have recorded that your response was an error '
+                'and that you are not currently in a crisis state. You may now hang up.'
+                '</Say>'
+                '</Response>'
+            )
+
+            def update_event_press2():
+                event_ref = _get_event_ref()
+                if event_ref:
+                    event_ref.update({
+                        "currentDisposition": "false_alarm",
+                        "escalationStopped": True,
+                        "participantResolved": True,
+                        "participantResolvedAt": datetime.utcnow(),
+                        "participantResolvedVia": "ivr_press2_error",
+                        "lastRespondedAt": datetime.utcnow(),
+                    })
+                    event_ref.collection("audit_trail").document().set({
+                        "type": "participant_ivr_response",
+                        "response": "error_not_in_crisis",
+                        "digits": "2",
+                        "callSid": call_sid,
+                        "loggedBy": "system",
+                        "loggedAt": datetime.utcnow(),
+                    })
+            threading.Thread(target=update_event_press2, daemon=True).start()
+
+        elif digits == "3":
+            # Press 3: Was in crisis but already received support
+            twiml = (
+                '<Response>'
+                '<Say voice="Polly.Joanna">'
+                'Thank you for letting us know. We have recorded that you were previously in a crisis state, '
+                'but that you are no longer in a crisis state because you have already received support. '
+                'If you need additional immediate support later, you can call or text 988 at any time. '
+                'You may now hang up.'
+                '</Say>'
+                '</Response>'
+            )
+
+            def update_event_press3():
+                event_ref = _get_event_ref()
+                if event_ref:
+                    event_ref.update({
+                        "currentDisposition": "crisis_resolved_with_support",
+                        "escalationStopped": True,
+                        "participantResolved": True,
+                        "participantResolvedAt": datetime.utcnow(),
+                        "participantResolvedVia": "ivr_press3_resolved",
+                        "lastRespondedAt": datetime.utcnow(),
+                    })
+                    event_ref.collection("audit_trail").document().set({
+                        "type": "participant_ivr_response",
+                        "response": "crisis_resolved_with_support",
+                        "digits": "3",
+                        "callSid": call_sid,
+                        "loggedBy": "system",
+                        "loggedAt": datetime.utcnow(),
+                    })
+            threading.Thread(target=update_event_press3, daemon=True).start()
+
         else:
-            # Unrecognized input or no response — replay options
+            # Unrecognized input — replay options once more
             twiml = (
                 '<Response>'
                 f'<Gather numDigits="1" action="{backend_url}'
-                f'/api/twilio/call-response?participantId={participantId}&alertId={alertId}" method="POST" timeout="15">'
-                '<Say voice="alice">Sorry, we did not understand your response. '
-                'Press 1 if this was an error and you are safe. '
-                'Press 2 if you are experiencing a crisis and would like to speak to someone. '
-                'Press 3 if you are experiencing a crisis and would like us to also contact your emergency contacts.</Say>'
+                f'/api/twilio/call-response?participantId={participantId}&alertId={alertId}" method="POST" timeout="20">'
+                '<Say voice="Polly.Joanna">'
+                'Sorry, we did not understand your response. '
+                'Press 1 to be transferred to the 988 Suicide and Crisis Lifeline. '
+                'Press 2 if your response was an error and you are not currently in a crisis state. '
+                'Press 3 if you were in a crisis state but have already received support.'
+                '</Say>'
                 '</Gather>'
-                '<Say voice="alice">We did not receive a response. A team member will follow up with you shortly. '
-                'If you are in danger, please call 988.</Say>'
+                '<Say voice="Polly.Joanna">'
+                'We did not receive a valid response. Because your earlier response indicated that you may '
+                'need immediate support, we encourage you to call or text 988 now, or call 911 if you are '
+                'in immediate danger. Goodbye.'
+                '</Say>'
                 '</Response>'
             )
 
@@ -4363,18 +4408,28 @@ async def twilio_call_response(
 async def twilio_hold_music(request: Request):
     """
     TwiML endpoint for conference hold audio.
-    Plays a reassuring message on loop while the 988 bridge call connects.
-    Called via the Conference waitUrl attribute.
+    Plays reassuring messages on loop while the 988 bridge call connects.
+    Called via the Conference waitUrl attribute. Loops indefinitely via <Redirect/>.
     """
-    conf = get_conference_config()
-    hold_msg = conf.get("hold_message", DEFAULT_CONFERENCE_CONFIG["hold_message"])
-
-    # <Redirect/> with empty URL loops back to this endpoint, replaying the message
+    # Rotate through reassuring messages so it doesn't feel like a broken recording
     twiml = (
         '<Response>'
-        f'<Say voice="alice">{hold_msg}</Say>'
-        '<Pause length="3"/>'
-        '<Say voice="alice">Please continue to hold. We are connecting you now.</Say>'
+        '<Say voice="Polly.Joanna">'
+        'Thank you for staying on the line. We are working to connect you to the '
+        '988 Suicide and Crisis Lifeline now. Please stay on the line.'
+        '</Say>'
+        '<Pause length="5"/>'
+        '<Say voice="Polly.Joanna">'
+        'Your call is important. A trained crisis counselor will be with you shortly. '
+        'If you are experiencing a long wait, you can also call or text 988 directly at any time.'
+        '</Say>'
+        '<Pause length="5"/>'
+        '<Say voice="Polly.Joanna">'
+        'We are still connecting your call. Please continue to hold. '
+        'If you are in an urgent crisis and need immediate help, please hang up and call 911 now.'
+        '</Say>'
+        '<Pause length="5"/>'
+        '<Say voice="Polly.Joanna">Please continue to hold. We are connecting you now.</Say>'
         '<Pause length="5"/>'
         '<Redirect/>'
         '</Response>'
@@ -4388,11 +4443,15 @@ async def twilio_join_conference(
     room: str = Query(None),
     participantId: str = Query(None),
     alertId: str = Query(None),
+    dtmf_audio_url: str = Query(None),
 ):
     """
     TwiML callback for the bridge call (988's dedicated line).
     Fires AFTER the bridge call is answered and sendDigits completes.
     Returns Conference TwiML to join the participant's conference room.
+
+    If dtmf_audio_url is provided, plays audible DTMF audio tones first
+    (used when 988's IVR needs to hear dial tones for routing).
 
     startConferenceOnEnter=true causes the participant's hold audio to stop
     and connects them to the bridge caller (988 counselor) seamlessly.
@@ -4417,8 +4476,19 @@ async def twilio_join_conference(
 
     backend_url = os.getenv("BACKEND_URL", "https://socialscope-dashboard-api-436153481478.us-central1.run.app")
 
+    # Build TwiML — optionally play DTMF audio before joining conference
+    # The audio file has a built-in initial pause, so no extra <Pause> needed
+    dtmf_section = ""
+    if dtmf_audio_url:
+        dtmf_section = (
+            f'<Play>{dtmf_audio_url}</Play>'
+            '<Say voice="Polly.Joanna">The participant from the SocialScope study at Dartmouth has been connected. '
+            'They are now on the line and you can initiate the call.</Say>'
+        )
+
     twiml = (
         '<Response>'
+        f'{dtmf_section}'
         '<Dial>'
         f'<Conference startConferenceOnEnter="true" endConferenceOnExit="true" '
         f'beep="false" '
@@ -4497,10 +4567,10 @@ async def twilio_conference_events(
 
 
 # ============================================================================
-# Twilio SMS Reply Webhook — On-call can reply to SMS to ACK/update disposition
+# Twilio SMS Reply Webhook — Handles replies from on-call staff AND participants
 # ============================================================================
 
-# SMS command mapping
+# SMS command mapping (on-call staff)
 SMS_DISPOSITION_MAP = {
     "ACK": "acknowledged",
     "SAFE": "contacted_safe",
@@ -4514,24 +4584,120 @@ SMS_DISPOSITION_MAP = {
     "ONGOING": "ongoing",
 }
 
+# Participant error reply keywords (stops escalation)
+PARTICIPANT_ERROR_KEYWORDS = {"ERROR", "1", "ONE", "FALSE", "MISTAKE", "ACCIDENT", "ACCIDENTAL"}
+
+
+def _find_participant_by_phone(phone_number: str):
+    """
+    Look up a participant by phone number. Returns (participant_id, doc_data) or (None, None).
+    Checks both 'phone' and 'phoneNumber' fields, with and without +1 prefix.
+    """
+    # Normalize: strip to just digits
+    normalized = phone_number.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+    if normalized.startswith("1") and len(normalized) == 11:
+        normalized = normalized[1:]  # Strip country code
+
+    # Query participants collection for matching phone
+    participants_ref = db.collection(config.col("participants"))
+
+    # Try with the normalized number (various stored formats)
+    for phone_field in ["phone", "phoneNumber"]:
+        for fmt in [normalized, f"+1{normalized}", f"1{normalized}"]:
+            try:
+                docs = list(participants_ref.where(phone_field, "==", fmt).limit(1).stream())
+                if docs:
+                    return docs[0].id, docs[0].to_dict()
+            except Exception:
+                pass
+
+    return None, None
+
 
 @app.post("/api/twilio/sms-reply")
 async def twilio_sms_reply(request: Request):
     """
-    Twilio webhook for incoming SMS replies from on-call staff.
-    Matches the sender's phone to the on-call roster, finds their most
-    recent unresolved safety event, and applies the disposition.
+    Twilio webhook for incoming SMS replies.
 
-    Commands: ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, ONGOING
+    1. If sender is a PARTICIPANT:
+       - ERROR/1/ONE/MISTAKE → stops escalation (false alarm)
+       - Anything else → responds with structured fields notice + crisis resources
+    2. If sender is ON-CALL STAFF:
+       - ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, ONGOING → disposition commands
+    3. Unknown sender → generic response
     """
     try:
         form_data = await request.form()
-        body = form_data.get("Body", "").strip().upper()
+        body = form_data.get("Body", "").strip()
+        body_upper = body.upper()
         from_number = form_data.get("From", "").replace("+1", "").replace("+", "")
 
         logger.info(f"[SMS Reply] From: {from_number}, Body: '{body}'")
 
-        # Look up who this is from the on-call roster
+        # ─── STEP 1: Check if sender is a participant ───
+        participant_id, participant_data = _find_participant_by_phone(from_number)
+
+        if participant_id:
+            logger.info(f"[SMS Reply] Identified as participant: {participant_id}")
+
+            # Check if this is an ERROR/false-alarm reply
+            first_word = body_upper.split()[0] if body_upper else ""
+            if first_word in PARTICIPANT_ERROR_KEYWORDS or body_upper in PARTICIPANT_ERROR_KEYWORDS:
+                # Stop escalation — participant says it was an error
+                import threading
+
+                def _stop_escalation():
+                    try:
+                        events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+                            .where("participantId", "==", participant_id)
+                            .where("escalationStopped", "==", False)
+                            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                            .limit(1).stream())
+
+                        if events:
+                            event_ref = events[0].reference
+                            event_ref.update({
+                                "currentDisposition": "false_alarm",
+                                "escalationStopped": True,
+                                "participantResolved": True,
+                                "participantResolvedAt": datetime.utcnow(),
+                                "participantResolvedVia": "sms",
+                                "lastRespondedAt": datetime.utcnow(),
+                            })
+                            event_ref.collection("audit_trail").document().set({
+                                "type": "participant_sms_error_reply",
+                                "response": body,
+                                "participantId": participant_id,
+                                "fromNumber": from_number,
+                                "loggedBy": "system",
+                                "loggedAt": datetime.utcnow(),
+                            })
+                            logger.info(f"[SMS Reply] Participant {participant_id} replied ERROR — escalation stopped")
+                    except Exception as e:
+                        logger.error(f"[SMS Reply] Failed to stop escalation for {participant_id}: {e}")
+
+                threading.Thread(target=_stop_escalation, daemon=True).start()
+
+                return Response(
+                    content='<Response><Message>Thank you. We have noted that this was an error. '
+                            'If you ever need support, please call 988 (Suicide &amp; Crisis Lifeline). '
+                            'Take care.</Message></Response>',
+                    media_type="application/xml",
+                )
+            else:
+                # Non-error reply from participant — inform them this is automated
+                return Response(
+                    content='<Response><Message>This is an automated research system (SocialScope, Dartmouth College). '
+                            'We are unable to monitor or respond to text messages from this number. '
+                            'Responses must be structured (reply ERROR or 1 if your earlier response was accidental).\n\n'
+                            'If you are in crisis:\n'
+                            '- Call 911 or go to your nearest emergency room\n'
+                            '- Call 988 (Suicide &amp; Crisis Lifeline)\n'
+                            '- Text HOME to 741741 (Crisis Text Line)</Message></Response>',
+                    media_type="application/xml",
+                )
+
+        # ─── STEP 2: Check if sender is on-call staff ───
         responder_name = None
         for doc in db.collection(ONCALL_COLLECTION).stream():
             data = doc.to_dict()
@@ -4546,9 +4712,15 @@ async def twilio_sms_reply(request: Request):
                 responder_name = doc.to_dict().get("name", from_number)
 
         if not responder_name:
+            # Unknown sender — could be anyone texting this number
             logger.warning(f"[SMS Reply] Unknown sender: {from_number}")
             return Response(
-                content='<Response><Message>Unknown number. Please use the dashboard.</Message></Response>',
+                content='<Response><Message>This is an automated research system (SocialScope, Dartmouth College). '
+                        'This number is not monitored for incoming messages.\n\n'
+                        'If you are in crisis:\n'
+                        '- Call 911 or go to your nearest emergency room\n'
+                        '- Call 988 (Suicide &amp; Crisis Lifeline)\n'
+                        '- Text HOME to 741741 (Crisis Text Line)</Message></Response>',
                 media_type="application/xml",
             )
 
@@ -4648,6 +4820,45 @@ async def twilio_sms_reply(request: Request):
             content='<Response><Message>Error processing reply. Please use the dashboard.</Message></Response>',
             media_type="application/xml",
         )
+
+
+# ============================================================================
+# Twilio Incoming Voice Call Handler
+# Plays automated message when someone calls the Twilio number directly
+# ============================================================================
+
+@app.post("/api/twilio/incoming-call")
+@app.get("/api/twilio/incoming-call")
+async def twilio_incoming_call(request: Request):
+    """
+    Twilio webhook for incoming voice calls to the study number.
+    Plays a message explaining this is an automated system and provides crisis resources.
+    """
+    logger.info("[Twilio Incoming Call] Received incoming call")
+
+    twiml = (
+        '<Response>'
+        '<Say voice="Polly.Joanna">'
+        'Hello. You have reached the SocialScope research study automated system at Dartmouth College. '
+        'This phone number is part of an automated research system and is not monitored for incoming calls. '
+        'We are unable to take your call.'
+        '</Say>'
+        '<Pause length="1"/>'
+        '<Say voice="Polly.Joanna">'
+        'If you are experiencing a mental health crisis, please hang up and call 988 for the Suicide and Crisis Lifeline, '
+        'call 911, or go to your nearest emergency room. '
+        'You can also text HOME to 741741 for the Crisis Text Line.'
+        '</Say>'
+        '<Pause length="1"/>'
+        '<Say voice="Polly.Joanna">'
+        'If you are a study participant and need to reach the research team, '
+        'please contact us through the SocialScope app or email the study team directly. '
+        'Thank you and take care. Goodbye.'
+        '</Say>'
+        '</Response>'
+    )
+
+    return Response(content=twiml, media_type="application/xml")
 
 
 # ============================================================================
@@ -4915,6 +5126,60 @@ REDCAP_MAPPINGS_COLLECTION = config.col("redcap_mappings")
 VALID_PARTICIPANTS_COLLECTION = config.col("valid_participants")
 
 
+def _send_auto_invite(participant_id: str, email: str):
+    """
+    Auto-send Firebase App Distribution invite to a newly qualified participant.
+    Adds them as a tester for both iOS and Android — Firebase handles showing
+    only the relevant platform when they open the invite.
+    """
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        headers = {
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+        }
+
+        project_number = "436153481478"
+
+        # Step 1: Add tester
+        add_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/testers:batchAdd"
+        add_resp = http_requests.post(add_url, headers=headers, json={"emails": [email]})
+        if add_resp.status_code not in (200, 409):
+            logger.error(f"[AutoInvite] Failed to add tester {email}: {add_resp.status_code} {add_resp.text}")
+            return
+
+        # Step 2: Add to testers group
+        group_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups/testers"
+        group_check = http_requests.get(group_url, headers=headers)
+        if group_check.status_code == 404:
+            create_url = f"https://firebaseappdistribution.googleapis.com/v1/projects/{project_number}/groups"
+            http_requests.post(create_url, headers=headers, json={
+                "name": f"projects/{project_number}/groups/testers",
+                "displayName": "testers",
+            })
+        http_requests.post(f"{group_url}:batchJoin", headers=headers, json={"emails": [email]})
+
+        # Update participant record with invite status
+        participants_col = config.col("participants")
+        db.collection(participants_col).document(participant_id).set({
+            "distributionInviteSentAt": datetime.utcnow(),
+            "distributionInviteStatus": "sent",
+            "distributionInviteSentBy": "redcap_auto_enroll",
+            "distributionEmail": email,
+        }, merge=True)
+
+        logger.info(f"[AutoInvite] Invite sent to {email} for participant {participant_id}")
+
+    except Exception as e:
+        logger.error(f"[AutoInvite] Failed to send invite to {email}: {e}", exc_info=True)
+
+
 def generate_unique_9digit_id() -> str:
     """Generate a random 9-digit ID that doesn't already exist in Firestore."""
     max_attempts = 50
@@ -4997,6 +5262,63 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
     redcap_written = write_id_to_redcap(redcap_record_id, app_id, event_name)
 
     logger.info(f"[REDCap] Generated app ID {app_id} for record {redcap_record_id} (REDCap write: {redcap_written})")
+
+    # --- Auto-enroll: fetch contact info from REDCap and register on dashboard ---
+    import threading
+
+    def auto_enroll_participant():
+        try:
+            # Fetch email, phone from REDCap (no event filter — these fields
+            # may be in a different event than qualify_for_study)
+            enroll_fields = ["subj_email", "subj_phone"]
+            req_data = {
+                "token": config.REDCAP_API_TOKEN,
+                "content": "record",
+                "format": "json",
+                "records[0]": redcap_record_id,
+                "returnFormat": "json",
+            }
+            for i, f in enumerate(enroll_fields):
+                req_data[f"fields[{i}]"] = f
+            resp = http_requests.post(config.REDCAP_API_URL, data=req_data)
+
+            email = None
+            phone = None
+            if resp.status_code == 200:
+                records = resp.json()
+                for r in records:
+                    if isinstance(r, dict):
+                        email = email or (r.get("subj_email", "").strip() or None)
+                        phone = phone or (r.get("subj_phone", "").strip() or None)
+
+            # Create participants/{app_id} doc for dashboard visibility
+            participants_col = config.col("participants")
+            participant_data = {
+                "participantId": app_id,
+                "redcapRecordId": redcap_record_id,
+                "createdAt": datetime.utcnow(),
+                "createdBy": "redcap_auto_enroll",
+                "enrolledViaRedcap": True,
+            }
+            if email:
+                participant_data["distributionEmail"] = email
+                participant_data["email"] = email
+            if phone:
+                participant_data["phone"] = phone
+
+            db.collection(participants_col).document(app_id).set(participant_data, merge=True)
+            logger.info(f"[AutoEnroll] Participant {app_id} registered on dashboard (email={email}, phone={phone})")
+
+            # Send Firebase App Distribution invite if we have an email
+            if email:
+                _send_auto_invite(app_id, email)
+            else:
+                logger.warning(f"[AutoEnroll] No email for {app_id} (record {redcap_record_id}), skipping invite")
+
+        except Exception as e:
+            logger.error(f"[AutoEnroll] Failed for {app_id}: {e}", exc_info=True)
+
+    threading.Thread(target=auto_enroll_participant, daemon=True).start()
 
     return {
         "status": "created",
@@ -5232,7 +5554,12 @@ REDCAP_SAFETY_PLAN_FIELDS = [
     "sp_environment1", "sp_environment2",
     "sp_reasons_live",
     "subj_county", "sp_er_service_number",
+    # Interview: participant address & home type (for wellness check dispatching)
+    "sp_subj_address", "participant_address_type", "participant_address_other",
 ]
+
+# Home type mapping (REDCap radio choices → labels)
+HOME_TYPE_MAP = {"0": "Apartment", "1": "Condo", "2": "Town house", "3": "House", "4": "Other"}
 
 
 def transform_redcap_safety_plan(redcap_data: dict) -> dict:
@@ -5324,6 +5651,14 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
     county = _nonempty(redcap_data.get("subj_county", ""))
     er_service_number = _nonempty(redcap_data.get("sp_er_service_number", ""))
 
+    # Address & home type (from interview_script_questions instrument)
+    address = _nonempty(redcap_data.get("sp_subj_address", ""))
+    home_type_raw = _nonempty(redcap_data.get("participant_address_type", ""))
+    home_type = HOME_TYPE_MAP.get(home_type_raw, home_type_raw) if home_type_raw else None
+    home_type_other = _nonempty(redcap_data.get("participant_address_other", ""))
+    if home_type == "Other" and home_type_other:
+        home_type = f"Other ({home_type_other})"
+
     return {
         "warningSigns": warning_signs,
         "copingStrategies": coping_strategies,
@@ -5340,6 +5675,8 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
         "reasonsToLive": reasons_to_live,
         "county": county,
         "erServiceNumber": er_service_number,
+        "address": address,
+        "homeType": home_type,
     }
 
 
@@ -5408,8 +5745,22 @@ def sync_safety_plan(
 
         # Write to Firestore
         participants_col = config.col("participants")
-        db.collection(participants_col).document(participant_id) \
-            .collection("safety_plan").document("current").set(safety_plan)
+        p_ref = db.collection(participants_col).document(participant_id)
+        p_ref.collection("safety_plan").document("current").set(safety_plan)
+
+        # Also copy key contact fields to the participant doc for quick access
+        # (used by emergency contact notifications, risk assessment, wellness checks)
+        participant_update = {}
+        if safety_plan.get("address"):
+            participant_update["address"] = safety_plan["address"]
+        if safety_plan.get("homeType"):
+            participant_update["homeType"] = safety_plan["homeType"]
+        if safety_plan.get("county"):
+            participant_update["county"] = safety_plan["county"]
+        if safety_plan.get("erServiceNumber"):
+            participant_update["erServiceNumber"] = safety_plan["erServiceNumber"]
+        if participant_update:
+            p_ref.update(participant_update)
 
         logger.info(f"[SafetyPlan] Synced safety plan for participant {participant_id} (REDCap record {redcap_record_id})")
 

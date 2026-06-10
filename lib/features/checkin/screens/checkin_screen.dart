@@ -36,6 +36,7 @@ class _CheckinScreenState extends State<CheckinScreen>
   final SwiperController _swiperController = SwiperController();
   final Map<String, dynamic> _responses = {};
   int _currentIndex = 0;
+  int _maxReachedIndex = 0; // Furthest question the user has reached
   List<EmaQuestion> _visibleQuestions = [];
   bool _completed = false;
   bool _showPostResources = false;
@@ -96,6 +97,11 @@ class _CheckinScreenState extends State<CheckinScreen>
       }
     }
     _visibleQuestions = visible;
+
+    // Clamp _maxReachedIndex if visible questions changed (skip logic toggled)
+    if (_maxReachedIndex >= _visibleQuestions.length) {
+      _maxReachedIndex = _visibleQuestions.length - 1;
+    }
   }
 
   bool _shouldShowHiddenQuestion(EmaQuestion question) {
@@ -295,8 +301,18 @@ class _CheckinScreenState extends State<CheckinScreen>
       return;
     }
 
+    // If user is reviewing a previous question, don't auto-advance —
+    // let them swipe forward at their own pace
+    if (_currentIndex < _maxReachedIndex) {
+      return;
+    }
+
     if (_currentIndex < _visibleQuestions.length - 1) {
       _swiperController.next();
+      // Update max reached index so user can swipe back to this point
+      if (_currentIndex + 1 > _maxReachedIndex) {
+        _maxReachedIndex = _currentIndex + 1;
+      }
     } else {
       // Last question — check if any safety thresholds were exceeded
       // If so, show ONE safety confirmation before submitting
@@ -305,6 +321,20 @@ class _CheckinScreenState extends State<CheckinScreen>
         return;
       }
       _submitCheckin();
+    }
+  }
+
+  void _goToPrevious() {
+    if (_currentIndex > 0) {
+      _swiperController.previous();
+    }
+  }
+
+  void _goForwardIfAllowed() {
+    // Only allow swiping forward to questions the user has already reached
+    if (_currentIndex < _maxReachedIndex &&
+        _currentIndex < _visibleQuestions.length - 1) {
+      _swiperController.next();
     }
   }
 
@@ -589,20 +619,32 @@ class _CheckinScreenState extends State<CheckinScreen>
               ),
             ),
             Expanded(
-              child: Swiper(
-                controller: _swiperController,
-                index: _currentIndex,
-                itemCount: _visibleQuestions.length,
-                viewportFraction: 0.88,
-                scale: 0.92,
-                loop: false,
-                physics: const NeverScrollableScrollPhysics(), // Prevent free swiping
-                onIndexChanged: (index) {
-                  setState(() => _currentIndex = index);
+              child: GestureDetector(
+                onHorizontalDragEnd: (details) {
+                  final velocity = details.primaryVelocity ?? 0;
+                  if (velocity > 300) {
+                    // Swipe right → go back
+                    _goToPrevious();
+                  } else if (velocity < -300) {
+                    // Swipe left → go forward (only if already visited)
+                    _goForwardIfAllowed();
+                  }
                 },
-                itemBuilder: (context, index) {
-                  return _buildQuestionCard(_visibleQuestions[index]);
-                },
+                child: Swiper(
+                  controller: _swiperController,
+                  index: _currentIndex,
+                  itemCount: _visibleQuestions.length,
+                  viewportFraction: 0.88,
+                  scale: 0.92,
+                  loop: false,
+                  physics: const NeverScrollableScrollPhysics(),
+                  onIndexChanged: (index) {
+                    setState(() => _currentIndex = index);
+                  },
+                  itemBuilder: (context, index) {
+                    return _buildQuestionCard(_visibleQuestions[index]);
+                  },
+                ),
               ),
             ),
           ],

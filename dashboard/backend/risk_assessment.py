@@ -386,6 +386,7 @@ def build_risk_assessment_pdf(assessment, pdf_path, generated_by="system"):
             ("Phone", ci.get("phone")),
             ("Email", ci.get("email")),
             ("Address", ci.get("address")),
+            ("Home Type", ci.get("homeType")),
             ("County", ci.get("county")),
             ("Emergency Services", ci.get("erServiceNumber")),
         ]:
@@ -600,10 +601,8 @@ def auto_send_risk_pdf_if_needed(participant_id, db, config, logger):
             "alertHistory": alerts,
         }
 
-        html_content = build_risk_assessment_html(assessment, "auto_alert")
-        pdf_path = f"/tmp/risk_assessment_{participant_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.html"
-        with open(pdf_path, "w") as f:
-            f.write(html_content)
+        pdf_path = f"/tmp/risk_assessment_{participant_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+        build_risk_assessment_pdf(assessment, pdf_path, "auto_alert")
 
         email_pdf_to_slack(pdf_path, assessment, "auto_alert", logger)
 
@@ -655,7 +654,8 @@ def register_risk_assessment_routes(app, db, limiter, verify_firebase_token, con
             contact_info = {
                 "phone": participant_data.get("phone") or participant_data.get("phoneNumber"),
                 "email": participant_data.get("email"),
-                "address": participant_data.get("address"),
+                "address": participant_data.get("address") or (safety_plan or {}).get("address"),
+                "homeType": participant_data.get("homeType") or (safety_plan or {}).get("homeType"),
                 "county": participant_data.get("county") or (safety_plan or {}).get("county"),
                 "erServiceNumber": participant_data.get("erServiceNumber") or (safety_plan or {}).get("erServiceNumber"),
                 "emergencyContacts": participant_data.get("emergencyContacts", []),
