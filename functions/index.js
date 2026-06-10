@@ -593,12 +593,28 @@ exports[safetyAlertFnName] = onDocumentCreated(
           }
 
           // 4b. IVR call to participant
-          // Press 1 = transfer to 988
-          // Press 2 = error / not in crisis
+          // Press 1 = error / not in crisis (same meaning as texting 1/ERROR)
+          // Press 2 = transfer to 988
           // Press 3 = was in crisis, already received support
           // No answer/no press = unable to reach
           try {
             const actionUrl = `${BACKEND_URL}/api/twilio/call-response?participantId=${participantId}&alertId=${alertId}`;
+            // Digit mapping is aligned across ALL channels (SMS + IVR):
+            // 1 = error/not in crisis, 2 = transfer to 988, 3 = already supported.
+            // Single source of truth for the options — repeated three times.
+            const ivrOptions = `
+                <Say voice="Polly.Joanna">
+                  Press 1 if your response was an error and you are not currently in a crisis state.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 2 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline, where trained crisis counselors are available to provide immediate support.
+                </Say>
+                <Pause length="1"/>
+                <Say voice="Polly.Joanna">
+                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support, such as from an emergency contact, 988, a therapist, a healthcare provider, or another trusted person.
+                </Say>`;
+            const gatherBlock = `<Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">${ivrOptions}</Gather>`;
             const twiml = `<Response>
               <Pause length="2"/>
               <Say voice="Polly.Joanna">Hello. Thank you for picking up this call. This is an automated call from the SocialScope study.</Say>
@@ -609,49 +625,13 @@ exports[safetyAlertFnName] = onDocumentCreated(
               <Pause length="2"/>
               <Say voice="Polly.Joanna">You will now hear three options. Please listen carefully.</Say>
               <Pause length="1"/>
-              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">
-                <Say voice="Polly.Joanna">
-                  Press 1 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline, where trained crisis counselors are available to provide immediate support.
-                </Say>
-                <Pause length="1"/>
-                <Say voice="Polly.Joanna">
-                  Press 2 if your response was an error and you are not currently in a crisis state.
-                </Say>
-                <Pause length="1"/>
-                <Say voice="Polly.Joanna">
-                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support, such as from an emergency contact, 988, a therapist, a healthcare provider, or another trusted person.
-                </Say>
-              </Gather>
+              ${gatherBlock}
               <Say voice="Polly.Joanna">Again, please listen to the options.</Say>
               <Pause length="1"/>
-              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">
-                <Say voice="Polly.Joanna">
-                  Press 1 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline.
-                </Say>
-                <Pause length="1"/>
-                <Say voice="Polly.Joanna">
-                  Press 2 if your response was an error and you are not currently in a crisis state.
-                </Say>
-                <Pause length="1"/>
-                <Say voice="Polly.Joanna">
-                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support.
-                </Say>
-              </Gather>
+              ${gatherBlock}
               <Say voice="Polly.Joanna">For a third and final time, here are the options.</Say>
               <Pause length="1"/>
-              <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="20">
-                <Say voice="Polly.Joanna">
-                  Press 1 if you would like us to try to transfer you now to the 988 Suicide and Crisis Lifeline.
-                </Say>
-                <Pause length="1"/>
-                <Say voice="Polly.Joanna">
-                  Press 2 if your response was an error and you are not currently in a crisis state.
-                </Say>
-                <Pause length="1"/>
-                <Say voice="Polly.Joanna">
-                  Press 3 if you were in a crisis state, but you are no longer in a crisis state because you have already received support.
-                </Say>
-              </Gather>
+              ${gatherBlock}
               <Say voice="Polly.Joanna">Please make your selection now.</Say>
               <Gather numDigits="1" action="${actionUrl}" method="POST" timeout="10"/>
               <Say voice="Polly.Joanna">We did not receive a valid response. Because your earlier response indicated that you may need immediate support, we encourage you to call or text 988 now, or call 911 if you are in immediate danger. Goodbye.</Say>
@@ -672,7 +652,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
             await safetyEventRef.collection("audit_trail").doc().set({
               type: "participant_call_initiated",
               result: participantCallResult,
-              message: "IVR call: 1=transfer to 988, 2=error/not in crisis, 3=resolved with support",
+              message: "IVR call: 1=error/not in crisis, 2=transfer to 988, 3=resolved with support",
               loggedBy: "system",
               loggedAt: admin.firestore.FieldValue.serverTimestamp(),
             });

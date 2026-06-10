@@ -4383,8 +4383,9 @@ async def twilio_call_response(
                 logger.warning(f"[Twilio IVR] Failed to find safety event: {e}")
                 return None
 
-        if digits == "1":
-            # Press 1: Transfer to 988 Suicide & Crisis Lifeline
+        if digits == "2":
+            # Press 2: Transfer to 988 Suicide & Crisis Lifeline
+            # (digit mapping aligned with SMS where 1/ERROR = error)
             # ZERO Firestore reads here — return TwiML INSTANTLY
             conference_room = f"crisis-{participantId}-{alertId or uuid.uuid4().hex[:8]}"
 
@@ -4556,13 +4557,14 @@ async def twilio_call_response(
                     '988 Suicide and Crisis Lifeline. Please stay on the line. '
                     'If the call does not connect, you can call or text 988 directly at any time. '
                     'If you are in immediate danger, please call 911 now.</Say>'
-                    '<Dial timeout="60">+18002738255</Dial>'  # 988 Lifeline E.164 (Twilio cannot dial short codes)
+                    f'<Dial timeout="60">{get_conference_config().get("bridge_number") or "+18002738255"}</Dial>' 
                     '<Say voice="Polly.Joanna">If you were disconnected, please call 988 directly. Goodbye.</Say>'
                     '</Response>'
                 )
 
-        elif digits == "2":
-            # Press 2: Error — not currently in a crisis state
+        elif digits == "1":
+            # Press 1: Error — not currently in a crisis state (same meaning as
+            # texting 1/ERROR — digits mean the same thing on every channel)
             twiml = (
                 '<Response>'
                 '<Say voice="Polly.Joanna">'
@@ -4572,7 +4574,7 @@ async def twilio_call_response(
                 '</Response>'
             )
 
-            def update_event_press2():
+            def update_event_press1_error():
                 event_ref = _get_event_ref()
                 if event_ref:
                     event_ref.update({
@@ -4580,18 +4582,18 @@ async def twilio_call_response(
                         "escalationStopped": True,
                         "participantResolved": True,
                         "participantResolvedAt": datetime.utcnow(),
-                        "participantResolvedVia": "ivr_press2_error",
+                        "participantResolvedVia": "ivr_press1_error",
                         "lastRespondedAt": datetime.utcnow(),
                     })
                     event_ref.collection("audit_trail").document().set({
                         "type": "participant_ivr_response",
                         "response": "error_not_in_crisis",
-                        "digits": "2",
+                        "digits": "1",
                         "callSid": call_sid,
                         "loggedBy": "system",
                         "loggedAt": datetime.utcnow(),
                     })
-            threading.Thread(target=update_event_press2, daemon=True).start()
+            threading.Thread(target=update_event_press1_error, daemon=True).start()
 
         elif digits == "3":
             # Press 3: Was in crisis but already received support
@@ -4635,8 +4637,8 @@ async def twilio_call_response(
                 f'/api/twilio/call-response?participantId={participantId}&alertId={alertId}" method="POST" timeout="20">'
                 '<Say voice="Polly.Joanna">'
                 'Sorry, we did not understand your response. '
-                'Press 1 to be transferred to the 988 Suicide and Crisis Lifeline. '
-                'Press 2 if your response was an error and you are not currently in a crisis state. '
+                'Press 1 if your response was an error and you are not currently in a crisis state. '
+                'Press 2 to be transferred to the 988 Suicide and Crisis Lifeline. '
                 'Press 3 if you were in a crisis state but have already received support.'
                 '</Say>'
                 '</Gather>'
@@ -6074,6 +6076,13 @@ def sync_safety_plan(
             participant_update["county"] = safety_plan["county"]
         if safety_plan.get("erServiceNumber"):
             participant_update["erServiceNumber"] = safety_plan["erServiceNumber"]
+        # Emergency contacts come from the REDCap safety plan's support network —
+        # this is what the crisis notification functions read (emergencyContacts)
+        support_contacts = [
+            c for c in (safety_plan.get("supportContacts") or []) if c.get("phone")
+        ]
+        if support_contacts:
+            participant_update["emergencyContacts"] = support_contacts
         if participant_update:
             # set(merge=True) — update() throws if the participant doc doesn't exist yet
             p_ref.set(participant_update, merge=True)
