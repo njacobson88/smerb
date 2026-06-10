@@ -1262,3 +1262,35 @@ exports.optimizeScreenshot = onObjectFinalized(
     }
   }
 );
+
+
+// ============================================================================
+// Daily Firestore Backup
+//
+// Exports the entire Firestore database to the archive backup bucket every
+// day at 08:00 UTC (alongside the daily Storage Transfer Service job that
+// mirrors the Storage bucket). Each export lands in a timestamped folder —
+// nothing is ever overwritten or deleted. Like optimizeScreenshot, this is
+// infrastructure shared by dev and prod (Firestore is one database with
+// collection prefixes), so exactly one instance should be deployed.
+// ============================================================================
+exports.dailyFirestoreBackup = onSchedule(
+  { schedule: "0 8 * * *", timeZone: "UTC", region: "us-central1", timeoutSeconds: 300 },
+  async () => {
+    const { GoogleAuth } = require("google-auth-library");
+    const auth = new GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/datastore", "https://www.googleapis.com/auth/cloud-platform"],
+    });
+    const client = await auth.getClient();
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const outputUriPrefix = `gs://r01-redditx-suicide-archive-backup/firestore-exports/${ts}`;
+
+    const res = await client.request({
+      url: "https://firestore.googleapis.com/v1/projects/r01-redditx-suicide/databases/(default):exportDocuments",
+      method: "POST",
+      data: { outputUriPrefix },
+    });
+
+    console.log(`[FirestoreBackup] Export started -> ${outputUriPrefix} (operation: ${res.data.name})`);
+  }
+);

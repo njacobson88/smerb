@@ -3381,6 +3381,104 @@ def remove_user(request: Request, email: str, user: dict = Depends(verify_admin_
 
 
 # ============================================================================
+# Exports Archive-and-Clear (admin only, multi-confirmation)
+#
+# Research data retention policy: NOTHING is ever deleted outright. This
+# endpoint moves dashboard export artifacts (exports/) from the live bucket
+# into the permanent archive backup bucket, and removes each original ONLY
+# after its archive copy is verified (size + MD5). Study data (screenshots/,
+# html/) is never touched. Every invocation is audit-logged.
+# ============================================================================
+
+ARCHIVE_BACKUP_BUCKET = "r01-redditx-suicide-archive-backup"
+EXPORTS_ARCHIVE_CONFIRM_TEXT = "ARCHIVE AND CLEAR EXPORTS"
+
+
+class ArchiveExportsRequest(BaseModel):
+    confirm_text: str
+    pi_confirmed: bool
+
+
+@app.post("/api/admin/exports/archive-and-clear")
+@limiter.limit("3/hour")
+def archive_and_clear_exports(
+    request: Request,
+    body: ArchiveExportsRequest,
+    user: dict = Depends(verify_admin_token),
+):
+    """
+    Move all exports/ artifacts to the archive backup bucket, verifying each
+    copy before removing the original. Requires the exact confirmation phrase
+    and explicit confirmation with the PI (Nicholas C. Jacobson).
+    """
+    if body.confirm_text.strip() != EXPORTS_ARCHIVE_CONFIRM_TEXT:
+        raise HTTPException(status_code=400, detail="Confirmation text does not match")
+    if not body.pi_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="This action requires confirmation with the PI (Nicholas C. Jacobson)",
+        )
+
+    try:
+        from google.cloud import storage as gcs
+
+        client = gcs.Client()
+        src_bucket = client.bucket(f"{config.FIREBASE_PROJECT_ID}.firebasestorage.app")
+        dst_bucket = client.bucket(ARCHIVE_BACKUP_BUCKET)
+
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
+        dest_prefix = f"exports-archived/{ts}/"
+
+        moved, failed, total_bytes = 0, 0, 0
+        blobs = list(src_bucket.list_blobs(prefix="exports/"))
+
+        for blob in blobs:
+            try:
+                copied = src_bucket.copy_blob(blob, dst_bucket, dest_prefix + blob.name)
+                # Verify the archive copy byte-for-byte before removing original
+                if copied.md5_hash == blob.md5_hash and copied.size == blob.size:
+                    blob.delete()
+                    moved += 1
+                    total_bytes += blob.size or 0
+                else:
+                    failed += 1
+                    logger.error(f"[ExportsArchive] Copy verification FAILED for {blob.name} — original kept")
+            except Exception as e:
+                failed += 1
+                logger.error(f"[ExportsArchive] Failed to archive {blob.name}: {e}")
+
+        # Audit log — required for research data governance
+        db.collection(config.col("admin_audit_log")).document().set({
+            "action": "exports_archive_and_clear",
+            "performedBy": user.get("email"),
+            "piConfirmedWith": "Nicholas C. Jacobson",
+            "piConfirmed": True,
+            "objectsMoved": moved,
+            "objectsFailed": failed,
+            "bytesMoved": total_bytes,
+            "archiveDestination": f"gs://{ARCHIVE_BACKUP_BUCKET}/{dest_prefix}",
+            "performedAt": datetime.utcnow(),
+        })
+
+        logger.warning(
+            f"[ExportsArchive] {user.get('email')} archived {moved} export objects "
+            f"({total_bytes:,} bytes) to {dest_prefix}; {failed} failures (originals kept)"
+        )
+
+        return {
+            "moved": moved,
+            "failed": failed,
+            "bytesMoved": total_bytes,
+            "archiveDestination": f"gs://{ARCHIVE_BACKUP_BUCKET}/{dest_prefix}",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[ExportsArchive] Operation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Archive operation failed — no data was deleted")
+
+
+# ============================================================================
 # Alert Recipients Management (for Twilio SMS alerts)
 # ============================================================================
 

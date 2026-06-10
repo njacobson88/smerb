@@ -900,6 +900,184 @@ const ExportScreen = () => {
           </div>
         )}
       </div>
+
+      <ExportsArchiveSection />
+    </div>
+  );
+};
+
+
+// ============================================================================
+// Exports Archive-and-Clear — admin danger zone
+// Moves export artifacts to the permanent archive backup bucket (originals
+// removed ONLY after each copy is verified). Three warning steps + typed
+// phrase + explicit PI confirmation required. Study data is never touched.
+// ============================================================================
+const ExportsArchiveSection = () => {
+  const [step, setStep] = useState(0); // 0 = closed, 1..3 = warning steps
+  const [confirmText, setConfirmText] = useState('');
+  const [piConfirmed, setPiConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  const REQUIRED_PHRASE = 'ARCHIVE AND CLEAR EXPORTS';
+
+  const reset = () => {
+    setStep(0);
+    setConfirmText('');
+    setPiConfirmed(false);
+    setError(null);
+  };
+
+  const executeArchive = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await authFetch(`${API_BASE_URL}/api/admin/exports/archive-and-clear`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm_text: confirmText, pi_confirmed: piConfirmed }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail || 'Archive operation failed');
+      }
+      setResult(data);
+      reset();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const warningBanner = (text) => (
+    <div className="flex items-start gap-2 bg-red-50 border border-red-300 rounded-lg p-3 mb-3">
+      <AlertTriangle className="text-red-600 flex-shrink-0 mt-0.5" size={18} />
+      <p className="text-sm text-red-800">{text}</p>
+    </div>
+  );
+
+  return (
+    <div className="mt-8 bg-white rounded-xl shadow border-2 border-red-200 p-6">
+      <h3 className="text-lg font-semibold text-red-700 flex items-center gap-2">
+        <AlertTriangle size={20} /> Data Management — Archive &amp; Clear Exports
+      </h3>
+      <p className="text-sm text-gray-600 mt-2">
+        Moves all generated export files to the permanent archive backup bucket and removes them
+        from the live bucket. Originals are removed <strong>only after each archive copy is
+        verified</strong>. Study data (screenshots, HTML, participant data) is never touched.
+        Admin only; every use is audit-logged.
+      </p>
+
+      {result && (
+        <div className="mt-3 bg-green-50 border border-green-300 rounded-lg p-3 text-sm text-green-800">
+          Archived {result.moved} files ({(result.bytesMoved / 1e6).toFixed(1)} MB) to{' '}
+          <code>{result.archiveDestination}</code>
+          {result.failed > 0 && ` — ${result.failed} failed (originals kept in place)`}
+        </div>
+      )}
+      {error && (
+        <div className="mt-3 bg-red-50 border border-red-300 rounded-lg p-3 text-sm text-red-800">
+          {error}
+        </div>
+      )}
+
+      {step === 0 && (
+        <button
+          onClick={() => { setResult(null); setStep(1); }}
+          className="mt-4 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700"
+        >
+          Archive &amp; Clear Exports…
+        </button>
+      )}
+
+      {step > 0 && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full mx-4 p-6">
+            {step === 1 && (
+              <>
+                <h4 className="text-lg font-bold text-red-700 mb-3">⚠️ Warning 1 of 3</h4>
+                {warningBanner(
+                  'You are about to move ALL generated export files out of the live bucket. ' +
+                  'Any previously shared export download links will stop working.'
+                )}
+                <p className="text-sm text-gray-700 mb-4">
+                  The files are NOT deleted — they are copied to the permanent archive backup
+                  bucket and verified before the originals are removed. Exports can also be
+                  regenerated from study data at any time.
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button onClick={reset} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
+                  <button onClick={() => setStep(2)} className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700">I understand — continue</button>
+                </div>
+              </>
+            )}
+
+            {step === 2 && (
+              <>
+                <h4 className="text-lg font-bold text-red-700 mb-3">⚠️ Warning 2 of 3</h4>
+                {warningBanner(
+                  'Research data governance: confirm that no team member currently needs the ' +
+                  'live export download links, and that this action complies with the study\'s ' +
+                  'data retention plan.'
+                )}
+                <p className="text-sm text-gray-700 mb-4">
+                  All archived files remain permanently retrievable from the archive backup bucket
+                  by the study team. This action is recorded in the admin audit log with your name.
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button onClick={reset} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
+                  <button onClick={() => setStep(3)} className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700">I understand — continue</button>
+                </div>
+              </>
+            )}
+
+            {step === 3 && (
+              <>
+                <h4 className="text-lg font-bold text-red-700 mb-3">⚠️ Final Confirmation (3 of 3)</h4>
+                {warningBanner(
+                  'This is the final step. The action will run immediately and cannot be undone ' +
+                  'from this screen (files will live in the archive bucket).'
+                )}
+                <label className="flex items-start gap-2 text-sm text-gray-800 mb-4 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={piConfirmed}
+                    onChange={(e) => setPiConfirmed(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    I have confirmed this action directly with the PI,{' '}
+                    <strong>Nicholas C. Jacobson</strong>.
+                  </span>
+                </label>
+                <label className="block text-sm text-gray-800 mb-1">
+                  Type <code className="bg-gray-100 px-1 rounded">{REQUIRED_PHRASE}</code> to confirm:
+                </label>
+                <input
+                  type="text"
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4"
+                  placeholder={REQUIRED_PHRASE}
+                />
+                <div className="flex justify-end gap-2">
+                  <button onClick={reset} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
+                  <button
+                    onClick={executeArchive}
+                    disabled={busy || !piConfirmed || confirmText.trim() !== REQUIRED_PHRASE}
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {busy ? 'Archiving…' : 'Archive & Clear Exports'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
