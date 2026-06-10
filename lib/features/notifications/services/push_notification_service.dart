@@ -1,8 +1,14 @@
 import 'dart:convert';
+import 'package:flutter/material.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../../../core/config/environment_config.dart';
+import '../screens/safety_response_screen.dart';
+
+/// Global navigator key so push handlers can present the safety-response
+/// screen from anywhere (foreground, background tap, or cold start).
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 /// Handles Firebase Cloud Messaging (FCM) push notifications.
 class PushNotificationService {
@@ -12,6 +18,10 @@ class PushNotificationService {
       FlutterLocalNotificationsPlugin();
 
   String? _fcmToken;
+
+  // Guards against presenting the safety-response screen twice for the same
+  // alert (e.g. foreground message + tap both arriving).
+  String? _activeSafetyAlertId;
 
   PushNotificationService({required this.participantId});
 
@@ -131,6 +141,13 @@ class PushNotificationService {
 
     _storeNotification(message);
 
+    // Safety self-confirmation prompt — present the interactive screen instead
+    // of a passive banner so the participant can confirm or mark it an error.
+    if (message.data['type'] == 'safety_self_confirm') {
+      _presentSafetyResponse(message.data['alertId'] as String?);
+      return;
+    }
+
     final notification = message.notification;
     if (notification != null) {
       _localNotifications.show(
@@ -160,6 +177,71 @@ class PushNotificationService {
   void _handleNotificationTap(RemoteMessage message) {
     print('[Push] Notification tapped: ${message.notification?.title}');
     _storeNotification(message, tapped: true);
+
+    if (message.data['type'] == 'safety_self_confirm') {
+      _presentSafetyResponse(message.data['alertId'] as String?);
+    }
+  }
+
+  /// Present the full-screen safety-response prompt for a given alert.
+  void _presentSafetyResponse(String? alertId) {
+    if (alertId == null || alertId.isEmpty) {
+      print('[Push] safety_self_confirm push missing alertId — ignoring');
+      return;
+    }
+    if (_activeSafetyAlertId == alertId) return; // already showing this alert
+    _activeSafetyAlertId = alertId;
+
+    final navigator = appNavigatorKey.currentState;
+    if (navigator == null) {
+      print('[Push] No navigator available to show safety response');
+      _activeSafetyAlertId = null;
+      return;
+    }
+
+    navigator
+        .push(MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => SafetyResponseScreen(
+            alertId: alertId,
+            pushService: this,
+          ),
+        ))
+        .then((_) => _activeSafetyAlertId = null);
+  }
+
+  /// Record the participant's response to a safety self-confirmation prompt.
+  /// Writes to participants/{id}/safety_responses/{alertId}; a Cloud Function
+  /// reacts — an "error" response stops the escalation process, a "confirmed"
+  /// response is logged and lets escalation continue. Returns true on success.
+  Future<bool> submitSafetyResponse({
+    required String alertId,
+    required String response, // 'confirmed' | 'error'
+  }) async {
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await FirebaseFirestore.instance
+            .collection(EnvConfig.col('participants'))
+            .doc(participantId)
+            .collection('safety_responses')
+            .doc(alertId)
+            .set({
+          'participantId': participantId,
+          'alertId': alertId,
+          'response': response,
+          'respondedAt': FieldValue.serverTimestamp(),
+          'source': 'app_push',
+        }).timeout(const Duration(seconds: 10));
+        print('[Push] Safety response recorded: $response for $alertId');
+        return true;
+      } catch (e) {
+        print('[Push] Safety response write failed (attempt $attempt/3): $e');
+        if (attempt < 3) {
+          await Future.delayed(Duration(seconds: 1 << (attempt - 1)));
+        }
+      }
+    }
+    return false;
   }
 
   Future<void> _storeNotification(RemoteMessage message, {bool tapped = false}) async {

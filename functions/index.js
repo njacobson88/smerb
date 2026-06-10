@@ -259,7 +259,7 @@ async function contactEmergencyContact(client, participantId, fromNumber) {
 // Checks both the participants collection and redcap_mappings
 // ============================================================================
 async function getParticipantInfo(participantId) {
-  const info = { phone: null, email: null, name: null, emergencyContacts: [], redcapId: null };
+  const info = { phone: null, email: null, name: null, emergencyContacts: [], redcapId: null, fcmToken: null };
 
   // Check participants collection
   const pDoc = await admin.firestore().collection(col("participants")).doc(participantId).get();
@@ -268,6 +268,7 @@ async function getParticipantInfo(participantId) {
     info.phone = data.phone || data.phoneNumber;
     info.email = data.email;
     info.name = data.name || data.participantName;
+    info.fcmToken = data.fcmToken || null;
     info.emergencyContacts = data.emergencyContacts || [];
     if (data.emergencyContactPhone) {
       info.emergencyContacts.push({
@@ -591,6 +592,44 @@ exports[safetyAlertFnName] = onDocumentCreated(
               loggedAt: admin.firestore.FieldValue.serverTimestamp(),
             });
           }
+        }
+
+        // 4a-push. Send an in-app push so the participant can confirm they're
+        // at risk or mark it an error directly in the app. An "error" response
+        // stops escalation (same as texting 1/ERROR); writes go to the
+        // safety_responses subcollection that onParticipantSafetyResponse reacts to.
+        if (participantInfo.fcmToken) {
+          try {
+            await admin.messaging().send({
+              token: participantInfo.fcmToken,
+              notification: {
+                title: "Checking in on you",
+                body: "Your recent check-in indicated you may be at risk. "
+                  + "Tap to let us know how you're doing.",
+              },
+              data: { type: "safety_self_confirm", alertId: String(alertId) },
+              apns: {
+                payload: { aps: { sound: "default", "interruption-level": "time-sensitive" } },
+              },
+              android: { priority: "high", notification: { channelId: "push_notifications" } },
+            });
+            if (safetyEventRef) {
+              await safetyEventRef.collection("audit_trail").doc().set({
+                type: "participant_push_sent",
+                message: "Safety self-confirmation push (confirm / error)",
+                loggedBy: "system",
+                loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            console.error(`[SafetyPush] Failed to send to ${participantId}: ${err.message}`);
+          }
+        }
+
+        if (participantInfo.phone) {
+          // Re-derived here: the SMS block above is a separate scope
+          const participantPhone = participantInfo.phone.startsWith("+")
+            ? participantInfo.phone : `+1${participantInfo.phone}`;
 
           // 4b. IVR call to participant
           // Press 1 = error / not in crisis (same meaning as texting 1/ERROR)
@@ -741,6 +780,74 @@ exports[safetyAlertFnName] = onDocumentCreated(
 // Escalation Scheduler: Check for unresponded safety events
 // Runs every 5 minutes to check if on-call has responded
 // ============================================================================
+// ============================================================================
+// Participant in-app safety response (confirm / error)
+//
+// Fires when the app writes participants/{id}/safety_responses/{alertId} after
+// the participant taps a choice on the safety self-confirmation push. The
+// safety_event doc id equals the alertId (createSafetyEvent uses .doc(alertId)),
+// so we resolve it directly. "error" stops escalation exactly like an SMS
+// ERROR / IVR press-1; "confirmed" is logged and lets escalation continue.
+// ============================================================================
+const safetyResponseFnName = ENVIRONMENT === "dev" ? "dev_onParticipantSafetyResponse" : "onParticipantSafetyResponse";
+exports[safetyResponseFnName] = onDocumentCreated(
+  `${col("participants")}/{participantId}/safety_responses/{alertId}`,
+  async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) return;
+    const data = snapshot.data();
+    const { participantId, alertId } = event.params;
+    const response = data.response;
+
+    const eventRef = admin.firestore().collection(col("safety_events")).doc(alertId);
+    const eventSnap = await eventRef.get();
+    if (!eventSnap.exists) {
+      console.warn(`[SafetyResponse] No safety_event ${alertId} for ${participantId} — logging only`);
+    }
+
+    if (response === "error") {
+      // Stop escalation — same disposition the SMS ERROR / IVR press-1 paths set
+      if (eventSnap.exists) {
+        await eventRef.update({
+          currentDisposition: "false_alarm",
+          escalationStopped: true,
+          participantResolved: true,
+          participantResolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+          participantResolvedVia: "app_push_error",
+          lastRespondedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await eventRef.collection("audit_trail").doc().set({
+          type: "participant_app_response",
+          response: "error_not_in_crisis",
+          source: "app_push",
+          loggedBy: "system",
+          loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      console.log(`[SafetyResponse] ${participantId} marked alert ${alertId} an error — escalation stopped`);
+    } else if (response === "confirmed") {
+      // Confirmed they could use support — DO NOT stop escalation; record the
+      // acknowledgement so on-call sees the participant engaged.
+      if (eventSnap.exists) {
+        await eventRef.update({
+          participantConfirmedViaApp: true,
+          lastRespondedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await eventRef.collection("audit_trail").doc().set({
+          type: "participant_app_response",
+          response: "confirmed_needs_support",
+          source: "app_push",
+          loggedBy: "system",
+          loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      console.log(`[SafetyResponse] ${participantId} confirmed need for support on alert ${alertId}`);
+    } else {
+      console.warn(`[SafetyResponse] Unknown response '${response}' for ${alertId}`);
+    }
+  }
+);
+
 const escalationFnName = ENVIRONMENT === "dev" ? "dev_checkEscalation" : "checkEscalation";
 exports[escalationFnName] = onSchedule(
   {

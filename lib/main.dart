@@ -65,6 +65,7 @@ class SmerbApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'SocialScope',
+      navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,

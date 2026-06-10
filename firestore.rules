@@ -120,6 +120,16 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      // Safety responses - participant's reply to the safety self-confirm push
+      // ("confirmed" continues escalation, "error" stops it). A Cloud Function
+      // applies the resolution to the safety_event.
+      match /safety_responses/{alertId} {
+        allow read: if true;
+        allow create, update: if request.resource.data.participantId == participantId &&
+                                 request.resource.data.response in ['confirmed', 'error'];
+        allow delete: if false;
+      }
+
       // Notification log - EMA and safety notification tracking
       match /notification_log/{logId} {
         allow read: if true;
@@ -231,6 +241,12 @@ service cloud.firestore {
         allow read: if true;
         allow create: if true;
         allow update: if true;
+        allow delete: if false;
+      }
+      match /safety_responses/{alertId} {
+        allow read: if true;
+        allow create, update: if request.resource.data.participantId == participantId &&
+                                 request.resource.data.response in ['confirmed', 'error'];
         allow delete: if false;
       }
       match /notification_log/{logId} {
