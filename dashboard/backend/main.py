@@ -875,6 +875,10 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                         "time": alert_time,
                         "triggeredAt": triggered_iso,
                         "sessionId": session_id,
+                        # crisis_indicated drives the dashboard's red CRISIS badge —
+                        # true for a participant-confirmed danger alert.
+                        "crisis_indicated": alert.get("confirmedDanger") is True,
+                        "count": 1,  # one row per alert (alerts are not grouped)
                         "triggerReason": alert.get("triggerReason"),
                         "responses": merged_responses,
                         "notificationSent": alert.get("notificationSent", False),
@@ -1187,6 +1191,9 @@ def refresh_dashboard_cache(request: Request, user: dict = Depends(verify_admin_
                 "weeklyReddit": total_reddit,
                 "weeklyTwitter": total_twitter,
                 "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
+                # Surfaces a dashboard warning when a device's local capture is
+                # paused on a full cache (data-loss risk; usually a long offline gap).
+                "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
             })
 
         # Store in Firestore cache
@@ -1307,6 +1314,9 @@ def scheduler_refresh_cache(secret: str = Query(..., description="Scheduler secr
                 "weeklyReddit": total_reddit,
                 "weeklyTwitter": total_twitter,
                 "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
+                # Surfaces a dashboard warning when a device's local capture is
+                # paused on a full cache (data-loss risk; usually a long offline gap).
+                "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
             })
 
         # Store in Firestore cache
@@ -1557,6 +1567,9 @@ def get_overall_status(
                 "weeklyReddit": total_reddit,
                 "weeklyTwitter": total_twitter,
                 "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
+                # Surfaces a dashboard warning when a device's local capture is
+                # paused on a full cache (data-loss risk; usually a long offline gap).
+                "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
             })
 
         return {
@@ -4396,8 +4409,17 @@ async def twilio_call_response(
         import threading
 
         def _get_event_ref():
-            """Fetch safety event ref in background — do NOT block TwiML response."""
+            """Resolve the safety event this call is about. The safety_events doc
+            id IS the alertId (createSafetyEvent uses .doc(alertId)), and the IVR
+            action URL carries alertId — so target it directly. This avoids
+            mutating the wrong event when a participant has >1 event within a day
+            (e.g. a walk-away event then a confirmed-danger event)."""
             try:
+                if alertId:
+                    ref = db.collection(SAFETY_EVENTS_COLLECTION).document(alertId)
+                    if ref.get().exists:
+                        return ref
+                # Fallback (alertId missing/unknown): most-recent event for participant
                 events = list(db.collection(SAFETY_EVENTS_COLLECTION)
                     .where("participantId", "==", participantId)
                     .order_by("createdAt", direction=firestore.Query.DESCENDING)
@@ -4841,15 +4863,24 @@ async def twilio_conference_events(
             f"participant={participantId} | leg={leg} | callSid={call_sid}"
         )
 
-        # Log to safety event audit trail
+        # Resolve the event by alertId (== safety_events doc id) so a 988-join is
+        # recorded against the event the call was actually about, not whatever is
+        # most recent. Fall back to most-recent only if alertId is missing.
         if participantId:
-            events = list(db.collection(SAFETY_EVENTS_COLLECTION)
-                .where("participantId", "==", participantId)
-                .order_by("createdAt", direction=firestore.Query.DESCENDING)
-                .limit(1).stream())
+            event_ref = None
+            if alertId:
+                candidate = db.collection(SAFETY_EVENTS_COLLECTION).document(alertId)
+                if candidate.get().exists:
+                    event_ref = candidate
+            if event_ref is None:
+                events = list(db.collection(SAFETY_EVENTS_COLLECTION)
+                    .where("participantId", "==", participantId)
+                    .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                    .limit(1).stream())
+                event_ref = events[0].reference if events else None
 
-            if events:
-                event_ref = events[0].reference
+            if event_ref is not None:
+                event_snap = event_ref.get()
                 audit_data = {
                     "type": f"conference_{event}",
                     "conferenceSid": conference_sid,
@@ -4870,6 +4901,10 @@ async def twilio_conference_events(
                         "conf988ConnectedAt": datetime.utcnow(),
                         "currentDisposition": "escalated_988",
                         "escalationStopped": True,
+                        # participantResolved kept consistent with the other
+                        # resolve paths (press-1, press-3, SMS ERROR, app push)
+                        "participantResolved": True,
+                        "participantResolvedAt": datetime.utcnow(),
                         "participantResolvedVia": "988_connected",
                         "lastRespondedAt": datetime.utcnow(),
                     })
@@ -4877,7 +4912,7 @@ async def twilio_conference_events(
 
                 # On conference end, record duration if possible
                 if event == "end":
-                    event_data = events[0].to_dict()
+                    event_data = event_snap.to_dict() if event_snap and event_snap.exists else {}
                     bridge_initiated = event_data.get("bridgeCallInitiatedAt")
                     if bridge_initiated:
                         if hasattr(bridge_initiated, "timestamp"):

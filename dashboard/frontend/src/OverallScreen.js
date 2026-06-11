@@ -546,6 +546,14 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
                               inactive
                             </span>
                           )}
+                          {participant.captureDiskPaused && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-amber-100 text-amber-800 border border-amber-300"
+                              title="This device's local storage is full and capture is paused — possible data loss until it uploads/frees space."
+                            >
+                              ⚠ capture paused (disk full)
+                            </span>
+                          )}
                         </div>
                       </td>
 

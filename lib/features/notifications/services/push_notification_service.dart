@@ -184,21 +184,30 @@ class PushNotificationService {
   }
 
   /// Present the full-screen safety-response prompt for a given alert.
-  void _presentSafetyResponse(String? alertId) {
+  /// On a COLD START (app was terminated, participant tapped the push), this is
+  /// called from getInitialMessage() before the MaterialApp navigator exists,
+  /// so we wait for the navigator to mount instead of dropping the prompt.
+  void _presentSafetyResponse(String? alertId, {int attempt = 0}) {
     if (alertId == null || alertId.isEmpty) {
       print('[Push] safety_self_confirm push missing alertId — ignoring');
       return;
     }
     if (_activeSafetyAlertId == alertId) return; // already showing this alert
-    _activeSafetyAlertId = alertId;
 
     final navigator = appNavigatorKey.currentState;
     if (navigator == null) {
-      print('[Push] No navigator available to show safety response');
-      _activeSafetyAlertId = null;
+      // Navigator not mounted yet (cold start). Retry for up to ~15s rather
+      // than silently losing the in-app self-resolution channel.
+      if (attempt >= 30) {
+        print('[Push] Navigator never became available — cannot show safety response');
+        return;
+      }
+      Future.delayed(const Duration(milliseconds: 500),
+          () => _presentSafetyResponse(alertId, attempt: attempt + 1));
       return;
     }
 
+    _activeSafetyAlertId = alertId;
     navigator
         .push(MaterialPageRoute(
           fullscreenDialog: true,

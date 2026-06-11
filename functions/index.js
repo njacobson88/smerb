@@ -1803,14 +1803,24 @@ exports.convertScreenshotsToJxl = onSchedule(
           };
           const updated = await updateEventDocBothEnvs(meta.participantId, meta.eventId, newFields);
 
-          // Deduped sibling events share this object and carry the same .jpg
-          // URL — repoint every one of them or their images die with the .jpg.
+          // Deduped sibling events share this storage object — repoint every one
+          // or their images die when the .jpg is deleted. Match on the stable
+          // screenshotStoragePath (== file.name) rather than the download URL:
+          // URL matching is fragile (depends on exactly reconstructing the
+          // token, which can differ or be multi-valued). Keep a URL match too
+          // for any legacy doc written before screenshotStoragePath existed.
           const oldUrl = downloadUrlFor(LIVE_BUCKET, file.name, token);
+          const seen = new Set([meta.eventId]);
           for (const collection of ["participants", "dev_participants"]) {
-            const siblings = await admin.firestore().collection(collection)
-              .doc(meta.participantId).collection("events")
-              .where("screenshotUrl", "==", oldUrl).get();
-            for (const sib of siblings.docs) {
+            const evCol = admin.firestore().collection(collection)
+              .doc(meta.participantId).collection("events");
+            const [byPath, byUrl] = await Promise.all([
+              evCol.where("screenshotStoragePath", "==", file.name).get(),
+              evCol.where("screenshotUrl", "==", oldUrl).get(),
+            ]);
+            for (const sib of [...byPath.docs, ...byUrl.docs]) {
+              if (seen.has(sib.id)) continue;
+              seen.add(sib.id);
               await sib.ref.update(newFields).catch((e) =>
                 console.error(`[JxlConvert] sibling repoint failed ${sib.id}: ${e.message}`));
             }
