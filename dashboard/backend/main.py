@@ -4916,7 +4916,9 @@ async def twilio_conference_events(
                     bridge_initiated = event_data.get("bridgeCallInitiatedAt")
                     if bridge_initiated:
                         if hasattr(bridge_initiated, "timestamp"):
-                            duration = (datetime.utcnow() - datetime.fromtimestamp(bridge_initiated.timestamp())).total_seconds()
+                            # utcfromtimestamp keeps the subtraction in UTC; plain
+                            # fromtimestamp would shift to server-local and skew duration.
+                            duration = (datetime.utcnow() - datetime.utcfromtimestamp(bridge_initiated.timestamp())).total_seconds()
                         else:
                             duration = (datetime.utcnow() - bridge_initiated).total_seconds()
                         audit_data["conferenceDurationSeconds"] = duration
@@ -5193,7 +5195,9 @@ async def twilio_sms_reply(request: Request):
             if not event_data.get("firstResponseAt"):
                 created_at = event_data.get("createdAt")
                 if created_at and hasattr(created_at, "timestamp"):
-                    response_time = (datetime.utcnow() - datetime.fromtimestamp(created_at.timestamp())).total_seconds()
+                    # utcfromtimestamp (not fromtimestamp) so this UTC subtraction
+                    # isn't skewed by the server's local offset — matches log_disposition.
+                    response_time = (datetime.utcnow() - datetime.utcfromtimestamp(created_at.timestamp())).total_seconds()
                     update_data["timeToHumanContactSeconds"] = response_time
                     update_data["firstResponseAt"] = datetime.utcnow()
             if disposition in ("escalated_988", "escalated_er", "contacted_needs_support"):
@@ -5848,7 +5852,7 @@ async def redcap_data_entry_trigger(request: Request):
             }
 
         # ---- C-SSRS instruments: sync to Firestore + trigger crisis alerts ----
-        if instrument in (CSSRS_SCREEN_INSTRUMENT, CSSRS_PEDIATRIC_INSTRUMENT):
+        if instrument in CSSRS_INSTRUMENTS:
             logger.info(f"[REDCap DET] C-SSRS ({instrument}) saved for record {record_id}, syncing...")
 
             if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
@@ -6282,7 +6286,10 @@ def sync_all_safety_plans(
 # C-SSRS Sync & Risk Assessment (modular — see cssrs_sync.py, risk_assessment.py)
 # ============================================================================
 
-from cssrs_sync import sync_cssrs_from_redcap, CSSRS_SCREEN_INSTRUMENT, CSSRS_PEDIATRIC_INSTRUMENT
+from cssrs_sync import (
+    sync_cssrs_from_redcap, CSSRS_INSTRUMENTS,
+    CSSRS_SCREEN_INSTRUMENT, CSSRS_WEEKLY_INSTRUMENT, CSSRS_PEDIATRIC_INSTRUMENT,
+)
 from risk_assessment import (
     register_risk_assessment_routes,
     auto_send_risk_pdf_if_needed,

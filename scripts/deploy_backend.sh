@@ -36,7 +36,15 @@ gcloud run deploy "$SERVICE_NAME" \
   --region=us-central1 \
   --project=r01-redditx-suicide \
   --allow-unauthenticated \
-  --set-env-vars="ENVIRONMENT=$ENVIRONMENT,REDCAP_API_URL=$REDCAP_API_URL,REDCAP_API_TOKEN=$REDCAP_API_TOKEN"
+  --no-cpu-throttling \
+  --min-instances=1 \
+  --set-env-vars="ENVIRONMENT=$ENVIRONMENT,REDCAP_API_URL=$REDCAP_API_URL,REDCAP_API_TOKEN=$REDCAP_API_TOKEN,REDCAP_PROJECT_ID=$REDCAP_PROJECT_ID"
+
+# NOTE: --no-cpu-throttling + --min-instances=1 are REQUIRED for correctness, not
+# just performance: the safety-alert background refresh loop and the fire-and-forget
+# Firestore writes spawned from Twilio webhooks (escalation stops, dispositions,
+# audit trail) only run reliably when CPU is always allocated and an instance stays
+# warm. Without these flags those safety writes can be frozen/lost between requests.
 
 echo ""
 echo "Deployed $SERVICE_NAME ($ENVIRONMENT)"
