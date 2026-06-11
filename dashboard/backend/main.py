@@ -3301,12 +3301,13 @@ def export_participant_data(
 
 @app.get("/api/exports/{export_id}")
 @limiter.limit("30/minute")
-def download_export(request: Request, export_id: str):
-    """Download an export file.
+def download_export(request: Request, export_id: str, user: dict = Depends(verify_firebase_token)):
+    """Download an export file (authenticated — serves participant PHI).
 
     First tries local file, then checks EXPORT_INDEX for a stored signed URL,
     then checks Firestore export_jobs for async export URLs.
     """
+    is_admin = user.get("dashboard_role") == "admin"
     export_path = EXPORT_DIR / f"{export_id}.zip"
 
     # Try local file first
@@ -3330,9 +3331,15 @@ def download_export(request: Request, export_id: str):
         job_doc = job_ref.get()
         if job_doc.exists:
             job_data = job_doc.to_dict()
+            # Ownership: a job's PHI is downloadable by its creator or an admin
+            owner = job_data.get("createdBy")
+            if owner and owner != user.get("email") and not is_admin:
+                raise HTTPException(status_code=403, detail="Not authorized to download this export")
             download_url = job_data.get("downloadUrl")
             if download_url and download_url.startswith("http"):
                 return RedirectResponse(url=download_url)
+    except HTTPException:
+        raise  # don't let the ownership 403 fall through to a 404
     except Exception as e:
         logger.warning(f"Error checking Firestore for export {export_id}: {e}")
 
@@ -3826,19 +3833,36 @@ def log_disposition(
             "loggedAt": datetime.utcnow(),
         })
 
-        # Update the event's status
-        event_ref.update({
+        # Update the event's status. "acknowledged"/"ongoing" are NOT terminal —
+        # they mark that on-call has taken it (stops paging via the acknowledged
+        # flag) but leave the event open so the scheduler keeps nudging for a
+        # final disposition. Only a final disposition stops escalation outright.
+        status_update = {
             "currentDisposition": body.disposition,
             "lastRespondedBy": user.get("email"),
             "lastRespondedAt": datetime.utcnow(),
-            "escalationStopped": True,
-        })
+        }
+        if body.disposition in ("acknowledged", "ongoing"):
+            status_update["acknowledged"] = True
+            status_update["acknowledgedBy"] = user.get("email")
+            status_update["acknowledgedAt"] = datetime.utcnow()
+            if body.disposition == "ongoing":
+                status_update["lastCheckInAt"] = datetime.utcnow()
+            # Don't set currentDisposition to "acknowledged" (not a real outcome) —
+            # keep it null/ongoing so the disposition-needed reminder keeps firing.
+            if body.disposition == "acknowledged":
+                status_update.pop("currentDisposition")
+        else:
+            status_update["escalationStopped"] = True
+        event_ref.update(status_update)
 
         # Calculate time-to-human-contact if this is the first disposition
         if not event_doc.exists or not event_doc.to_dict().get("firstResponseAt"):
             created_at = event_doc.to_dict().get("createdAt") if event_doc.exists else datetime.utcnow()
             if created_at and hasattr(created_at, 'timestamp'):
-                response_time_seconds = (datetime.utcnow() - datetime.fromtimestamp(created_at.timestamp())).total_seconds()
+                # createdAt is a UTC Firestore timestamp; utcfromtimestamp keeps the
+                # subtraction in UTC (fromtimestamp would shift to local time).
+                response_time_seconds = (datetime.utcnow() - datetime.utcfromtimestamp(created_at.timestamp())).total_seconds()
             else:
                 response_time_seconds = 0
 
@@ -4505,13 +4529,20 @@ async def twilio_call_response(
                             f"to {conf['bridge_number']} for room {conference_room}"
                         )
 
-                        # NOW do Firestore updates (after call is placed)
+                        # NOW do Firestore updates (after call is placed).
+                        # IMPORTANT: do NOT mark the event resolved here — the
+                        # bridge call has only been *placed*, not yet connected.
+                        # escalationStopped is set only when the 988 bridge leg
+                        # actually JOINS the conference (twilio_conference_events).
+                        # If it never connects, the event stays unresolved and the
+                        # escalation scheduler pages the on-call researcher.
                         event_ref = _get_event_ref()
                         if event_ref:
                             event_ref.update({
-                                "currentDisposition": "escalated_988",
                                 "adverseEventFlag": True,
                                 "participantConfirmedCrisis": True,
+                                "participant988Requested": True,
+                                "participant988RequestedAt": datetime.utcnow(),
                                 "notifyEmergencyContacts": True,
                                 "conferenceRoom": conference_room,
                                 "bridgeCallSid": bridge_call.sid,
@@ -4829,6 +4860,21 @@ async def twilio_conference_events(
                     "loggedAt": datetime.utcnow(),
                 }
 
+                # When the 988 bridge leg JOINS, the participant is actually
+                # connected to the Lifeline — this is the "988 connection happened"
+                # signal. Mark the event resolved so the escalation scheduler does
+                # NOT page the on-call researcher (988 is what we'd do anyway).
+                if event == "join" and leg == "bridge":
+                    event_ref.update({
+                        "conf988Connected": True,
+                        "conf988ConnectedAt": datetime.utcnow(),
+                        "currentDisposition": "escalated_988",
+                        "escalationStopped": True,
+                        "participantResolvedVia": "988_connected",
+                        "lastRespondedAt": datetime.utcnow(),
+                    })
+                    audit_data["resolution"] = "988_connected"
+
                 # On conference end, record duration if possible
                 if event == "end":
                     event_data = events[0].to_dict()
@@ -5043,18 +5089,18 @@ async def twilio_sms_reply(request: Request):
                 media_type="application/xml",
             )
 
-        # Find the most recent unresolved safety event
+        # Find unresolved safety events (most recent first)
         events = list(db.collection(SAFETY_EVENTS_COLLECTION)
             .where("escalationStopped", "==", False)
             .order_by("createdAt", direction=firestore.Query.DESCENDING)
-            .limit(5).stream())
+            .limit(20).stream())
 
-        # Also check for acknowledged/ongoing events
+        # Also include acknowledged/ongoing events
         if not events:
             events = list(db.collection(SAFETY_EVENTS_COLLECTION)
                 .where("currentDisposition", "==", "ongoing")
                 .order_by("createdAt", direction=firestore.Query.DESCENDING)
-                .limit(5).stream())
+                .limit(20).stream())
 
         if not events:
             return Response(
@@ -5062,7 +5108,32 @@ async def twilio_sms_reply(request: Request):
                 media_type="application/xml",
             )
 
-        event_doc = events[0]
+        # Disambiguate among concurrent crises. Escalation pages include the
+        # participant ID; the responder can include it in the reply to target a
+        # specific event. With multiple active events and no ID given, do NOT
+        # guess — replying about participant A must never silently resolve B.
+        pid_in_msg = re.search(r"\b(\d{9})\b", body)
+        if pid_in_msg:
+            target_pid = pid_in_msg.group(1)
+            matching = [e for e in events if e.to_dict().get("participantId") == target_pid]
+            if not matching:
+                return Response(
+                    content=f'<Response><Message>No active safety event for participant {target_pid}.</Message></Response>',
+                    media_type="application/xml",
+                )
+            event_doc = matching[0]
+        else:
+            distinct_pids = {e.to_dict().get("participantId") for e in events}
+            if len(distinct_pids) > 1:
+                example = sorted(p for p in distinct_pids if p)[0]
+                return Response(
+                    content=f'<Response><Message>Multiple active safety events are open ('
+                            f'{", ".join(sorted(p for p in distinct_pids if p))}). '
+                            f'Reply with the participant ID and command (e.g. "{command} {example}"), '
+                            f'or use the dashboard to log the disposition.</Message></Response>',
+                    media_type="application/xml",
+                )
+            event_doc = events[0]
         event_data = event_doc.to_dict()
         participant_id = event_data.get("participantId", "unknown")
 
@@ -5684,6 +5755,22 @@ async def redcap_data_entry_trigger(request: Request):
             f"[REDCap DET] Received: instrument={instrument}, record={record_id}, "
             f"event={event_name}, project={project_id}"
         )
+
+        # This endpoint bypasses the Dartmouth IP whitelist and (because REDCap
+        # calls it server-to-server, with no way to send a Firebase login) cannot
+        # sit behind dashboard auth. Instead we verify the caller is our REDCap
+        # project: (1) project_id must match the configured project, and
+        # (2) if REDCAP_DET_SECRET is configured, a matching ?secret= must be
+        # present (add it to the DET URL in REDCap project settings).
+        if config.REDCAP_PROJECT_ID and project_id and str(project_id) != str(config.REDCAP_PROJECT_ID):
+            logger.warning(f"[REDCap DET] Rejected: project_id {project_id} != configured {config.REDCAP_PROJECT_ID}")
+            raise HTTPException(status_code=403, detail="Unrecognized project")
+        det_secret = os.getenv("REDCAP_DET_SECRET")
+        if det_secret:
+            provided = request.query_params.get("secret") or form_data.get("secret", "")
+            if provided != det_secret:
+                logger.warning("[REDCap DET] Rejected: missing/invalid DET secret")
+                raise HTTPException(status_code=403, detail="Invalid secret")
 
         # ---- Safety Plan instrument: sync to Firestore on save ----
         if instrument == "safety_plan":

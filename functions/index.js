@@ -848,17 +848,27 @@ exports[safetyResponseFnName] = onDocumentCreated(
   }
 );
 
+// On-call paging ladder (PI-defined). A participant error OR a confirmed 988
+// connection resolves the event upstream (escalationStopped=true) so it never
+// reaches the ladder. Otherwise: page primary after the response window, then
+// backup if no ACK, then PI if still no ACK.
+const PRIMARY_PAGE_MIN = 5;          // participant response window before paging a human
+const BACKUP_AFTER_MIN = 15;         // page backup this long after primary, if unacknowledged
+const PI_AFTER_MIN = 30;             // page PI this long after backup, if unacknowledged
+const ACK_REMINDER_THROTTLE_MIN = 30; // Slack nudge cadence once acknowledged but no final disposition
+const ESCALATION_MAX_AGE_MIN = 1440;  // stop acting on events older than 24h
+
 const escalationFnName = ENVIRONMENT === "dev" ? "dev_checkEscalation" : "checkEscalation";
 exports[escalationFnName] = onSchedule(
   {
     schedule: "every 5 minutes",
-    secrets: [twilioAccountSid, twilioAuthToken, twilioFromNumber],
+    secrets: [twilioAccountSid, twilioAuthToken, twilioFromNumber,
+              sendgridApiKey, slackChannelEmail, alertSenderEmail],
     timeZone: "America/New_York",
   },
   async () => {
     try {
       const now = new Date();
-      const fifteenMinAgo = new Date(now.getTime() - 15 * 60 * 1000);
 
       // Find safety events that are still open (not fully resolved)
       const eventsSnapshot = await admin.firestore()
@@ -879,128 +889,108 @@ exports[escalationFnName] = onSchedule(
         const lastCheckInAt = eventData.lastCheckInAt?.toDate?.();
         const currentDisposition = eventData.currentDisposition;
 
-        // Skip fully resolved events
-        if (currentDisposition && !["ongoing"].includes(currentDisposition)) continue;
-
+        // Every event here is unresolved (escalationStopped==false): not an
+        // error, not a confirmed 988 connection, no final disposition.
         const minutesSinceCreation = (now.getTime() - createdAt.getTime()) / (60 * 1000);
 
-        // Determine what needs to happen
-        if (!acknowledged) {
-          // NOT ACKNOWLEDGED: escalate if 15+ min with no ACK
-          let escalationTarget = null;
-          let escalationLevel = null;
+        // Don't act on stale events (on-call was long since paged or it's abandoned)
+        if (minutesSinceCreation > ESCALATION_MAX_AGE_MIN) continue;
 
-          if (minutesSinceCreation >= 30 && !eventData.piEscalated) {
-            escalationTarget = roster.pi;
-            escalationLevel = "pi";
-          } else if (minutesSinceCreation >= 15 && !eventData.backupEscalated) {
-            escalationTarget = roster.backup;
-            escalationLevel = "backup";
+        // Confirmed-danger alerts skip the initial page (automated participant
+        // outreach + 988 triage runs first), so the ladder starts at the
+        // response window: primary at +5, backup +15, PI +30. Non-confirmed
+        // alerts (walk-away/fallback) were already paged to ALL on-call at
+        // creation, so we only escalate backup/PI if still unacknowledged.
+        const isConfirmedDanger = (eventData.alertType || "confirmed_danger") === "confirmed_danger";
+
+        if (!acknowledged) {
+          const due = [];
+          if (isConfirmedDanger) {
+            if (minutesSinceCreation >= PRIMARY_PAGE_MIN && !eventData.primaryPaged) {
+              due.push(["primary", roster.primary, "primaryPaged"]);
+            }
+            if (minutesSinceCreation >= PRIMARY_PAGE_MIN + BACKUP_AFTER_MIN && !eventData.backupEscalated) {
+              due.push(["backup", roster.backup, "backupEscalated"]);
+            }
+            if (minutesSinceCreation >= PRIMARY_PAGE_MIN + BACKUP_AFTER_MIN + PI_AFTER_MIN && !eventData.piEscalated) {
+              due.push(["pi", roster.pi, "piEscalated"]);
+            }
+          } else {
+            // Already paged everyone at creation — re-escalate if unacknowledged.
+            if (minutesSinceCreation >= BACKUP_AFTER_MIN && !eventData.backupEscalated) {
+              due.push(["backup", roster.backup, "backupEscalated"]);
+            }
+            if (minutesSinceCreation >= BACKUP_AFTER_MIN + PI_AFTER_MIN && !eventData.piEscalated) {
+              due.push(["pi", roster.pi, "piEscalated"]);
+            }
           }
 
-          if (escalationTarget && escalationTarget.phone) {
+          for (const [level, target, flag] of due) {
+            if (!target || !target.phone) {
+              // Roster gap — make it loud so no crisis goes unpaged silently.
+              console.error(`[Escalation] No ${level} on-call configured — cannot page for ${eventData.participantId}`);
+              continue;
+            }
             try {
               await twilioWithRetry("messages.create", () => client.messages.create({
-                body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
+                body: `[SocialScope ESCALATION - ${level.toUpperCase()}]\n` +
                       `Safety event for participant ${eventData.participantId} ` +
-                      `has NOT been acknowledged in ${Math.round(minutesSinceCreation)} min.\n` +
-                      `Reply ACK to acknowledge, or log disposition.\n` +
-                      `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER.\n` +
+                      `is UNRESOLVED after ${Math.round(minutesSinceCreation)} min ` +
+                      `(participant did not confirm safe and was not connected to 988).\n` +
+                      `Reply ACK to take it.\n` +
+                      `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER to log disposition.\n` +
                       `Dashboard: ${DASHBOARD_URL}`,
                 from: fromNumber,
-                to: `+1${escalationTarget.phone}`,
+                to: `+1${target.phone}`,
               }));
-
-              const updateData = {};
-              updateData[`${escalationLevel}Escalated`] = true;
-              updateData[`${escalationLevel}EscalatedAt`] = admin.firestore.FieldValue.serverTimestamp();
-              await doc.ref.update(updateData);
-
+              const u = {};
+              u[flag] = true;
+              u[`${flag}At`] = admin.firestore.FieldValue.serverTimestamp();
+              await doc.ref.update(u);
               await doc.ref.collection("audit_trail").doc().set({
                 type: "escalation",
-                escalationLevel,
-                escalatedTo: escalationTarget.name,
-                reason: "not_acknowledged",
+                escalationLevel: level,
+                escalatedTo: target.name || level,
+                reason: "unresolved",
                 minutesSinceCreation: Math.round(minutesSinceCreation),
                 loggedBy: "system",
                 loggedAt: admin.firestore.FieldValue.serverTimestamp(),
               });
-
-              console.log(`Escalation (not ACKed) to ${escalationLevel}: ${eventData.participantId}`);
+              console.log(`[Escalation] Paged ${level} for ${eventData.participantId} at ${Math.round(minutesSinceCreation)} min`);
             } catch (err) {
-              console.error(`Escalation to ${escalationLevel} failed:`, err.message);
+              console.error(`[Escalation] Page ${level} failed for ${eventData.participantId}:`, err.message);
             }
           }
-        } else if (currentDisposition === "ongoing") {
-          // ACKNOWLEDGED + ONGOING: send hourly check-in reminders
-          // Escalate to backup/PI if no check-in within 15 min of the hour mark
-          const minutesSinceLastCheckIn = lastCheckInAt
-            ? (now.getTime() - lastCheckInAt.getTime()) / (60 * 1000)
-            : minutesSinceCreation;
-
-          if (minutesSinceLastCheckIn >= 60) {
-            // Send hourly check-in reminder to primary
-            const primary = roster.primary;
-            if (primary && primary.phone && !eventData[`hourlyReminder_${Math.floor(minutesSinceCreation / 60)}`]) {
+        } else {
+          // ACKNOWLEDGED: on-call owns it. No secondary paging (PI decision).
+          // Nudge via Slack to log a final disposition if still open, throttled.
+          const hasFinalDisposition = currentDisposition && currentDisposition !== "ongoing";
+          if (!hasFinalDisposition) {
+            const lastReminder = eventData.lastAckReminderAt?.toDate?.();
+            const minsSinceReminder = lastReminder
+              ? (now.getTime() - lastReminder.getTime()) / (60 * 1000)
+              : Infinity;
+            if (minsSinceReminder >= ACK_REMINDER_THROTTLE_MIN) {
               try {
-                await twilioWithRetry("messages.create", () => client.messages.create({
-                  body: `[SocialScope CHECK-IN REMINDER]\n` +
-                        `Your ongoing event for participant ${eventData.participantId} ` +
-                        `needs an update (${Math.round(minutesSinceCreation)} min since alert).\n` +
-                        `Reply ONGOING to confirm still working on it.\n` +
-                        `Reply SAFE, SUPPORT, 988, or ER to log final disposition.\n` +
-                        `If no response in 15 min, backup will be paged.`,
-                  from: fromNumber,
-                  to: `+1${primary.phone}`,
-                }));
-
-                const hourKey = `hourlyReminder_${Math.floor(minutesSinceCreation / 60)}`;
-                await doc.ref.update({ [hourKey]: admin.firestore.FieldValue.serverTimestamp() });
-
+                await sendEmail({
+                  senderEmail: alertSenderEmail.value(),
+                  to: slackChannelEmail.value(),
+                  subject: `[SocialScope] Disposition still needed — participant ${eventData.participantId}`,
+                  body: `A safety event for participant ${eventData.participantId} was acknowledged by ` +
+                        `on-call ${Math.round(minutesSinceCreation)} min ago but has no final disposition yet.\n\n` +
+                        `Please log the outcome in the dashboard: ${DASHBOARD_URL}`,
+                });
+                await doc.ref.update({ lastAckReminderAt: admin.firestore.FieldValue.serverTimestamp() });
                 await doc.ref.collection("audit_trail").doc().set({
-                  type: "hourly_checkin_reminder",
+                  type: "disposition_reminder",
+                  channel: "slack",
                   minutesSinceCreation: Math.round(minutesSinceCreation),
                   loggedBy: "system",
                   loggedAt: admin.firestore.FieldValue.serverTimestamp(),
                 });
-
-                console.log(`Hourly check-in reminder sent for ${eventData.participantId}`);
+                console.log(`[Escalation] Slack disposition reminder for ${eventData.participantId}`);
               } catch (err) {
-                console.error(`Hourly reminder failed:`, err.message);
-              }
-            }
-
-            // Escalate if 75+ min since last check-in (60 min + 15 min grace)
-            if (minutesSinceLastCheckIn >= 75) {
-              const escalationTarget = !eventData.backupEscalatedOngoing ? roster.backup : roster.pi;
-              const escalationLevel = !eventData.backupEscalatedOngoing ? "backup" : "pi";
-
-              if (escalationTarget && escalationTarget.phone) {
-                try {
-                  await twilioWithRetry("messages.create", () => client.messages.create({
-                    body: `[SocialScope ESCALATION - ${escalationLevel.toUpperCase()}]\n` +
-                          `Ongoing safety event for ${eventData.participantId} ` +
-                          `— primary on-call has not checked in for ${Math.round(minutesSinceLastCheckIn)} min.\n` +
-                          `Reply ACK, ONGOING, SAFE, SUPPORT, 988, or ER.`,
-                    from: fromNumber,
-                    to: `+1${escalationTarget.phone}`,
-                  }));
-
-                  await doc.ref.update({
-                    [`${escalationLevel}EscalatedOngoing`]: true,
-                  });
-
-                  await doc.ref.collection("audit_trail").doc().set({
-                    type: "escalation",
-                    escalationLevel,
-                    reason: "ongoing_no_checkin",
-                    minutesSinceLastCheckIn: Math.round(minutesSinceLastCheckIn),
-                    loggedBy: "system",
-                    loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-                  });
-                } catch (err) {
-                  console.error(`Ongoing escalation failed:`, err.message);
-                }
+                console.error(`[Escalation] Slack reminder failed for ${eventData.participantId}:`, err.message);
               }
             }
           }
@@ -1042,15 +1032,13 @@ exports[escalationFnName] = onSchedule(
         // Filtered in code (query is time-bounded on a single-field index)
         if (eventData.escalationStopped === true) continue;
 
-        // Skip if participant already resolved (replied ERROR via SMS, or pressed 2/3 on IVR)
+        // Digit mapping (all channels): 1 = error/safe (stops escalation),
+        // 2 = transfer to 988, 3 = already received support (stops escalation).
+        // A confirmed error (press 1 / SMS ERROR / app push) or a confirmed 988
+        // connection sets escalationStopped/participantResolved above, so those
+        // events are already filtered out. Emergency-contact auto-notify below
+        // fires only for events that remain genuinely unresolved.
         if (eventData.participantResolved === true) continue;
-
-        // NOTE: events with participantConfirmedCrisis (pressed 1 = transfer
-        // to 988) are intentionally NOT skipped. The press-1 handler records
-        // notifyEmergencyContacts:true intent but no other code path performs
-        // that outreach, so the 5/8-minute auto-notification below is what
-        // actually contacts them. Only an explicit resolution (press 2/3 or
-        // SMS ERROR → participantResolved above) stops it.
 
         // Skip if this isn't a confirmed danger event that was texted
         if (!eventData.participantPhone) continue;
