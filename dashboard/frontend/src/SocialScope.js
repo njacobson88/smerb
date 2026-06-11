@@ -420,6 +420,31 @@ const ExportScreen = () => {
     }
   };
 
+  // Download an export. Signed Firebase Storage URLs are self-authenticating
+  // (open directly); our own /api/exports endpoint now requires the Firebase
+  // token, so fetch it authenticated and save the blob.
+  const downloadExportFile = async (url) => {
+    if (!url || !url.includes('/api/exports/')) {
+      window.open(url, '_blank');
+      return;
+    }
+    try {
+      const res = await authFetch(url);
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const blob = await res.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `socialscope_export_${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      setError(`Download failed: ${err.message}`);
+    }
+  };
+
   React.useEffect(() => {
     fetchMyExports();
     // Refresh every 10 seconds if there are pending/processing jobs
@@ -779,14 +804,13 @@ const ExportScreen = () => {
       {downloadUrl && (
         <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-md">
           <p className="text-green-700 mb-2 font-medium">Export ready!</p>
-          <a
-            href={downloadUrl}
+          <button
+            onClick={() => downloadExportFile(downloadUrl)}
             className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
-            download
           >
             <Download size={18} className="mr-2" />
             Download ZIP file
-          </a>
+          </button>
         </div>
       )}
 
@@ -1498,7 +1522,10 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
         ) : (
           <div className="space-y-3">
             {alerts.map((alert, idx) => {
-              const alertKey = `${alert.participantId}_${alert.date}`;
+              // Use the real safety-event id (alert.alertId === the safety_events
+              // doc id) so the disposition targets the actual event, not a synthetic
+              // participantId_date key (which created orphan docs and never stopped escalation).
+              const alertKey = alert.alertId || `${alert.participantId}_${alert.date}`;
               const isExpanded = expandedAlert === alertKey;
               const wasResolved = dispositionSuccess === alertKey;
 

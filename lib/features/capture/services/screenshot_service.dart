@@ -4,10 +4,12 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:image/image.dart' as img;
+import '../../../core/config/environment_config.dart';
 import '../../storage/database/database.dart';
 import '../../settings/services/pause_service.dart';
 import 'package:drift/drift.dart' as drift;
@@ -145,22 +147,54 @@ class ScreenshotService {
     return bytes / (1024 * 1024);
   }
 
+  /// Surface capture-pause status to Firestore so the study team is alerted to
+  /// the data-loss risk (capture paused because the device's local cache hit
+  /// its cap — usually a sign the device has been offline/unable to upload for
+  /// a long time). Best-effort; never throws.
+  Future<void> _reportCaptureStatus({required bool paused, required double usageMb}) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection(EnvConfig.col('participants'))
+          .doc(participantId)
+          .set({
+        'captureDiskPaused': paused,
+        'captureDiskPausedAt': paused ? FieldValue.serverTimestamp() : null,
+        'captureDiskUsageMb': usageMb.round(),
+        'captureStatusUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      print('[ScreenshotService] Could not report capture status: $e');
+    }
+  }
+
   /// Capture a screenshot and save if it's different from the last one
   Future<void> _captureScreenshot() async {
     if (_isCapturing || _controller == null) return;
-    if (_diskSpacePaused || _userPaused || _pauseService.isPaused) return;
+    if (_userPaused || _pauseService.isPaused) return;
 
-    // Periodically check disk space
+    // Disk-space gate. When over the cap we pause capture, but we must keep
+    // RE-CHECKING so capture resumes once background sync uploads + prunes free
+    // space — otherwise capture would stay dead for the whole session (silent
+    // data loss). So this check runs even while paused.
     _capturesSinceLastCheck++;
-    if (_capturesSinceLastCheck >= _diskCheckInterval) {
+    if (_capturesSinceLastCheck >= _diskCheckInterval || _diskSpacePaused) {
       _capturesSinceLastCheck = 0;
       final usageMb = await getLocalStorageMb();
       if (usageMb > 0 && usageMb >= maxLocalStorageMb) {
-        _diskSpacePaused = true;
-        print('[ScreenshotService] PAUSED: Local storage at ${usageMb.toStringAsFixed(0)}MB (limit: ${maxLocalStorageMb}MB)');
+        if (!_diskSpacePaused) {
+          _diskSpacePaused = true;
+          print('[ScreenshotService] PAUSED: Local storage at ${usageMb.toStringAsFixed(0)}MB (limit: ${maxLocalStorageMb}MB)');
+          _reportCaptureStatus(paused: true, usageMb: usageMb);
+        }
         return;
+      } else if (_diskSpacePaused && usageMb >= 0 && usageMb < maxLocalStorageMb) {
+        // Space freed up — resume capture and clear the alert.
+        _diskSpacePaused = false;
+        print('[ScreenshotService] RESUMED: Local storage back to ${usageMb.toStringAsFixed(0)}MB');
+        _reportCaptureStatus(paused: false, usageMb: usageMb);
       }
     }
+    if (_diskSpacePaused) return;
 
     _isCapturing = true;
 
