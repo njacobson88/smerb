@@ -707,28 +707,36 @@ class UploadService {
     int totalSynced = 0;
 
     try {
-      final unsyncedResponses = await database.getUnsyncedEmaResponses(limit: batchSize);
-      if (unsyncedResponses.isEmpty) {
-        return 0;
-      }
+      // Paginate so a backlog of >batchSize check-ins (safety-relevant data)
+      // fully drains, instead of only the first batch per cycle.
+      List<EmaResponse> unsyncedResponses;
+      do {
+        unsyncedResponses = await database.getUnsyncedEmaResponses(limit: batchSize);
+        if (unsyncedResponses.isEmpty) break;
 
-      print('[UploadService] Processing batch of ${unsyncedResponses.length} EMA responses');
+        print('[UploadService] Processing batch of ${unsyncedResponses.length} EMA responses');
 
-      final syncedIds = <String>[];
-      for (final response in unsyncedResponses) {
-        try {
-          await _uploadEmaResponse(response);
-          syncedIds.add(response.id);
-        } catch (e) {
-          print('[UploadService] Failed to sync EMA response ${response.id}: $e');
+        final syncedIds = <String>[];
+        for (final response in unsyncedResponses) {
+          try {
+            await _uploadEmaResponse(response);
+            syncedIds.add(response.id);
+          } catch (e) {
+            print('[UploadService] Failed to sync EMA response ${response.id}: $e');
+          }
         }
-      }
 
-      if (syncedIds.isNotEmpty) {
-        await database.markEmaResponsesAsSynced(syncedIds);
-        totalSynced = syncedIds.length;
-        print('[UploadService] EMA sync complete. Total: $totalSynced');
-      }
+        if (syncedIds.isNotEmpty) {
+          await database.markEmaResponsesAsSynced(syncedIds);
+          totalSynced += syncedIds.length;
+        }
+
+        // If none of this batch synced, stop — don't spin on a persistently
+        // failing batch within a single cycle (it retries next cycle).
+        if (syncedIds.isEmpty) break;
+      } while (unsyncedResponses.length == batchSize);
+
+      if (totalSynced > 0) print('[UploadService] EMA sync complete. Total: $totalSynced');
     } finally {
       _isSyncingEma = false;
     }

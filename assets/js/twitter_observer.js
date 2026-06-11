@@ -274,16 +274,9 @@
       }
     });
 
+    // Console only — do NOT post a Flutter event here (runs on every debounced
+    // mutation batch; would write a DB/Firestore row per batch = noise flood).
     console.log('[SMERB] Observing', tweets.length, 'tweets');
-
-    // Send diagnostic info to Flutter
-    if (tweets.length > 0) {
-      sendToFlutter('diagnostic', {
-        tweetsFound: tweets.length,
-        pageType: detectPageType(),
-        url: window.location.href,
-      });
-    }
   }
 
   let mutationDebounceTimer = null;

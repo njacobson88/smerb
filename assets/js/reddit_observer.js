@@ -473,18 +473,10 @@
       }
     });
 
-    // Always log comment count for debugging
+    // Log comment count for debugging (console only — do NOT post a Flutter
+    // event here: this runs on every debounced mutation batch and would write a
+    // DB/Firestore row per batch, flooding the events table with noise.)
     console.log('[SMERB] Observing', posts.length, 'posts and', comments.length, 'comments');
-
-    // Send diagnostic info to Flutter
-    if (comments.length > 0) {
-      sendToFlutter('diagnostic', {
-        postsFound: posts.length,
-        commentsFound: comments.length,
-        pageType: detectPageType(),
-        url: window.location.href,
-      });
-    }
   }
 
   let mutationDebounceTimer = null;

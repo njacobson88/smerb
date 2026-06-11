@@ -504,9 +504,19 @@ class AppDatabase extends _$AppDatabase {
     final cutoff = DateTime.now().subtract(Duration(days: retentionDays));
     int totalDeleted = 0;
 
-    // Prune synced events
+    // Prune synced events — but DON'T prune a screenshot event that still has
+    // no OCR result yet (OCR runs on-device and can lag behind capture; pruning
+    // the event + its already-deleted local file would permanently lose the
+    // extracted text). A 30-day hard cap prevents retaining an OCR-less
+    // screenshot forever. Non-screenshot events prune at the normal cutoff.
+    final ocrHardCap = DateTime.now().subtract(const Duration(days: 30));
     final eventsDeleted = await (delete(events)
-          ..where((e) => e.synced.equals(true) & e.createdAt.isSmallerThanValue(cutoff)))
+          ..where((e) =>
+              e.synced.equals(true) &
+              e.createdAt.isSmallerThanValue(cutoff) &
+              (e.eventType.equals('screenshot').not() |
+                  e.createdAt.isSmallerThanValue(ocrHardCap) |
+                  existsQuery(select(ocrResults)..where((o) => o.eventId.equalsExp(e.id))))))
         .go();
     totalDeleted += eventsDeleted;
 

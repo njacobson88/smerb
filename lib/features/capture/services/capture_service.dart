@@ -100,10 +100,13 @@ class CaptureService {
         participantId: drift.Value(participantId),
         eventType: drift.Value(eventType),
         timestamp: drift.Value(
-          DateTime.fromMillisecondsSinceEpoch(
-            data['timestamp'] as int,
-            isUtc: true,
-          ),
+          // Tolerate a missing/non-int timestamp instead of throwing (a throw
+          // here is caught below and silently drops the whole event).
+          (data['timestamp'] is int)
+              ? DateTime.fromMillisecondsSinceEpoch(data['timestamp'] as int, isUtc: true)
+              : (data['timestamp'] is double)
+                  ? DateTime.fromMillisecondsSinceEpoch((data['timestamp'] as double).toInt(), isUtc: true)
+                  : DateTime.now().toUtc(),
         ),
         platform: drift.Value(data['platform'] as String? ?? 'unknown'),
         url: drift.Value(data['url'] as String?),
