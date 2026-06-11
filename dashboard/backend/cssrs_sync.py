@@ -49,6 +49,52 @@ CSSRS_ITEM_LABELS = {
     5: "5. Active Suicidal Ideation with Specific Plan and Intent",
 }
 
+# Behavior-item display labels per form (field name -> label)
+_BEHAVIOR_LABELS = {
+    "cssrs_scr_6a": "6a. Suicidal Behavior (Lifetime)",
+    "cssrs_scr_6b": "6b. Suicidal Behavior (Past 3 Months)",
+    "cssrs_scr_6cssrs_wkly": "6. Suicidal Behavior (Lifetime)",
+    "cssrs_scr_6_last3mcssrs_wkly": "6a. Suicidal Behavior (Past 3 Months)",
+    "cssrs_ped_6a": "Actual Attempt",
+    "cssrs_ped_6b": "Interrupted Attempt",
+    "cssrs_ped_6c": "Aborted Attempt",
+    "cssrs_ped_6d": "Preparatory Acts",
+}
+
+# Back-compat exports consumed by risk_assessment.py. Union of every form's
+# intent/plan/behavior trigger fields (used to highlight trigger rows).
+CSSRS_CRISIS_TRIGGER_FIELDS = [
+    "cssrs_scr_4", "cssrs_scr_5", "cssrs_scr_6a", "cssrs_scr_6b",
+    "cssrs_scr_4cssrs_wkly", "cssrs_scr_5cssrs_wkly",
+    "cssrs_scr_6cssrs_wkly", "cssrs_scr_6_last3mcssrs_wkly",
+    "cssrs_ped_4", "cssrs_ped_5", "cssrs_ped_6a", "cssrs_ped_6b",
+    "cssrs_ped_6c", "cssrs_ped_6d",
+]
+CSSRS_SCREEN_LABELS = {
+    "cssrs_scr_1": "1. Wish to be Dead",
+    "cssrs_scr_2": "2. Non-Specific Active Suicidal Thoughts",
+    "cssrs_scr_3": "3. Active Suicidal Ideation with Any Methods (Not Plan)",
+    "cssrs_scr_4": "4. Active Suicidal Ideation with Some Intent to Act",
+    "cssrs_scr_5": "5. Active Suicidal Ideation with Specific Plan and Intent",
+    "cssrs_scr_6a": "6a. Suicidal Behavior (Lifetime)",
+    "cssrs_scr_6b": "6b. Suicidal Behavior (Past 3 Months)",
+}
+
+# Legacy pediatric ideation/behavior key names that risk_assessment.py reads.
+_PED_IDEATION_KEYS = {
+    "cssrs_ped_1": "wish_to_be_dead",
+    "cssrs_ped_2": "nonspecific_thoughts",
+    "cssrs_ped_3": "ideation_with_methods",
+    "cssrs_ped_4": "ideation_with_intent",
+    "cssrs_ped_5": "ideation_with_plan",
+}
+_PED_BEHAVIOR_KEYS = {
+    "cssrs_ped_6a": "actual_attempt",
+    "cssrs_ped_6b": "interrupted_attempt",
+    "cssrs_ped_6c": "aborted_attempt",
+    "cssrs_ped_6d": "preparatory_acts",
+}
+
 
 def _form_for(instrument):
     if instrument == CSSRS_WEEKLY_INSTRUMENT:
@@ -103,24 +149,35 @@ def fetch_redcap_cssrs(record_id, instrument, event_name, config):
 
 
 def _transform_cssrs(redcap_data, instrument):
-    """Unified transform for screener / weekly / pediatric forms."""
+    """Unified transform for screener / weekly / pediatric forms.
+    Emits BOTH the clean trigger/severity fields AND the legacy display shapes
+    that risk_assessment.py consumes: `questions` (field -> {label,value,raw})
+    for screener/weekly, and named `ideation`/`behavior` dicts for pediatric."""
     fmap = _form_for(instrument)
     is_pediatric = instrument == CSSRS_PEDIATRIC_INSTRUMENT
 
-    ideation = {}
+    # questions: field -> {label, value, raw} (covers ideation 1-5 + behavior)
+    questions = {}
     for i, field in enumerate(fmap["ideation"], start=1):
-        ideation[f"item_{i}"] = {
-            "field": field,
+        questions[field] = {
             "label": CSSRS_ITEM_LABELS.get(i, f"Item {i}"),
             "value": _yn(redcap_data.get(field, "")),
             "raw": redcap_data.get(field, ""),
         }
-    behavior = {}
     for field in fmap["behavior"]:
-        behavior[field] = {
+        questions[field] = {
+            "label": _BEHAVIOR_LABELS.get(field, field),
             "value": _yn(redcap_data.get(field, "")),
             "raw": redcap_data.get(field, ""),
         }
+
+    # Legacy named shapes for the pediatric risk-PDF section
+    ped_ideation = {
+        name: _yn(redcap_data.get(f, "")) for f, name in _PED_IDEATION_KEYS.items()
+    } if is_pediatric else {}
+    ped_behavior = {
+        name: _yn(redcap_data.get(f, "")) for f, name in _PED_BEHAVIOR_KEYS.items()
+    } if is_pediatric else {}
 
     # Severity: highest endorsed ideation item (1-5); 6 if any behavior endorsed.
     severity = 0
@@ -153,8 +210,9 @@ def _transform_cssrs(redcap_data, instrument):
 
     return {
         "type": "pediatric" if is_pediatric else ("weekly" if instrument == CSSRS_WEEKLY_INSTRUMENT else "screen"),
-        "ideation": ideation,
-        "behavior": behavior,
+        "questions": questions,                 # screener/weekly display
+        "ideation": ped_ideation,               # pediatric display (named keys)
+        "behavior": ped_behavior,               # pediatric display (named keys)
         "severity": severity,
         "behaviorEndorsed": behavior_endorsed,
         "riskScore": score,
