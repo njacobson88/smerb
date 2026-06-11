@@ -7,6 +7,22 @@
         { "fieldPath": "createdBy", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "safety_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "participantId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dev_safety_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "participantId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
