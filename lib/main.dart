@@ -36,20 +36,23 @@ void main() async {
   // App Check runs in MONITORING mode until enforcement is turned on in the
   // Firebase console, so attestation failures never block participants.
   // Debug builds use the debug provider (register its token in the console).
+  //
+  // CRITICAL: do NOT await this. The Play Integrity / App Attest handshake can
+  // stall on a real release device, and awaiting it here would prevent
+  // runApp() from ever running — halting all screenshot capture and sync.
+  // Token fetch is lazy and unenforced, so firing it in the background loses
+  // nothing. (A previous build awaited this and could hang at launch.)
   if (!kIsWeb) {
-    try {
-      await FirebaseAppCheck.instance.activate(
-        androidProvider:
-            kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
-        appleProvider: kDebugMode
-            ? AppleProvider.debug
-            : AppleProvider.appAttestWithDeviceCheckFallback,
-      );
-      print('[AppCheck] Activated');
-    } catch (e) {
-      // Never block app startup (and the safety pipeline) on attestation
-      print('[AppCheck] Activation failed (non-fatal): $e');
-    }
+    FirebaseAppCheck.instance
+        .activate(
+          androidProvider:
+              kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+          appleProvider: kDebugMode
+              ? AppleProvider.debug
+              : AppleProvider.appAttestWithDeviceCheckFallback,
+        )
+        .then((_) => print('[AppCheck] Activated'))
+        .catchError((e) => print('[AppCheck] Activation failed (non-fatal): $e'));
   }
 
   // Register background message handler

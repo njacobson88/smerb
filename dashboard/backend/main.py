@@ -5872,7 +5872,7 @@ REDCAP_SAFETY_PLAN_FIELDS = [
     "sp_reasons_live",
     "subj_county", "sp_er_service_number",
     # Interview: participant address & home type (for wellness check dispatching)
-    "sp_subj_address", "participant_address_type", "participant_address_other",
+    "sp_subj_address", "subj_address_type", "participant_address_other",
 ]
 
 # Home type mapping (REDCap radio choices → labels)
@@ -5970,7 +5970,7 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
 
     # Address & home type (from interview_script_questions instrument)
     address = _nonempty(redcap_data.get("sp_subj_address", ""))
-    home_type_raw = _nonempty(redcap_data.get("participant_address_type", ""))
+    home_type_raw = _nonempty(redcap_data.get("subj_address_type", ""))
     home_type = HOME_TYPE_MAP.get(home_type_raw, home_type_raw) if home_type_raw else None
     home_type_other = _nonempty(redcap_data.get("participant_address_other", ""))
     if home_type == "Other" and home_type_other:

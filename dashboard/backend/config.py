@@ -122,7 +122,7 @@ REDCAP_PROJECT_ID = os.getenv("REDCAP_PROJECT_ID")  # Optional: for verifying DE
 # REDCap Data Entry Trigger configuration
 # The instrument and field that triggers app ID generation
 REDCAP_TRIGGER_INSTRUMENT = "qualify_for_study"
-REDCAP_TRIGGER_FIELD = "subject_qualified"
+REDCAP_TRIGGER_FIELD = "subj_qualified"  # REDCap field (radio: 1=Yes,0=No,2=Pending)
 REDCAP_TRIGGER_VALUE = "1"  # "Yes" in yesno field
 REDCAP_APP_ID_FIELD = "socialscope_app_id"
 REDCAP_TRIGGER_EVENT = "interview_arm_1"
