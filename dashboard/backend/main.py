@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote
 
 from phone_utils import normalize_phone, phones_match
+from export_utils import is_valid_export_id
+from template_utils import safe_format
 import content_events as content_events_mod
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
@@ -3396,6 +3398,12 @@ def download_export(request: Request, export_id: str, user: dict = Depends(verif
     then checks Firestore export_jobs for async export URLs.
     """
     is_admin = user.get("dashboard_role") == "admin"
+
+    # Reject any non-canonical id before it touches the filesystem path below
+    # (path-traversal guard — export ids are always uuid4 hex).
+    if not is_valid_export_id(export_id):
+        raise HTTPException(status_code=400, detail="Invalid export id")
+
     export_path = EXPORT_DIR / f"{export_id}.zip"
 
     # Try local file first
@@ -5158,10 +5166,15 @@ async def twilio_sms_reply(request: Request):
                 )
 
         # ─── STEP 2: Check if sender is on-call staff ───
+        # Match on normalized phone, not raw string equality: the roster stores
+        # whatever format the admin typed ("(603) 555-1234", "+16035551234"),
+        # while from_number is only +/+1-stripped. Without normalization an
+        # on-call responder's ACK/SAFE/988 reply is treated as an unknown sender
+        # and the disposition is silently dropped — a safety failure.
         responder_name = None
         for doc in db.collection(ONCALL_COLLECTION).stream():
             data = doc.to_dict()
-            if data.get("phone") == from_number:
+            if phones_match(data.get("phone"), from_number):
                 responder_name = data.get("name", doc.id)
                 break
 
@@ -5466,7 +5479,7 @@ def preview_notification(
         }
 
         if body.custom_subject and body.custom_body:
-            return {"subject": body.custom_subject, "body": body.custom_body.format(**variables)}
+            return {"subject": body.custom_subject, "body": safe_format(body.custom_body, variables)}
 
         level = get_compliance_level(weekly["compliance_pct"]) if body.category == "weekly" else None
         idx, template = select_template(body.category, level=level,
@@ -5518,8 +5531,8 @@ def send_compliance_notification(
 
         # Select or use custom template
         if body.custom_subject and body.custom_body:
-            subject = body.custom_subject.format(**variables)
-            email_body = body.custom_body.format(**variables)
+            subject = safe_format(body.custom_subject, variables)
+            email_body = safe_format(body.custom_body, variables)
             template_idx = -1
         else:
             level = get_compliance_level(weekly["compliance_pct"]) if body.category == "weekly" else None
