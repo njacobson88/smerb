@@ -1136,6 +1136,7 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
   const [dispositionForm, setDispositionForm] = useState({ disposition: '', notes: '', outreach_method: '' });
   const [dispositionSaving, setDispositionSaving] = useState(false);
   const [dispositionSuccess, setDispositionSuccess] = useState(null);
+  const [dispositionError, setDispositionError] = useState(null);
 
   const fetchAlerts = React.useCallback(async () => {
     setLoading(true);
@@ -1226,7 +1227,15 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
 
   const logDisposition = async (alertId) => {
     if (!dispositionForm.disposition) return;
+    // Guard against logging against a synthetic participantId_date key — that
+    // wrote orphan safety_events docs that never stopped escalation. Only a real
+    // event id is acceptable.
+    if (!alertId || alertId.includes('_')) {
+      setDispositionError('This alert is missing its real event id — refresh and retry. Do NOT assume escalation stopped.');
+      return;
+    }
     setDispositionSaving(true);
+    setDispositionError(null);
     try {
       const res = await authFetch(`${API_BASE_URL}/api/safety-events/${alertId}/disposition`, {
         method: 'POST',
@@ -1247,8 +1256,16 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
           await authFetch(`${API_BASE_URL}/api/safety-events/${alertId}/create-followups`, { method: 'POST' });
           fetchFollowups();
         }
+      } else {
+        // NEVER fail silently on a safety action — the researcher must know the
+        // disposition did NOT save and escalation may still be active.
+        let detail = '';
+        try { detail = (await res.json()).detail || ''; } catch (_) { /* no body */ }
+        setDispositionError(`Failed to save (HTTP ${res.status}). ${detail} Escalation may STILL be active — retry, or log via SMS/phone.`);
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      setDispositionError(`Network error — disposition NOT saved (${e.message}). Escalation may STILL be active — retry.`);
+    }
     finally { setDispositionSaving(false); }
   };
 
@@ -1535,7 +1552,13 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
                 }`}>
                   {/* Alert header — clickable to expand */}
                   <div
-                    onClick={() => setExpandedAlert(isExpanded ? null : alertKey)}
+                    onClick={() => {
+                      // Reset the disposition form when switching alerts so one
+                      // alert's selection/notes can't be logged against another.
+                      setExpandedAlert(isExpanded ? null : alertKey);
+                      setDispositionForm({ disposition: '', notes: '', outreach_method: '' });
+                      setDispositionError(null);
+                    }}
                     className={`flex items-center justify-between p-4 cursor-pointer hover:bg-red-100 transition-colors ${
                       alert.crisis_indicated ? 'bg-red-100' : 'bg-red-50'
                     }`}
@@ -1606,7 +1629,7 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
                       </div>
 
                       <button
-                        onClick={() => logDisposition(alertKey)}
+                        onClick={() => logDisposition(alert.alertId)}
                         disabled={dispositionSaving || !dispositionForm.disposition}
                         className={`px-4 py-2 text-white text-sm font-medium rounded disabled:opacity-50 ${
                           dispositionForm.disposition === 'acknowledged' || dispositionForm.disposition === 'ongoing'
@@ -1619,6 +1642,12 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
                           : dispositionForm.disposition === 'ongoing' ? 'Check In — Still Working'
                           : 'Log Final Disposition & Stop Escalation'}
                       </button>
+
+                      {dispositionError && isExpanded && (
+                        <p className="text-sm text-red-700 font-semibold mt-2 p-2 bg-red-100 border border-red-300 rounded">
+                          ⚠ {dispositionError}
+                        </p>
+                      )}
 
                       <p className="text-xs text-gray-400 mt-2">
                         <strong>Acknowledge:</strong> Buys time — hourly check-ins required until final disposition.
