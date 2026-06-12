@@ -122,6 +122,18 @@ class OcrService {
 
       print('[OcrService] Saved OCR result: $wordCount words, ${stopwatch.elapsedMilliseconds}ms');
 
+      // If the event already synced before OCR ran, the upload path deliberately
+      // left the file on disk for us. Now that OCR is done, the local file is no
+      // longer needed (image is in Storage, text is extracted) — delete it.
+      // dedupOfEventId is null here (handled above), so this event owns the file.
+      if (event.synced) {
+        try {
+          await File(filePath).delete();
+        } catch (e) {
+          print('[OcrService] Could not delete post-OCR file: $e');
+        }
+      }
+
       // Return the stored result
       return database.getOcrResultForEvent(event.id);
     } catch (e) {

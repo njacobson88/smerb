@@ -255,6 +255,32 @@ class AppDatabase extends _$AppDatabase {
     }
   }
 
+  /// Events that have exhausted [maxSyncRetries] and are excluded from every
+  /// unsynced query — they are NOT lost (still synced=false on disk, never
+  /// pruned) but are no longer being uploaded. Surfaced so the app can report
+  /// and requeue them instead of silently abandoning research data.
+  Future<int> getStuckEventCount() async {
+    final count = countAll();
+    final query = selectOnly(events)
+      ..addColumns([count])
+      ..where(events.synced.equals(false) &
+          events.syncRetryCount.isBiggerOrEqualValue(maxSyncRetries));
+    final result = await query.getSingle();
+    return result.read(count) ?? 0;
+  }
+
+  /// Reset the retry counter on stuck events so they get another full round of
+  /// attempts. Called on a slow time-gated cadence: this is what rescues events
+  /// that hit the cap during a transient outage (e.g. >2.5 min offline makes
+  /// every in-flight event exhaust its 5 retries). Returns rows requeued.
+  Future<int> requeueStuckEvents() async {
+    return (update(events)
+          ..where((e) =>
+              e.synced.equals(false) &
+              e.syncRetryCount.isBiggerOrEqualValue(maxSyncRetries)))
+        .write(const EventsCompanion(syncRetryCount: Value(0)));
+  }
+
   /// Get event count
   Future<int> getEventCount() async {
     final count = countAll();

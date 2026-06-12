@@ -19,6 +19,11 @@ class UploadService {
   bool _isSyncingEma = false;
   bool _isSyncingContent = false;
 
+  // Stuck-event requeue is time-gated so it rescues transient-outage casualties
+  // without hammering a genuinely-bad event every cycle.
+  DateTime? _lastStuckRequeue;
+  static const Duration _stuckRequeueInterval = Duration(hours: 2);
+
   // Track upload stats
   int _screenshotsUploaded = 0;
   int _totalBytesUploaded = 0;
@@ -242,13 +247,21 @@ class UploadService {
         .doc(event.id)
         .set(docData);
 
-    // Event doc is durable — now the local screenshot file can go
+    // The event doc is durable, but the local screenshot file may still be
+    // needed: on-device OCR reads it from disk. Delete it ONLY once OCR has run
+    // for this event (ocrData != null). If OCR is still pending, keep the file —
+    // the OCR service deletes it when it finishes (the event is synced by then).
+    // Deleting here unconditionally (the old behavior) permanently lost the OCR
+    // text whenever a screenshot synced before OCR caught up.
     final uploadedPath = eventData['filePath'] as String?;
-    if (uploadedPath != null && _pendingLocalDeletes.remove(uploadedPath) == true) {
-      try {
-        await File(uploadedPath).delete();
-      } catch (e) {
-        print('[UploadService] Warning: could not delete local screenshot: $e');
+    if (uploadedPath != null) {
+      final hadPending = _pendingLocalDeletes.remove(uploadedPath) == true;
+      if (hadPending && ocrData != null) {
+        try {
+          await File(uploadedPath).delete();
+        } catch (e) {
+          print('[UploadService] Warning: could not delete local screenshot: $e');
+        }
       }
     }
 
@@ -905,6 +918,22 @@ class UploadService {
     _screenshotsUploaded = 0;
     _totalBytesUploaded = 0;
 
+    // Before syncing, periodically requeue events that exhausted their retries
+    // (e.g. casualties of a transient outage) so they aren't silently abandoned.
+    final now = DateTime.now();
+    if (_lastStuckRequeue == null ||
+        now.difference(_lastStuckRequeue!) >= _stuckRequeueInterval) {
+      _lastStuckRequeue = now;
+      try {
+        final requeued = await database.requeueStuckEvents();
+        if (requeued > 0) {
+          print('[UploadService] Requeued $requeued stuck events for retry');
+        }
+      } catch (e) {
+        print('[UploadService] Stuck-event requeue failed: $e');
+      }
+    }
+
     // Sync events first (includes OCR data for screenshots)
     final eventsSynced = await syncEvents(batchSize: eventBatchSize);
 
@@ -944,6 +973,7 @@ class UploadService {
   Future<Map<String, int>> getSyncStatus() async {
     final total = await database.getEventCount();
     final unsyncedCount = await database.getUnsyncedEventCount();
+    final stuckCount = await database.getStuckEventCount();
     final totalOcr = await database.getOcrResultCount();
     final unsyncedOcrCount = await database.getUnsyncedOcrCount();
     final pendingHtml = await database.getPendingHtmlSyncCount();
@@ -953,6 +983,9 @@ class UploadService {
       'totalEvents': total,
       'syncedEvents': total - unsyncedCount,
       'pendingEvents': unsyncedCount,
+      // Events that exhausted retries — retained locally, requeued every 2h,
+      // but flagged so a persistent backlog is visible rather than silent.
+      'stuckEvents': stuckCount,
       'totalOcr': totalOcr,
       'pendingOcr': unsyncedOcrCount,
       'pendingHtml': pendingHtml,
