@@ -19,6 +19,14 @@ from urllib.parse import unquote
 from phone_utils import normalize_phone, phones_match
 from export_utils import is_valid_export_id
 from template_utils import safe_format
+from sms_utils import (
+    PARTICIPANT_ERROR_KEYWORDS,
+    SMS_DISPOSITION_MAP,
+    is_participant_error_reply,
+    is_optout,
+    is_resubscribe,
+    parse_oncall_command,
+)
 import content_events as content_events_mod
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
@@ -4066,6 +4074,51 @@ def get_active_safety_events(request: Request, user: dict = Depends(verify_fireb
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/inbound-sms")
+@limiter.limit("30/minute")
+def get_inbound_sms(request: Request, review_only: bool = False, limit: int = 100,
+                    user: dict = Depends(verify_firebase_token)):
+    """Inbound SMS log — every text a participant/responder/unknown number sends
+    to the study line. review_only=true returns just the messages flagged for
+    human attention (participant free-form replies, opt-outs, unmatched senders,
+    unrecognized on-call commands) so a participant reaching out by text is never
+    silently dropped."""
+    try:
+        limit = max(1, min(int(limit), 500))
+        # Order by receivedAt only (single-field, auto-indexed) and filter
+        # needsReview in code — avoids a composite-index dependency. Over-fetch
+        # when filtering so review items aren't crowded out by recent handled ones.
+        fetch = min(limit * 5, 500) if review_only else limit
+        query = db.collection(INBOUND_SMS_COLLECTION).order_by(
+            "receivedAt", direction=firestore.Query.DESCENDING).limit(fetch)
+
+        messages = []
+        for doc in query.stream():
+            d = doc.to_dict()
+            if review_only and not d.get("needsReview"):
+                continue
+            received = d.get("receivedAt")
+            if received and hasattr(received, "timestamp"):
+                received = datetime.fromtimestamp(received.timestamp())
+            messages.append({
+                "id": doc.id,
+                "fromNumber": d.get("fromNumber"),
+                "body": d.get("body"),
+                "senderType": d.get("senderType"),
+                "classification": d.get("classification"),
+                "participantId": d.get("participantId"),
+                "responderName": d.get("responderName"),
+                "needsReview": d.get("needsReview", False),
+                "receivedAt": received.isoformat() if received else None,
+            })
+            if len(messages) >= limit:
+                break
+        return {"messages": messages}
+    except Exception as e:
+        logger.error(f"Failed to get inbound SMS: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # DSMB / IRB Reporting Export
 # ============================================================================
@@ -5021,21 +5074,34 @@ async def twilio_conference_events(
 # ============================================================================
 
 # SMS command mapping (on-call staff)
-SMS_DISPOSITION_MAP = {
-    "ACK": "acknowledged",
-    "SAFE": "contacted_safe",
-    "SUPPORT": "contacted_needs_support",
-    "NOREACH": "unable_to_reach",
-    "FALSE": "false_alarm",
-    "ERROR": "false_alarm",  # Participant replies ERROR = accidental
-    "1": "false_alarm",      # Participant replies 1 = accidental
-    "988": "escalated_988",
-    "ER": "escalated_er",
-    "ONGOING": "ongoing",
-}
+# SMS_DISPOSITION_MAP and PARTICIPANT_ERROR_KEYWORDS now live in sms_utils.py
+# (single source, unit-tested) and are imported at the top of this file.
 
-# Participant error reply keywords (stops escalation)
-PARTICIPANT_ERROR_KEYWORDS = {"ERROR", "1", "ONE", "FALSE", "MISTAKE", "ACCIDENT", "ACCIDENTAL"}
+INBOUND_SMS_COLLECTION = config.col("inbound_sms")
+
+
+def _log_inbound_sms(from_number, body, sender_type, classification,
+                     participant_id=None, responder_name=None, needs_review=False):
+    """Persist EVERY inbound SMS so nothing a participant or responder texts is
+    invisible to the study team. Best-effort: a logging failure must never block
+    the webhook's reply. needs_review flags messages a human should look at
+    (e.g. a participant texting free-form during/after an alert)."""
+    try:
+        doc = {
+            "fromNumber": from_number,
+            "fromNormalized": normalize_phone(from_number),
+            "body": body,
+            "senderType": sender_type,            # participant | oncall | unknown
+            "classification": classification,
+            "participantId": participant_id,
+            "responderName": responder_name,
+            "needsReview": needs_review,
+            "handled": not needs_review,
+            "receivedAt": datetime.utcnow(),
+        }
+        db.collection(INBOUND_SMS_COLLECTION).document(str(uuid.uuid4())).set(doc)
+    except Exception as e:
+        logger.error(f"[SMS Reply] Failed to log inbound SMS from {from_number}: {e}")
 
 
 def _find_participant_by_phone(phone_number: str):
@@ -5091,7 +5157,6 @@ async def twilio_sms_reply(request: Request):
     try:
         form_data = await request.form()
         body = form_data.get("Body", "").strip()
-        body_upper = body.upper()
         from_number = form_data.get("From", "").replace("+1", "").replace("+", "")
 
         logger.info(f"[SMS Reply] From: {from_number}, Body: '{body}'")
@@ -5103,9 +5168,31 @@ async def twilio_sms_reply(request: Request):
         if participant_id:
             logger.info(f"[SMS Reply] Identified as participant: {participant_id}")
 
+            # Opt-out: the carrier will now block ALL future SMS to this number,
+            # including crisis-escalation texts. Flag the participant as
+            # SMS-unreachable and log for review — this is safety-relevant.
+            if is_optout(body):
+                try:
+                    db.collection(config.col("participants")).document(participant_id).set(
+                        {"smsOptedOut": True, "smsOptedOutAt": datetime.utcnow()}, merge=True)
+                except Exception as e:
+                    logger.error(f"[SMS Reply] Failed to flag opt-out for {participant_id}: {e}")
+                _log_inbound_sms(from_number, body, "participant", "optout",
+                                 participant_id=participant_id, needs_review=True)
+                # Twilio auto-sends the compliance opt-out confirmation.
+                return Response(content='<Response></Response>', media_type="application/xml")
+
+            if is_resubscribe(body):
+                try:
+                    db.collection(config.col("participants")).document(participant_id).set(
+                        {"smsOptedOut": False, "smsResubscribedAt": datetime.utcnow()}, merge=True)
+                except Exception as e:
+                    logger.error(f"[SMS Reply] Failed to clear opt-out for {participant_id}: {e}")
+                _log_inbound_sms(from_number, body, "participant", "resubscribe",
+                                 participant_id=participant_id)
+
             # Check if this is an ERROR/false-alarm reply
-            first_word = body_upper.split()[0] if body_upper else ""
-            if first_word in PARTICIPANT_ERROR_KEYWORDS or body_upper in PARTICIPANT_ERROR_KEYWORDS:
+            if is_participant_error_reply(body):
                 # Stop escalation — participant says it was an error
                 import threading
 
@@ -5146,6 +5233,8 @@ async def twilio_sms_reply(request: Request):
 
                 threading.Thread(target=_stop_escalation, daemon=True).start()
 
+                _log_inbound_sms(from_number, body, "participant", "participant_error_stop",
+                                 participant_id=participant_id)
                 return Response(
                     content='<Response><Message>Thank you. We have noted that this was an error. '
                             'If you ever need support, please call 988 (Suicide &amp; Crisis Lifeline). '
@@ -5153,7 +5242,12 @@ async def twilio_sms_reply(request: Request):
                     media_type="application/xml",
                 )
             else:
-                # Non-error reply from participant — inform them this is automated
+                # Non-error free-form reply from a participant. We can't action
+                # it automatically, but for a suicide-prevention study it must NOT
+                # be invisible — log it flagged for human review so the team sees
+                # a participant reached out (even if the content is concerning).
+                _log_inbound_sms(from_number, body, "participant", "participant_freeform",
+                                 participant_id=participant_id, needs_review=True)
                 return Response(
                     content='<Response><Message>This is an automated research system (SocialScope, Dartmouth College). '
                             'We are unable to monitor or respond to text messages from this number. '
@@ -5185,8 +5279,13 @@ async def twilio_sms_reply(request: Request):
                 responder_name = doc.to_dict().get("name", from_number)
 
         if not responder_name:
-            # Unknown sender — could be anyone texting this number
+            # Unknown sender — could be anyone, but could also be a participant
+            # whose phone isn't on file. Log flagged for review so an unmatched
+            # participant reaching out isn't silently dropped.
             logger.warning(f"[SMS Reply] Unknown sender: {from_number}")
+            _log_inbound_sms(from_number, body, "unknown",
+                             "optout" if is_optout(body) else "unknown_sender",
+                             needs_review=True)
             return Response(
                 content='<Response><Message>This is an automated research system (SocialScope, Dartmouth College). '
                         'This number is not monitored for incoming messages.\n\n'
@@ -5199,9 +5298,11 @@ async def twilio_sms_reply(request: Request):
 
         # Parse the command
         command = body.split()[0] if body else ""
-        disposition = SMS_DISPOSITION_MAP.get(command)
+        disposition = parse_oncall_command(body)
 
         if not disposition:
+            _log_inbound_sms(from_number, body, "oncall", "oncall_unknown_command",
+                             responder_name=responder_name, needs_review=True)
             return Response(
                 content='<Response><Message>Unknown command. Reply: ACK, SAFE, SUPPORT, NOREACH, FALSE, 988, ER, or ONGOING</Message></Response>',
                 media_type="application/xml",
@@ -5308,6 +5409,9 @@ async def twilio_sms_reply(request: Request):
         })
 
         logger.info(f"[SMS Reply] {responder_name} replied '{command}' -> {disposition} for {participant_id}")
+
+        _log_inbound_sms(from_number, body, "oncall", f"oncall_disposition:{disposition}",
+                         participant_id=participant_id, responder_name=responder_name)
 
         return Response(
             content=f'<Response><Message>{reply_msg}</Message></Response>',
