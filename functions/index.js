@@ -908,14 +908,24 @@ exports[escalationFnName] = onSchedule(
             callResult = { error: err.message };
             console.error(`[Escalation] Triage call failed for ${eventData.participantId}: ${err.message}`);
           }
-          await doc.ref.update({
-            participantCallPlaced: true,
-            participantCallPlacedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          // Only mark the call as placed if it actually succeeded. A Twilio
+          // failure must NOT set participantCallPlaced=true, or the next cron
+          // tick would skip re-placing it and the participant in confirmed
+          // danger never gets the triage call. On failure we leave the flag
+          // unset so it retries (paging proceeds independently regardless).
+          const callSucceeded = !(callResult && callResult.error);
+          if (callSucceeded) {
+            await doc.ref.update({
+              participantCallPlaced: true,
+              participantCallPlacedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
           await doc.ref.collection("audit_trail").doc().set({
-            type: "participant_call_initiated",
+            type: callSucceeded ? "participant_call_initiated" : "participant_call_failed",
             result: callResult,
-            message: "Triage IVR call placed ~10 min after alert (1=error, 2=988, 3=already supported)",
+            message: callSucceeded
+              ? "Triage IVR call placed ~10 min after alert (1=error, 2=988, 3=already supported)"
+              : "Triage IVR call FAILED — will retry next cron tick",
             loggedBy: "system",
             loggedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
@@ -1241,13 +1251,12 @@ exports[escalationFnName] = onSchedule(
 
           console.log(`Walk-away detected: participant ${pid}, pending ${pendingDoc.id}, exceeded ${Math.round((now - exceededAt) / 60000)} min ago`);
 
-          // Mark as alerted
-          await pendingDoc.ref.update({
-            walkAwayAlertSent: true,
-            walkAwayAlertAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-
-          // Create a safety alert (potential risk, not confirmed)
+          // Create the safety alert FIRST, then mark the pending doc as alerted.
+          // The alertId is deterministic (pendingDoc.id + "_walkaway") so this
+          // .set() is idempotent — re-running it is harmless. If we set the flag
+          // first (as before) and then crashed before the alert was created, the
+          // `walkAwayAlertSent` guard above would skip it forever and the
+          // walk-away crisis would be silently dropped, never paging on-call.
           const alertId = pendingDoc.id + "_walkaway";
           await admin.firestore()
             .collection(col("participants")).doc(pid)
@@ -1266,6 +1275,12 @@ exports[escalationFnName] = onSchedule(
             });
 
           console.log(`Walk-away safety alert created for ${pid}: ${alertId}`);
+
+          // Now mark as alerted (after the alert exists).
+          await pendingDoc.ref.update({
+            walkAwayAlertSent: true,
+            walkAwayAlertAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
 
           // The onSafetyAlert trigger will fire and handle notifications,
           // but with alertType "unresolved_walkaway" the messaging will
