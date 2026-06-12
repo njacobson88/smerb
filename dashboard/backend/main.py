@@ -2355,6 +2355,93 @@ def get_storage_bucket():
         raise
 
 
+def read_content_events_from_gcs(participant_id, start_dt=None, end_dt=None):
+    """Read offloaded analytics events (content_visible / content_exposure) from
+    Cloud Storage and return them as event dicts shaped like Firestore events.
+
+    The Flutter app offloads these high-frequency types to gzipped JSONL objects
+    under content_events/{participantId}/{sessionId}/*.jsonl.gz instead of one
+    Firestore doc each. Exports merge them back in so the researcher view is
+    complete regardless of where an event physically lives.
+
+    Transition-safe: legacy content events still in Firestore are returned by the
+    normal events query; this only adds the GCS-resident ones. Dedup by event id
+    guards against any overlap during the migration window.
+
+    Memory: streams one object at a time, decompresses, parses line-by-line.
+    Objects are ~5–15 KB each.
+    """
+    import gzip as _gzip
+
+    events = []
+    try:
+        bucket = get_storage_bucket()
+    except Exception as e:
+        logger.warning(f"content_events: could not get bucket for {participant_id}: {e}")
+        return events
+
+    prefix = f"content_events/{participant_id}/"
+    try:
+        blobs = list(bucket.list_blobs(prefix=prefix))
+    except Exception as e:
+        logger.warning(f"content_events: list_blobs failed for {prefix}: {e}")
+        return events
+
+    for blob in blobs:
+        if not blob.name.endswith(".jsonl.gz"):
+            continue
+        try:
+            # raw_download=True bypasses GCS decompressive transcoding so we
+            # always get the stored gzip bytes regardless of object metadata.
+            raw = blob.download_as_bytes(raw_download=True)
+            text = _gzip.decompress(raw).decode("utf-8")
+        except Exception as e:
+            logger.warning(f"content_events: failed to read {blob.name}: {e}")
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            # Window filter on the event timestamp (ISO-8601 string written by app).
+            if start_dt or end_dt:
+                ts_raw = ev.get("timestamp")
+                ts_dt = None
+                if isinstance(ts_raw, str):
+                    try:
+                        ts_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                        if ts_dt.tzinfo is not None:
+                            ts_dt = ts_dt.replace(tzinfo=None)
+                    except Exception:
+                        ts_dt = None
+                if ts_dt is not None:
+                    if start_dt and ts_dt < start_dt:
+                        continue
+                    if end_dt and ts_dt >= end_dt:
+                        continue
+            events.append(ev)
+
+    if events:
+        logger.info(f"content_events: merged {len(events)} offloaded events for {participant_id}")
+    return events
+
+
+def merge_content_events(events_data, participant_id, start_dt=None, end_dt=None):
+    """Append GCS-offloaded content events to an export's events_data list,
+    de-duplicating by id against what's already present (legacy Firestore copies).
+    Mutates and returns events_data."""
+    existing_ids = {e.get("id") for e in events_data}
+    for ev in read_content_events_from_gcs(participant_id, start_dt, end_dt):
+        if ev.get("id") in existing_ids:
+            continue
+        events_data.append(ev)
+        existing_ids.add(ev.get("id"))
+    return events_data
+
+
 def get_signing_credentials():
     """Get credentials for signing URLs in Cloud Run.
 
@@ -2701,9 +2788,12 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
             # Level 2+: Export events
             if export_level >= 2:
                 events_ref = participant_ref.collection("events")
+                content_start_dt = None
+                content_end_dt = None
                 if start_date and end_date:
                     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
                     end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                    content_start_dt, content_end_dt = start_dt, end_dt
                     events_query = events_ref.where("timestamp", ">=", start_dt).where("timestamp", "<", end_dt)
                 else:
                     events_query = events_ref
@@ -2729,6 +2819,10 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                             })
 
                     events_data.append({"id": event_doc.id, **event})
+
+                # Merge offloaded content events (content_visible/content_exposure)
+                # that now live in Cloud Storage instead of Firestore.
+                merge_content_events(events_data, participant_id, content_start_dt, content_end_dt)
 
                 if events_data:
                     zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))
@@ -3206,10 +3300,13 @@ def export_participant_data(
             # Level 2+: Export events with OCR data
             if export_level >= 2:
                 events_ref = participant_ref.collection("events")
+                content_start_dt = None
+                content_end_dt = None
 
                 if start_date and end_date:
                     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
                     end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                    content_start_dt, content_end_dt = start_dt, end_dt
                     events_query = events_ref.where(
                         "timestamp", ">=", start_dt
                     ).where(
@@ -3240,6 +3337,9 @@ def export_participant_data(
                             })
 
                     events_data.append({"id": event_doc.id, **event})
+
+                # Merge offloaded content events now stored in Cloud Storage.
+                merge_content_events(events_data, participant_id, content_start_dt, content_end_dt)
 
                 if events_data:
                     zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))

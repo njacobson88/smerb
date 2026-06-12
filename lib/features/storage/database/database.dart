@@ -200,18 +200,43 @@ class AppDatabase extends _$AppDatabase {
     return (select(events)..where((e) => e.eventType.equals(type))).get();
   }
 
-  /// Get unsynced events (excludes events that exceeded max retry count).
+  /// High-frequency, analytics-only event types that are offloaded to compressed
+  /// object storage (GCS) in batches instead of becoming individual Firestore
+  /// docs. Everything else (screenshot, page_view, post_click, ...) stays in
+  /// Firestore. Kept in one place so the two queries below can't drift apart.
+  static const List<String> offloadedEventTypes = ['content_visible', 'content_exposure'];
+
+  /// Get unsynced events for the Firestore path — EXCLUDES the high-frequency
+  /// content event types (those are handled by getUnsyncedContentEvents).
   /// Ordered newest-first so recent data syncs before old backlog.
   Future<List<Event>> getUnsyncedEvents({int? limit}) {
     final query = select(events)
       ..where((e) =>
           e.synced.equals(false) &
-          e.syncRetryCount.isSmallerThanValue(maxSyncRetries))
+          e.syncRetryCount.isSmallerThanValue(maxSyncRetries) &
+          e.eventType.isNotIn(offloadedEventTypes))
       ..orderBy([(e) => OrderingTerm.desc(e.timestamp)]);
     if (limit != null) {
       query.limit(limit);
     }
     return query.get();
+  }
+
+  /// Get a BOUNDED batch of unsynced content events (the offloaded types) for
+  /// the GCS path. Ordered by session then time so a batch groups cleanly into
+  /// per-session files. Caller processes one bounded batch at a time (OOM-safe).
+  Future<List<Event>> getUnsyncedContentEvents({int limit = 300}) {
+    return (select(events)
+          ..where((e) =>
+              e.synced.equals(false) &
+              e.syncRetryCount.isSmallerThanValue(maxSyncRetries) &
+              e.eventType.isIn(offloadedEventTypes))
+          ..orderBy([
+            (e) => OrderingTerm.asc(e.sessionId),
+            (e) => OrderingTerm.asc(e.timestamp),
+          ])
+          ..limit(limit))
+        .get();
   }
 
   /// Mark events as synced

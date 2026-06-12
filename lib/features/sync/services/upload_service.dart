@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:uuid/uuid.dart';
 import '../../../core/config/environment_config.dart';
 import '../../storage/database/database.dart';
 
@@ -15,6 +17,7 @@ class UploadService {
   bool _isSyncingOcr = false;
   bool _isSyncingHtml = false;
   bool _isSyncingEma = false;
+  bool _isSyncingContent = false;
 
   // Track upload stats
   int _screenshotsUploaded = 0;
@@ -769,6 +772,134 @@ class UploadService {
     print('[UploadService] Uploaded EMA response: ${response.id}');
   }
 
+  /// Offload the high-frequency analytics event types (content_visible /
+  /// content_exposure) to compressed object storage instead of one Firestore
+  /// doc each. These are ~63% of all event docs; at study scale that is the
+  /// single largest Firestore cost driver.
+  ///
+  /// Memory discipline (older devices OOM easily):
+  ///   - Reads a BOUNDED batch (default 300 rows) from local SQLite, never the
+  ///     whole backlog. Loops batch-by-batch and releases each before the next.
+  ///   - Builds one small per-session JSONL string at a time (≤ batch rows),
+  ///     gzips it with dart:io's streaming codec (already proven safe on-device
+  ///     in screenshot_service), and uploads ~5–15 KB.
+  ///   - Holds no decoded image/HTML buffers; the largest live allocation is a
+  ///     few hundred short JSON lines.
+  ///
+  /// Non-destructive: a row is only marked synced AFTER its object lands. Upload
+  /// failures bump syncRetryCount and leave the rows local for the next cycle.
+  /// Object path: content_events/{participantId}/{sessionId}/{firstTsMs}_{uuid8}.jsonl.gz
+  Future<int> syncContentEvents({int batchSize = 300}) async {
+    if (_isSyncingContent) return 0;
+    _isSyncingContent = true;
+    int totalSynced = 0;
+    try {
+      const uuid = Uuid();
+      List<Event> batch;
+      do {
+        batch = await database.getUnsyncedContentEvents(limit: batchSize);
+        if (batch.isEmpty) break;
+
+        final syncedIds = <String>[];
+        final failedIds = <String>[];
+
+        // Walk the batch grouping consecutive rows by (participantId, sessionId)
+        // — the query is ordered by sessionId then timestamp so a group is a
+        // contiguous run. One GCS object per group.
+        int i = 0;
+        while (i < batch.length) {
+          final pid = batch[i].participantId;
+          final sid = batch[i].sessionId;
+          final start = i;
+          final buffer = StringBuffer();
+          while (i < batch.length &&
+              batch[i].participantId == pid &&
+              batch[i].sessionId == sid) {
+            final e = batch[i];
+            dynamic decoded;
+            try {
+              decoded = jsonDecode(e.data);
+            } catch (_) {
+              decoded = {'raw': e.data};
+            }
+            buffer.writeln(jsonEncode({
+              'id': e.id,
+              'sessionId': e.sessionId,
+              'participantId': e.participantId,
+              'eventType': e.eventType,
+              'timestamp': e.timestamp.toUtc().toIso8601String(),
+              'platform': e.platform,
+              'url': e.url,
+              'data': decoded,
+              'createdAt': e.createdAt.toUtc().toIso8601String(),
+            }));
+            i++;
+          }
+          final groupIds = [for (var k = start; k < i; k++) batch[k].id];
+
+          if (pid.isEmpty || sid.isEmpty) {
+            // Can't address an object without both ids. Don't mark synced (that
+            // would let prune delete them — we never delete data). Bump retry so
+            // after maxSyncRetries they fall out of the queue but stay on-device.
+            print('[UploadService] content event missing pid/sid, deferring ${groupIds.length} rows');
+            failedIds.addAll(groupIds);
+            continue;
+          }
+
+          try {
+            final gz = gzip.encode(utf8.encode(buffer.toString()));
+            final firstMs = batch[start].timestamp.toUtc().millisecondsSinceEpoch;
+            final objName = '${firstMs}_${uuid.v4().substring(0, 8)}.jsonl.gz';
+            final path = 'content_events/$pid/$sid/$objName';
+            await _storage
+                .ref()
+                .child(path)
+                .putData(
+                  Uint8List.fromList(gz),
+                  // NOTE: deliberately do NOT set contentEncoding:'gzip'. That
+                  // would make GCS decompressive-transcode on download, so the
+                  // backend's manual gzip.decompress would fail and silently
+                  // drop the events. We store an opaque gzip blob and decompress
+                  // it ourselves backend-side.
+                  SettableMetadata(
+                    contentType: 'application/gzip',
+                    customMetadata: {
+                      'participantId': pid,
+                      'sessionId': sid,
+                      'eventCount': '${groupIds.length}',
+                    },
+                  ),
+                )
+                .timeout(const Duration(seconds: 45));
+            _totalBytesUploaded += gz.length;
+            syncedIds.addAll(groupIds);
+          } catch (e) {
+            print('[UploadService] content-event group upload failed: $e');
+            failedIds.addAll(groupIds);
+          }
+        }
+
+        if (syncedIds.isNotEmpty) {
+          await database.markEventsAsSynced(syncedIds);
+          totalSynced += syncedIds.length;
+        }
+        if (failedIds.isNotEmpty) {
+          await database.incrementSyncRetryCount(failedIds);
+        }
+
+        // If nothing in this batch could be synced, stop — a persistent failure
+        // (offline, permission) shouldn't spin. Next sync cycle retries.
+        if (syncedIds.isEmpty) break;
+      } while (batch.length == batchSize);
+    } finally {
+      _isSyncingContent = false;
+    }
+    if (totalSynced > 0) {
+      print('[UploadService] Offloaded $totalSynced content events to GCS');
+    }
+    return totalSynced;
+  }
+
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
     // Reset counters
     _screenshotsUploaded = 0;
@@ -776,6 +907,10 @@ class UploadService {
 
     // Sync events first (includes OCR data for screenshots)
     final eventsSynced = await syncEvents(batchSize: eventBatchSize);
+
+    // Offload high-frequency analytics events to compressed GCS objects
+    // (content_visible / content_exposure) — not individual Firestore docs.
+    final contentEventsSynced = await syncContentEvents();
 
     // Sync any remaining OCR results (for events that were synced before OCR was done)
     final ocrSynced = await syncOcrResults(batchSize: ocrBatchSize);
@@ -794,6 +929,7 @@ class UploadService {
 
     return {
       'events': eventsSynced,
+      'contentEvents': contentEventsSynced,
       'ocrResults': ocrSynced,
       'screenshots': _screenshotsUploaded,
       'htmlCaptures': htmlCapturesSynced,

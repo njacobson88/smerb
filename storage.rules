@@ -13,6 +13,12 @@ service firebase.storage {
       allow read, write: if true;
     }
 
+    // Offloaded analytics events (content_visible / content_exposure) stored as
+    // gzipped JSONL batches instead of individual Firestore docs.
+    match /content_events/{participantId}/{sessionId}/{filename} {
+      allow read, write: if true;
+    }
+
     // Deny all other access by default
     match /{allPaths=**} {
       allow read, write: if false;
