@@ -16,6 +16,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote
 
+from phone_utils import normalize_phone, phones_match
+
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -4960,15 +4962,12 @@ def _find_participant_by_phone(phone_number: str):
     Look up a participant by phone number. Returns (participant_id, doc_data) or (None, None).
     Checks both 'phone' and 'phoneNumber' fields, with and without +1 prefix.
     """
-    # Normalize: strip to just digits
-    normalized = phone_number.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
-    if normalized.startswith("1") and len(normalized) == 11:
-        normalized = normalized[1:]  # Strip country code
+    # Canonical digits-only form (see phone_utils — single source of truth)
+    normalized = normalize_phone(phone_number)
 
     # Query participants collection for matching phone
     participants_ref = db.collection(config.col("participants"))
 
-    # Try with the normalized number (various stored formats)
     # Fast path: indexed equality on common stored formats (incl. normalized field)
     for phone_field in ["phoneNormalized", "phone", "phoneNumber"]:
         for fmt in [normalized, f"+1{normalized}", f"1{normalized}"]:
@@ -4985,12 +4984,8 @@ def _find_participant_by_phone(phone_number: str):
     try:
         for doc in participants_ref.stream():
             data = doc.to_dict()
-            for field in ("phone", "phoneNumber"):
-                stored = "".join(c for c in str(data.get(field) or "") if c.isdigit())
-                if stored.startswith("1") and len(stored) == 11:
-                    stored = stored[1:]
-                if stored and stored == normalized:
-                    return doc.id, data
+            if any(phones_match(data.get(field), normalized) for field in ("phone", "phoneNumber")):
+                return doc.id, data
     except Exception as e:
         logger.warning(f"[SMS Reply] Fallback phone scan failed: {e}")
 
@@ -5728,10 +5723,7 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
             if phone:
                 participant_data["phone"] = phone
                 # Digits-only normalized copy so SMS-reply matching always works
-                digits = "".join(c for c in phone if c.isdigit())
-                if len(digits) == 11 and digits.startswith("1"):
-                    digits = digits[1:]
-                participant_data["phoneNormalized"] = digits
+                participant_data["phoneNormalized"] = normalize_phone(phone)
 
             db.collection(participants_col).document(app_id).set(participant_data, merge=True)
             logger.info(f"[AutoEnroll] Participant {app_id} registered on dashboard (email={email}, phone={phone})")
