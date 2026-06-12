@@ -1,0 +1,14 @@
+{
+  "rule": [
+    {"action": {"type": "SetStorageClass", "storageClass": "NEARLINE"},
+     "condition": {"age": 30, "matchesStorageClass": ["STANDARD"], "matchesPrefix": ["screenshots/", "html/", "exports/", "html-archives/"]}},
+    {"action": {"type": "SetStorageClass", "storageClass": "COLDLINE"},
+     "condition": {"age": 180, "matchesStorageClass": ["NEARLINE"], "matchesPrefix": ["screenshots/", "html/", "html-archives/"]}},
+    {"action": {"type": "SetStorageClass", "storageClass": "COLDLINE"},
+     "condition": {"age": 90, "matchesStorageClass": ["NEARLINE"], "matchesPrefix": ["exports/"]}},
+    {"action": {"type": "SetStorageClass", "storageClass": "ARCHIVE"},
+     "condition": {"age": 365, "matchesStorageClass": ["COLDLINE"], "matchesPrefix": ["screenshots/", "html/", "html-archives/"]}},
+    {"action": {"type": "SetStorageClass", "storageClass": "ARCHIVE"},
+     "condition": {"age": 180, "matchesStorageClass": ["COLDLINE"], "matchesPrefix": ["exports/"]}}
+  ]
+}
