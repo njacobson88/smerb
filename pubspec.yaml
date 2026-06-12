@@ -63,6 +63,8 @@ dependencies:
   firebase_storage: ^12.3.6
   firebase_messaging: ^15.1.0
   firebase_app_check: ^0.3.2+10
+  firebase_auth: ^5.3.1          # per-participant custom-token sign-in (enrollment link)
+  app_links: ^6.3.2              # smerb:// enrollment deep link
 
 dev_dependencies:
   flutter_test:

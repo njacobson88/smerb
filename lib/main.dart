@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:app_links/app_links.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -14,6 +16,7 @@ import 'features/sync/services/upload_service.dart';
 import 'features/sync/services/background_sync_service.dart';
 import 'features/ocr/services/ocr_service.dart';
 import 'features/onboarding/services/participant_service.dart';
+import 'features/onboarding/services/enrollment_link_service.dart';
 import 'features/onboarding/screens/enrollment_screen.dart';
 import 'features/notifications/services/push_notification_service.dart';
 import 'features/notifications/services/app_update_service.dart';
@@ -137,6 +140,9 @@ class AppInitializer extends StatefulWidget {
 class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObserver {
   late final AppDatabase _database;
   late final ParticipantService _participantService;
+  EnrollmentLinkService? _enrollLinkService;
+  AppLinks? _appLinks;
+  StreamSubscription<Uri>? _linkSub;
   CaptureService? _captureService;
   UploadService? _uploadService;
   OcrService? _ocrService;
@@ -177,9 +183,34 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
 
     // Initialize participant service
     _participantService = ParticipantService();
+    _enrollLinkService =
+        EnrollmentLinkService(participantService: _participantService);
+
+    // Listen for enrollment deep links arriving while the app is running.
+    _appLinks = AppLinks();
+    _linkSub = _appLinks!.uriLinkStream.listen(
+      _handleEnrollLink,
+      onError: (e) => print('[App] deep link stream error: $e'),
+    );
 
     // Check enrollment status
-    final isEnrolled = await _participantService.isEnrolled();
+    var isEnrolled = await _participantService.isEnrolled();
+
+    // Cold start: if the app was opened by an enrollment link and we're not yet
+    // enrolled, process it before deciding which screen to show. Best-effort —
+    // failure just falls through to the manual enrollment screen.
+    if (!isEnrolled) {
+      try {
+        final initialUri = await _appLinks!.getInitialLink();
+        if (initialUri != null &&
+            EnrollmentLinkService.isEnrollUri(initialUri)) {
+          final pid = await _enrollLinkService!.processUri(initialUri);
+          if (pid != null) isEnrolled = true;
+        }
+      } catch (e) {
+        print('[App] initial deep link handling failed: $e');
+      }
+    }
 
     if (isEnrolled) {
       await _initializeServices();
@@ -261,9 +292,21 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
     setState(() => _enrolled = true);
   }
 
+  /// Handle an enrollment deep link received while the app is running.
+  Future<void> _handleEnrollLink(Uri uri) async {
+    if (_enrolled || _enrollLinkService == null) return;
+    if (!EnrollmentLinkService.isEnrollUri(uri)) return;
+    final pid = await _enrollLinkService!.processUri(uri);
+    if (pid != null && mounted) {
+      await _initializeServices();
+      setState(() => _enrolled = true);
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _linkSub?.cancel();
     _backgroundSyncService?.dispose();
     _captureService?.endSession();
     _database.close();
