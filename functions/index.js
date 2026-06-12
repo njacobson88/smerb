@@ -76,6 +76,32 @@ async function twilioWithRetry(label, fn, maxAttempts = 3) {
   throw lastErr;
 }
 
+// Twilio error code returned when sending to a number that opted out via STOP.
+// SMS opt-out is carrier-enforced and blocks ALL future texts to that number
+// (including crisis texts) — but it does NOT block voice calls.
+const TWILIO_OPTOUT_ERROR_CODE = 21610;
+function isOptOutError(err) {
+  return !!err && (err.code === TWILIO_OPTOUT_ERROR_CODE || String(err.code) === "21610");
+}
+
+// Flag a participant as SMS-unreachable so on-call knows to reach them by phone
+// and the dashboard can surface it. Detects opt-out two ways: the inbound STOP
+// webhook (backend) AND a failed send here (covers carrier-level opt-outs we
+// never saw a STOP for). Best-effort — never throws into the caller.
+async function flagSmsOptedOut(participantId, via) {
+  if (!participantId) return;
+  try {
+    await admin.firestore().collection(col("participants")).doc(participantId).set({
+      smsOptedOut: true,
+      smsOptedOutAt: admin.firestore.FieldValue.serverTimestamp(),
+      smsOptedOutDetectedVia: via,
+    }, { merge: true });
+    console.warn(`[OptOut] Participant ${participantId} flagged SMS-unreachable (${via})`);
+  } catch (e) {
+    console.error(`[OptOut] Failed to flag ${participantId}: ${e.message}`);
+  }
+}
+
 // ============================================================================
 // Helper: Place the automated triage IVR call to a participant.
 // Per PI design this is NOT placed immediately — the participant first gets a
@@ -129,6 +155,16 @@ async function placeParticipantTriageCall(client, fromNumber, participantId, ale
   return { sid: call.sid, status: call.status, phone: participantPhone };
 }
 
+// Read a participant's current SMS opt-out status (best-effort, defaults false).
+async function _participantSmsOptedOut(participantId) {
+  try {
+    const snap = await admin.firestore().collection(col("participants")).doc(participantId).get();
+    return snap.exists && snap.data().smsOptedOut === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ============================================================================
 // Helper: Create a safety event in the audit trail system
 // ============================================================================
@@ -148,6 +184,9 @@ async function createSafetyEvent(alertData, participantId, alertId) {
     responses: alertData.responses || {},
     confirmationNumber: alertData.confirmationNumber || null,
     triggerQuestion: alertData.triggerQuestion || null,
+    // Snapshot SMS-reachability onto the event so every escalation step (and the
+    // dashboard) knows whether the participant can be texted/can reply by text.
+    participantSmsOptedOut: await _participantSmsOptedOut(participantId),
   });
 
   // Log initial event in audit trail
@@ -322,6 +361,7 @@ async function getParticipantInfo(participantId) {
     info.email = data.email;
     info.name = data.name || data.participantName;
     info.fcmToken = data.fcmToken || null;
+    info.smsOptedOut = data.smsOptedOut === true;
     info.emergencyContacts = data.emergencyContacts || [];
     if (data.emergencyContactPhone) {
       info.emergencyContacts.push({
@@ -539,6 +579,12 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
     // For confirmed danger: skip immediate on-call page — automated outreach first
     // Escalation scheduler will page on-call after 15 min if participant doesn't resolve
+    // If the participant opted out of SMS, on-call must reach them by phone.
+    const participantSmsOptedOut = await _participantSmsOptedOut(participantId);
+    const smsUnreachableWarning = participantSmsOptedOut
+      ? `\n** PARTICIPANT OPTED OUT OF SMS — they will NOT receive texts and cannot reply by text. Reach them by PHONE CALL. They can still answer the automated call or respond in-app. **\n`
+      : ``;
+
     if (recipients.length > 0 && !isConfirmedDanger) {
       try {
         const client = getTwilioClient();
@@ -561,6 +607,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
               : isFallback
                 ? `High-risk responses, exited before confirmation.\n`
                 : `Endorsed imminent self-harm risk.\n`) +
+          smsUnreachableWarning +
           `\nReply ACK to acknowledge.\n` +
           `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER to log disposition.\n` +
           `Dashboard: ${DASHBOARD_URL}`;
@@ -619,21 +666,37 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
         // 4a. SMS participant — includes error acknowledgment option
         if (participantInfo.phone) {
-          const participantPhone = participantInfo.phone.startsWith("+")
-            ? participantInfo.phone : `+1${participantInfo.phone}`;
-          try {
-            const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
-              body: `This is the SocialScope study team at Dartmouth College. ` +
-                    `Based on your recent check-in, we want to make sure you're safe. ` +
-                    `A member of our team will be calling you shortly.\n\n` +
-                    `If this was an error, reply ERROR or 1.\n\n` +
-                    `If you are in crisis, please report to the nearest emergency room, call 911, or call 988.`,
-              from: fromNumber,
-              to: participantPhone,
-            }));
-            participantSmsResult = { sid: smsResult.sid, status: smsResult.status, phone: participantInfo.phone };
-          } catch (err) {
-            participantSmsResult = { error: err.message };
+          if (participantInfo.smsOptedOut) {
+            // Texting an opted-out number just fails (21610). Skip it and rely
+            // on the IVR voice call (not blocked by opt-out) + on-call. The
+            // on-call page already carries the SMS-unreachable warning.
+            participantSmsResult = { skipped: "participant_opted_out_of_sms" };
+            console.warn(`[Escalation] Participant ${participantId} is SMS-opted-out — skipping participant SMS, relying on call.`);
+          } else {
+            const participantPhone = participantInfo.phone.startsWith("+")
+              ? participantInfo.phone : `+1${participantInfo.phone}`;
+            try {
+              const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
+                body: `This is the SocialScope study team at Dartmouth College. ` +
+                      `Based on your recent check-in, we want to make sure you're safe. ` +
+                      `A member of our team will be calling you shortly.\n\n` +
+                      `If this was an error, reply ERROR or 1.\n\n` +
+                      `If you are in crisis, please report to the nearest emergency room, call 911, or call 988.`,
+                from: fromNumber,
+                to: participantPhone,
+              }));
+              participantSmsResult = { sid: smsResult.sid, status: smsResult.status, phone: participantInfo.phone };
+            } catch (err) {
+              participantSmsResult = { error: err.message };
+              // If the send failed because they opted out (even if we never saw
+              // a STOP), flag them SMS-unreachable so on-call/dashboard know to call.
+              if (isOptOutError(err)) {
+                await flagSmsOptedOut(participantId, "send_failure_21610");
+                if (safetyEventRef) {
+                  await safetyEventRef.update({ participantSmsOptedOut: true }).catch(() => {});
+                }
+              }
+            }
           }
 
           if (safetyEventRef) {
@@ -965,6 +1028,9 @@ exports[escalationFnName] = onSchedule(
                       `Safety event for participant ${eventData.participantId} ` +
                       `is UNRESOLVED after ${Math.round(minutesSinceCreation)} min ` +
                       `(participant did not confirm safe and was not connected to 988).\n` +
+                      (eventData.participantSmsOptedOut
+                        ? `** PARTICIPANT OPTED OUT OF SMS — reach them by PHONE CALL; they cannot be texted or reply by text. **\n`
+                        : ``) +
                       `Reply ACK to take it.\n` +
                       `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER to log disposition.\n` +
                       `Dashboard: ${DASHBOARD_URL}`,
