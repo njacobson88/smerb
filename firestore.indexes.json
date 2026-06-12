@@ -17,11 +17,91 @@
       ]
     },
     {
+      "collectionGroup": "safety_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "escalationStopped", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "safety_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "currentDisposition", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "followup_schedule",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "safetyEventId", "order": "ASCENDING" },
+        { "fieldPath": "scheduledAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "followup_schedule",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "scheduledAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "notification_history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "participantId", "order": "ASCENDING" },
+        { "fieldPath": "sentAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "dev_safety_events",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "participantId", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dev_safety_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "escalationStopped", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dev_safety_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "currentDisposition", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dev_followup_schedule",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "safetyEventId", "order": "ASCENDING" },
+        { "fieldPath": "scheduledAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dev_followup_schedule",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "scheduledAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dev_notification_history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "participantId", "order": "ASCENDING" },
+        { "fieldPath": "sentAt", "order": "DESCENDING" }
       ]
     }
   ],
