@@ -6062,11 +6062,19 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
     mapping_doc = mapping_ref.get()
     if mapping_doc.exists:
         existing = mapping_doc.to_dict()
-        logger.info(f"[REDCap] Record {redcap_record_id} already has app ID: {existing['app_participant_id']}")
+        app_id = existing["app_participant_id"]
+        # SELF-HEAL: the DET only calls this when REDCap's app-id field is empty,
+        # yet a Firestore mapping already exists — i.e. a prior write-back failed
+        # (e.g. the REDCap API token was missing). Re-write it so the ID is
+        # actually visible in REDCap instead of stranded in Firestore.
+        redcap_written = write_id_to_redcap(redcap_record_id, app_id, event_name)
+        logger.info(f"[REDCap] Record {redcap_record_id} already mapped to {app_id}; "
+                    f"re-wrote to REDCap (write: {redcap_written})")
         return {
             "status": "already_exists",
-            "app_id": existing["app_participant_id"],
+            "app_id": app_id,
             "redcap_record_id": redcap_record_id,
+            "redcap_written": redcap_written,
         }
 
     # Generate unique 9-digit ID
