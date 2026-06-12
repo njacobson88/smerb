@@ -4066,6 +4066,8 @@ def get_active_safety_events(request: Request, user: dict = Depends(verify_fireb
                 "timeToHumanContactSeconds": data.get("timeToHumanContactSeconds"),
                 "createdAt": created_at.isoformat() if created_at else None,
                 "lastRespondedBy": data.get("lastRespondedBy"),
+                # SMS-unreachable: responders must reach this participant by phone.
+                "participantSmsOptedOut": data.get("participantSmsOptedOut", False),
             })
 
         return {"events": events}
