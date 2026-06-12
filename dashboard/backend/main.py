@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote
 
 from phone_utils import normalize_phone, phones_match
+import content_events as content_events_mod
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -2369,10 +2370,9 @@ def read_content_events_from_gcs(participant_id, start_dt=None, end_dt=None):
     guards against any overlap during the migration window.
 
     Memory: streams one object at a time, decompresses, parses line-by-line.
-    Objects are ~5–15 KB each.
+    Objects are ~5–15 KB each. Pure decode/filter/dedup live in content_events.py
+    (unit-tested); this function owns only the GCS I/O.
     """
-    import gzip as _gzip
-
     events = []
     try:
         bucket = get_storage_bucket()
@@ -2394,35 +2394,12 @@ def read_content_events_from_gcs(participant_id, start_dt=None, end_dt=None):
             # raw_download=True bypasses GCS decompressive transcoding so we
             # always get the stored gzip bytes regardless of object metadata.
             raw = blob.download_as_bytes(raw_download=True)
-            text = _gzip.decompress(raw).decode("utf-8")
         except Exception as e:
             logger.warning(f"content_events: failed to read {blob.name}: {e}")
             continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except Exception:
-                continue
-            # Window filter on the event timestamp (ISO-8601 string written by app).
-            if start_dt or end_dt:
-                ts_raw = ev.get("timestamp")
-                ts_dt = None
-                if isinstance(ts_raw, str):
-                    try:
-                        ts_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                        if ts_dt.tzinfo is not None:
-                            ts_dt = ts_dt.replace(tzinfo=None)
-                    except Exception:
-                        ts_dt = None
-                if ts_dt is not None:
-                    if start_dt and ts_dt < start_dt:
-                        continue
-                    if end_dt and ts_dt >= end_dt:
-                        continue
-            events.append(ev)
+        for ev in content_events_mod.parse_jsonl_gz(raw):
+            if content_events_mod.event_in_window(ev, start_dt, end_dt):
+                events.append(ev)
 
     if events:
         logger.info(f"content_events: merged {len(events)} offloaded events for {participant_id}")
@@ -2433,13 +2410,9 @@ def merge_content_events(events_data, participant_id, start_dt=None, end_dt=None
     """Append GCS-offloaded content events to an export's events_data list,
     de-duplicating by id against what's already present (legacy Firestore copies).
     Mutates and returns events_data."""
-    existing_ids = {e.get("id") for e in events_data}
-    for ev in read_content_events_from_gcs(participant_id, start_dt, end_dt):
-        if ev.get("id") in existing_ids:
-            continue
-        events_data.append(ev)
-        existing_ids.add(ev.get("id"))
-    return events_data
+    return content_events_mod.merge_content_events(
+        events_data, read_content_events_from_gcs(participant_id, start_dt, end_dt)
+    )
 
 
 def get_signing_credentials():

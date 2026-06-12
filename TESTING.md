@@ -25,6 +25,19 @@ flutter test                       # all dart tests
 flutter test test/ema_safety_config_test.dart
 ```
 
+## Backend (Python) — offloaded content-event read path
+
+`tests/test_content_events.py` guards `content_events.py`, the pure
+decode/filter/dedup logic behind the storage optimization that moves
+`content_visible`/`content_exposure` out of Firestore into gzipped-JSONL Cloud
+Storage objects. It locks in: gzip-JSONL round-trip, soft-fail on corrupt bytes
+(the decompressive-transcoding trap), inclusive-start/exclusive-end window
+filtering matching the Firestore query, never dropping events with missing
+timestamps, and id-dedup against legacy Firestore copies during the migration
+window. A regression here would silently drop research data from exports.
+
+## App (Flutter/Dart) — EMA safety-trigger config
+
 `test/ema_safety_config_test.dart` guards the EMA safety-trigger configuration —
 the root of the crisis pipeline. It fails if a threshold changes, if the
 `inverted` flag is dropped from `ability_safe` (low ability-to-stay-safe = danger),
