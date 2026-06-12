@@ -66,9 +66,11 @@ service cloud.firestore {
     // ========================================================================
 
     match /participants/{participantId} {
-      // Allow reads for authenticated users or from Admin SDK
-      // Mobile app doesn't need to read participant root docs
-      allow read: if true;  // Admin SDK bypasses anyway
+      // Reads scoped to the participant themselves (per-participant custom-token
+      // auth: request.auth.uid == participantId). The dashboard uses the Admin
+      // SDK, which bypasses rules. Writes stay open so crisis capture never
+      // depends on auth being healthy.
+      allow read: if request.auth != null && request.auth.uid == participantId;
 
       // Allow writes with participant ID validation
       // Ensures writes go to correct participant path
@@ -140,13 +142,13 @@ service cloud.firestore {
 
       // Safety plan - participant's crisis safety plan
       match /safety_plan/{planId} {
-        allow read: if true;
+        allow read: if request.auth != null && request.auth.uid == participantId;
         allow write: if false;  // Only Admin SDK populates from REDCap
       }
 
       // Received notifications - push notifications stored for display
       match /received_notifications/{notifId} {
-        allow read: if true;
+        allow read: if request.auth != null && request.auth.uid == participantId;
         allow create: if true;
         allow update: if true;
         allow delete: if false;
@@ -214,7 +216,7 @@ service cloud.firestore {
     // ========================================================================
 
     match /dev_participants/{participantId} {
-      allow read: if true;
+      allow read: if request.auth != null && request.auth.uid == participantId;
       allow create: if true;
       allow update: if true;
       allow delete: if false;
@@ -256,11 +258,11 @@ service cloud.firestore {
         allow delete: if false;
       }
       match /safety_plan/{planId} {
-        allow read: if true;
+        allow read: if request.auth != null && request.auth.uid == participantId;
         allow write: if false;
       }
       match /received_notifications/{notifId} {
-        allow read: if true;
+        allow read: if request.auth != null && request.auth.uid == participantId;
         allow create: if true;
         allow update: if true;
         allow delete: if false;

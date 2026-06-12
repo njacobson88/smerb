@@ -2,21 +2,25 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    // Screenshots folder - allow read/write for test mode
-    // In production, restrict to authenticated users
+    // Captures. Writes stay open (the app uploads without depending on auth, so
+    // capture never breaks); READS are scoped to the owning participant
+    // (per-participant custom-token auth: request.auth.uid == participantId).
+    // The dashboard serves these via signed URLs, which bypass these rules.
     match /screenshots/{participantId}/{sessionId}/{filename} {
-      allow read, write: if true;
+      allow write: if true;
+      allow read: if request.auth != null && request.auth.uid == participantId;
     }
 
-    // HTML captures folder
     match /html/{participantId}/{sessionId}/{filename} {
-      allow read, write: if true;
+      allow write: if true;
+      allow read: if request.auth != null && request.auth.uid == participantId;
     }
 
     // Offloaded analytics events (content_visible / content_exposure) stored as
     // gzipped JSONL batches instead of individual Firestore docs.
     match /content_events/{participantId}/{sessionId}/{filename} {
-      allow read, write: if true;
+      allow write: if true;
+      allow read: if request.auth != null && request.auth.uid == participantId;
     }
 
     // Deny all other access by default

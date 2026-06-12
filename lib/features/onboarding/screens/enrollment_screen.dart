@@ -230,50 +230,41 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 ),
                 const SizedBox(height: 24),
 
-                // Participant ID Input
-                Text(
-                  'Enter your Participant ID',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'This 9-digit ID was provided to you by the research team.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.grey[600],
-                  ),
-                ),
-                const SizedBox(height: 12),
-
-                TextFormField(
-                  controller: _participantIdController,
-                  decoration: InputDecoration(
-                    labelText: 'Participant ID',
-                    hintText: 'e.g., 123456789 or test1',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
+                // Sign in via the secure link (no manual ID entry).
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        const Icon(Icons.link, size: 40, color: Color(0xFF4A6CF7)),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Sign in with your link',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'The research team sent you a secure sign-in link by text and '
+                          'email. Open that link on this phone to sign in — there is '
+                          'nothing to type here.',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'If you didn\'t receive a link, or it isn\'t working, contact '
+                          'the research team and we\'ll resend it.',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: Colors.grey[600],
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
                     ),
-                    prefixIcon: const Icon(Icons.badge_outlined),
                   ),
-                  keyboardType: TextInputType.text,
-                  validator: ParticipantService.validateIdFormat,
-                ),
-                const SizedBox(height: 16),
-
-                // Confirm Participant ID Input
-                TextFormField(
-                  controller: _confirmIdController,
-                  decoration: InputDecoration(
-                    labelText: 'Confirm Participant ID',
-                    hintText: 'Re-enter your ID',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    prefixIcon: const Icon(Icons.badge_outlined),
-                  ),
-                  keyboardType: TextInputType.text,
-                  validator: ParticipantService.validateIdFormat,
                 ),
                 const SizedBox(height: 16),
 
@@ -327,41 +318,23 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                   const SizedBox(height: 16),
                 ],
 
-                // Enroll Button
-                ElevatedButton(
-                  onPressed: (_isLoading || _isRateLimited) ? null : _enroll,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF4A6CF7),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                // Waiting for the participant to open their sign-in link.
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const SizedBox(
+                      height: 16,
+                      width: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                  ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : _isRateLimited
-                          ? Text(
-                              'Please wait ${_remainingRateLimitTime.inSeconds}s',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            )
-                          : const Text(
-                              'Enroll in Study',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'Waiting for your sign-in link…',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 24),
 
