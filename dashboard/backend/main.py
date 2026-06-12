@@ -881,9 +881,32 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                     full_responses = ema_by_session.get(session_id, {})
                     merged_responses = {**alert_responses, **full_responses}
 
+                    # Pull disposition status from the matching safety_events doc
+                    # so EVERY researcher sees that an alert is already handled
+                    # (and by whom) — not just the one who logged it. Without this
+                    # two researchers can double-act on the same crisis.
+                    handled_status = {}
+                    try:
+                        se_doc = db.collection(SAFETY_EVENTS_COLLECTION).document(alert_doc.id).get()
+                        if se_doc.exists:
+                            se = se_doc.to_dict()
+                            lr = se.get("lastRespondedAt")
+                            if lr and hasattr(lr, "timestamp"):
+                                lr = datetime.fromtimestamp(lr.timestamp()).isoformat()
+                            handled_status = {
+                                "escalationStopped": se.get("escalationStopped", False),
+                                "currentDisposition": se.get("currentDisposition"),
+                                "acknowledged": se.get("acknowledged", False),
+                                "lastRespondedBy": se.get("lastRespondedBy") or se.get("acknowledgedBy"),
+                                "lastRespondedAt": lr,
+                            }
+                    except Exception:
+                        pass
+
                     alerts.append({
                         "participantId": pid,
                         "alertId": alert_doc.id,
+                        **handled_status,
                         "date": alert_date,
                         "time": alert_time,
                         "triggeredAt": triggered_iso,
@@ -1410,6 +1433,8 @@ def get_overall_status(
     end_date: str = Query(..., description="End date YYYY-MM-DD"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(25, ge=1, le=100, description="Items per page"),
+    sort_by: str = Query("compliance", description="compliance | reddit | twitter | id"),
+    sort_dir: str = Query("desc", description="asc | desc"),
     user: dict = Depends(verify_firebase_token)
 ):
     """
@@ -1490,6 +1515,22 @@ def get_overall_status(
                     "weeklyTwitter": total_twitter,
                     "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
                 })
+
+            # Sort the FULL result set BEFORE paginating, so e.g. "lowest
+            # compliance first" surfaces the genuinely lowest participants across
+            # all pages — not just a reordering of the current 25-row page.
+            _sort_fields = {
+                "compliance": "overallCompliance",
+                "reddit": "weeklyReddit",
+                "twitter": "weeklyTwitter",
+                "id": "id",
+            }
+            _field = _sort_fields.get(sort_by, "overallCompliance")
+            _reverse = (sort_dir or "desc").lower() != "asc"
+            if _field == "id":
+                results.sort(key=lambda r: str(r.get("id", "")), reverse=_reverse)
+            else:
+                results.sort(key=lambda r: r.get(_field) or 0, reverse=_reverse)
 
             # Paginate results
             total_participants = len(results)

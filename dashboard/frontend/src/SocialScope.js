@@ -1545,6 +1545,12 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
               const alertKey = alert.alertId || `${alert.participantId}_${alert.date}`;
               const isExpanded = expandedAlert === alertKey;
               const wasResolved = dispositionSuccess === alertKey;
+              // Persistent handled-state from the backend (visible to ALL
+              // researchers), so two people don't double-act on one crisis.
+              const handledBy = alert.lastRespondedBy;
+              const isResolved = alert.escalationStopped || (alert.currentDisposition && alert.currentDisposition !== 'ongoing');
+              const isOngoing = alert.currentDisposition === 'ongoing';
+              const isAcked = alert.acknowledged && !isResolved;
 
               return (
                 <div key={idx} className={`border rounded-lg overflow-hidden ${
@@ -1574,6 +1580,21 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
                       )}
                       {wasResolved && (
                         <span className="ml-3 px-2 py-0.5 bg-green-600 text-white text-xs font-bold rounded">RESPONDED</span>
+                      )}
+                      {!wasResolved && isResolved && (
+                        <span className="ml-3 px-2 py-0.5 bg-green-700 text-white text-xs font-bold rounded">
+                          RESOLVED{handledBy ? ` · ${handledBy}` : ''}{alert.currentDisposition ? ` (${alert.currentDisposition})` : ''}
+                        </span>
+                      )}
+                      {!isResolved && isOngoing && (
+                        <span className="ml-3 px-2 py-0.5 bg-amber-600 text-white text-xs font-bold rounded">
+                          ONGOING{handledBy ? ` · ${handledBy}` : ''}
+                        </span>
+                      )}
+                      {isAcked && (
+                        <span className="ml-3 px-2 py-0.5 bg-blue-600 text-white text-xs font-bold rounded">
+                          ACK&apos;d{handledBy ? ` · ${handledBy}` : ''}
+                        </span>
                       )}
                     </div>
                     <div className="flex items-center gap-2">

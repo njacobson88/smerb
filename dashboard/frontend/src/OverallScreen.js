@@ -181,6 +181,9 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
 
   // Handle sort change
   const handleSortChange = (newSortBy) => {
+    // Sorting is now applied server-side across the FULL set, so jump back to
+    // page 1 to show the true top of the newly-sorted list (not the current page).
+    setPage(1);
     if (newSortBy === sortBy) {
       // Toggle direction if same column
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
@@ -223,7 +226,8 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
 
     try {
       const response = await authFetch(
-        `${API_BASE_URL}/api/overall_status?start_date=${startDate}&end_date=${endDate}&page=${page}&page_size=25`
+        `${API_BASE_URL}/api/overall_status?start_date=${startDate}&end_date=${endDate}&page=${page}&page_size=25` +
+        `&sort_by=${sortBy}&sort_dir=${sortDirection}`
       );
 
       if (!response.ok) {
@@ -247,7 +251,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
     } finally {
       setLoading(false);
     }
-  }, [weekOffset, page, getWeekDateRange, setParticipantList]);
+  }, [weekOffset, page, sortBy, sortDirection, getWeekDateRange, setParticipantList]);
 
   // Manual cache refresh with double confirmation
   const handleRefreshCache = async () => {

@@ -60,16 +60,23 @@ const Login = ({ onLoginSuccess }) => {
   // Check if user is on Dartmouth network
   useEffect(() => {
     const checkNetwork = async () => {
-      try {
-        const res = await fetch(`${API_BASE_URL}/health`, { mode: 'cors' });
-        if (res.status === 403) {
-          setNetworkStatus('blocked');
-        } else {
-          setNetworkStatus('allowed');
+      // Probe up to 3 times. The backend independently enforces the Dartmouth
+      // IP allowlist (returns 403), so this is an advisory gate — but it must
+      // fail CLOSED, not open: a persistent failure (off-network CORS/connection
+      // error) should show the block screen, not silently green-light access.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch(`${API_BASE_URL}/health`, { mode: 'cors' });
+          setNetworkStatus(res.status === 403 ? 'blocked' : 'allowed');
+          return;
+        } catch (e) {
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 800));
+          }
         }
-      } catch (e) {
-        setNetworkStatus('allowed');
       }
+      // All probes failed — fail closed (likely off-network or backend down).
+      setNetworkStatus('blocked');
     };
     checkNetwork();
   }, []);
