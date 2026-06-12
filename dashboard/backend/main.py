@@ -19,6 +19,11 @@ from urllib.parse import unquote
 from phone_utils import normalize_phone, phones_match
 from export_utils import is_valid_export_id
 from template_utils import safe_format
+from enrollment_auth import (
+    generate_enrollment_secret, hash_secret, verify_secret,
+    build_enrollment_url, enrollment_sms_text,
+    enrollment_email_subject, enrollment_email_html,
+)
 from sms_utils import (
     PARTICIPANT_ERROR_KEYWORDS,
     SMS_DISPOSITION_MAP,
@@ -61,6 +66,44 @@ if not firebase_admin._apps:
         })
 
 db = firestore.client()
+
+# ----------------------------------------------------------------------------
+# Custom-token signing for per-participant enrollment auth.
+# The default app on Cloud Run uses ADC (compute SA, no private key), which
+# CANNOT sign custom tokens. FIREBASE_SERVICE_ACCOUNT_KEY holds the real SA key
+# (already used by compliance_notifications); init a dedicated app from it so
+# create_custom_token can sign locally.
+# ----------------------------------------------------------------------------
+_token_signer_app = None
+
+
+def _get_token_signer_app():
+    global _token_signer_app
+    if _token_signer_app is None:
+        sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_KEY")
+        if not sa_json:
+            return None
+        try:
+            cred = credentials.Certificate(json.loads(sa_json))
+            _token_signer_app = firebase_admin.initialize_app(cred, name="token-signer")
+        except ValueError:
+            _token_signer_app = firebase_admin.get_app("token-signer")
+        except Exception as e:
+            logger.error(f"Token signer init failed: {e}")
+            return None
+    return _token_signer_app
+
+
+def mint_enrollment_token(participant_id: str) -> str:
+    """Firebase custom token with uid == participantId (string). The app exchanges
+    the enrollment secret for this, then signInWithCustomToken — so every Firebase
+    request carries request.auth.uid == participantId for per-participant rules."""
+    from firebase_admin import auth as fb_auth
+    app = _get_token_signer_app()
+    token = fb_auth.create_custom_token(str(participant_id), app=app) if app \
+        else fb_auth.create_custom_token(str(participant_id))
+    return token.decode("utf-8") if isinstance(token, (bytes, bytearray)) else token
+
 
 # ============================================================================
 # Startup Validation
@@ -154,6 +197,9 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
         "/api/twilio/incoming-call",
         "/api/config/environment",
         "/api/install/links",
+        # Participants enroll from anywhere (not the Dartmouth network); this
+        # endpoint authenticates with the high-entropy enrollment secret itself.
+        "/api/auth/enrollment-token",
     ):
         return await call_next(request)
 
@@ -787,6 +833,139 @@ def get_participant_ref(participant_id: str):
     These are always stored under participants/{id}/ regardless of where the metadata is.
     """
     return db.collection(config.col("participants")).document(participant_id)
+
+
+# ============================================================================
+# Per-participant enrollment auth (DORMANT until the app + rules cut over).
+# Nothing here changes current behavior: no participant-creation change, no rule
+# enforcement. The send endpoint is coordinator-triggered; the token endpoint is
+# only called by the (future) auth-capable app. See docs/per_participant_auth.md.
+# ============================================================================
+
+ENROLLMENT_BASE_URL = os.getenv("ENROLLMENT_BASE_URL", "https://socialscope-dashboard.web.app")
+
+
+def _store_enrollment_hash(participant_id: str, secret_hash: str):
+    """Persist the secret hash on whichever participant record exists. Stored on
+    valid_participants (the pre-enrollment authority) when present, and on
+    participants/{id} (merge) so the token endpoint can read it either way. The
+    hash is one-way over a ~190-bit secret, so storing it is safe."""
+    payload = {"enrollmentSecretHash": secret_hash, "enrollmentSecretUpdatedAt": datetime.utcnow()}
+    wrote = False
+    vp_ref = db.collection(config.col("valid_participants")).document(participant_id)
+    if vp_ref.get().exists:
+        vp_ref.set(payload, merge=True)
+        wrote = True
+    # Always also store on participants/{id} (merge creates it if needed — same
+    # pattern the distribution endpoint already uses).
+    db.collection(config.col("participants")).document(participant_id).set(payload, merge=True)
+    return wrote
+
+
+def _read_enrollment_hash(participant_id: str):
+    for col_name in ("participants", "valid_participants"):
+        doc = db.collection(config.col(col_name)).document(participant_id).get()
+        if doc.exists:
+            h = doc.to_dict().get("enrollmentSecretHash")
+            if h:
+                return h
+    return None
+
+
+@app.post("/api/participant/{participant_id}/enrollment/send")
+@limiter.limit("10/minute")
+def send_enrollment_link(request: Request, participant_id: str,
+                         user: dict = Depends(verify_firebase_token)):
+    """Coordinator action: (re)issue the participant's app sign-in link and send
+    it via SMS + email. Rotates the secret each send (we store only the hash, so
+    a resend necessarily mints a new link and invalidates the prior one)."""
+    data = get_participant_data(participant_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Participant not found")
+
+    phone = data.get("phone") or data.get("phoneNumber")
+    email = data.get("distributionEmail") or data.get("email")
+    if not phone and not email:
+        raise HTTPException(status_code=400,
+                            detail="No phone or distribution email on file for this participant")
+
+    # Rotate + store the secret, build the link.
+    secret = generate_enrollment_secret()
+    _store_enrollment_hash(participant_id, hash_secret(secret))
+    url = build_enrollment_url(ENROLLMENT_BASE_URL, participant_id, secret)
+
+    sent = {"sms": False, "email": False, "errors": []}
+
+    if phone and twilio_client:
+        try:
+            to = phone if str(phone).startswith("+") else f"+1{normalize_phone(phone)}"
+            twilio_client.messages.create(
+                body=enrollment_sms_text(url), from_=config.TWILIO_FROM_NUMBER, to=to)
+            sent["sms"] = True
+        except Exception as e:
+            sent["errors"].append(f"sms: {e}")
+            logger.error(f"[Enrollment] SMS send failed for {participant_id}: {e}")
+
+    sendgrid_key = os.getenv("SENDGRID_API_KEY")
+    if email and sendgrid_key:
+        try:
+            import sendgrid
+            from sendgrid.helpers.mail import Mail
+            sg = sendgrid.SendGridAPIClient(api_key=sendgrid_key)
+            msg = Mail(
+                from_email=("Social.Media.Wellness@dartmouth.edu", "SocialScope Study Team"),
+                to_emails=email,
+                subject=enrollment_email_subject(),
+                html_content=enrollment_email_html(url))
+            sg.send(msg)
+            sent["email"] = True
+        except Exception as e:
+            sent["errors"].append(f"email: {e}")
+            logger.error(f"[Enrollment] Email send failed for {participant_id}: {e}")
+    elif email and not sendgrid_key:
+        sent["errors"].append("email: SENDGRID_API_KEY not configured")
+
+    # Audit (no secret/URL persisted — the link is a credential).
+    try:
+        db.collection(config.col("participants")).document(participant_id).set(
+            {"enrollmentLinkLastSentAt": datetime.utcnow(),
+             "enrollmentLinkLastSentBy": user.get("email")}, merge=True)
+    except Exception:
+        pass
+
+    logger.info(f"[Enrollment] Link issued for {participant_id} by {user.get('email')} "
+                f"(sms={sent['sms']}, email={sent['email']})")
+    return {"participantId": participant_id, "sent": sent,
+            "hasPhone": bool(phone), "hasEmail": bool(email)}
+
+
+@app.post("/api/auth/enrollment-token")
+@limiter.limit("20/minute")
+async def enrollment_token(request: Request):
+    """Public (IP-exempt): the app exchanges {participantId, secret} for a
+    Firebase custom token. Authenticated by the high-entropy secret itself."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request body")
+    participant_id = str(body.get("participantId") or "").strip()
+    secret = body.get("secret")
+    if not participant_id or not secret:
+        raise HTTPException(status_code=400, detail="participantId and secret required")
+
+    stored_hash = _read_enrollment_hash(participant_id)
+    if not stored_hash or not verify_secret(secret, stored_hash):
+        # Same generic error whether the participant or the secret is wrong.
+        raise HTTPException(status_code=401, detail="Invalid enrollment link")
+
+    try:
+        token = mint_enrollment_token(participant_id)
+    except Exception as e:
+        logger.error(f"[Enrollment] Token mint failed for {participant_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not issue token")
+
+    logger.info(f"[Enrollment] Token issued for {participant_id}")
+    return {"token": token, "participantId": participant_id}
 
 
 # ============================================================================

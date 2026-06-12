@@ -51,6 +51,46 @@ per-participant rule is meaningless until enrollment carries a real secret.
 - If the token endpoint is down at enrollment, the app falls back to the current
   no-auth behavior until P3; after P3 it must retry/queue (reads degrade only).
 
+## P1 status (built, dormant — no live behavior change)
+- `enrollment_auth.py` — crypto + URL/message builders (+ tests).
+- `mint_enrollment_token` — signs custom tokens with the SA key in
+  `FIREBASE_SERVICE_ACCOUNT_KEY` (the Cloud Run default ADC app can't sign).
+- `POST /api/participant/{id}/enrollment/send` — coordinator (re)issues the
+  link, rotates the secret (stores only the hash), sends SMS (Twilio) + email
+  (SendGrid). **Not auto-sent at creation** — nothing fires until a coordinator
+  clicks it, and the link does nothing until the app handles `smerb://` (P2).
+- `POST /api/auth/enrollment-token` — public, IP-exempt, rate-limited; verifies
+  the secret, returns a custom token.
+- Landing page `/enroll` (static) → `smerb://enroll?...` hand-off; secret stays
+  in the URL fragment.
+- Dashboard "Send Sign-in Link" button.
+- Reusable secret (re-tap on device change); rotates only on resend.
+
+## Delivery
+- SMS via Twilio (live). Email via SendGrid — **requires `SENDGRID_API_KEY` to be
+  set on the Cloud Run service** (not currently set; the same key the
+  compliance-email feature needs).
+
+## Exact P3 rule changeset (DO NOT APPLY until P2 app is on every active device)
+`firestore.rules` — change READS only, leave WRITES as-is so crisis capture never
+depends on auth:
+- `match /participants/{participantId}`: `allow read: if true;`
+  → `allow read: if request.auth != null && request.auth.uid == participantId;`
+- `match /participants/{participantId}/safety_plan/{planId}`: `allow read: if true;`
+  → `allow read: if request.auth != null && request.auth.uid == participantId;`
+- `match /participants/{participantId}/received_notifications/{notifId}`: same change.
+- Mirror all three for `dev_participants`.
+- `valid_participants` read stays `if true` (no PHI; the enrollment-secret HASH
+  is safe to expose at ~190-bit; the app reads it pre-auth to validate IDs).
+
+`storage.rules` — scope reads, keep writes open:
+- `screenshots/`, `html/`, `content_events/`: `allow read: if true;`
+  → `allow read: if request.auth != null && request.auth.uid == participantId;`
+  (keep `allow write: if true;`).
+- **Verify first:** the dashboard must read screenshots via tokenized download
+  URLs (which bypass rules), not raw paths — confirm before applying or
+  researcher image viewing breaks.
+
 ## Decisions needed (PI / IRB)
 1. **Delivery of the secret.** Recommended: embed it in the existing distribution
    invite link/email as a deep-link param so the participant never types it.

@@ -39,3 +39,41 @@ def verify_secret(secret, stored_hash) -> bool:
     if not secret or not stored_hash:
         return False
     return secrets.compare_digest(hash_secret(secret), str(stored_hash))
+
+
+def build_enrollment_url(base_url, participant_id, secret) -> str:
+    """Build the enrollment link. The secret goes in the URL FRAGMENT (#…),
+    which browsers never transmit to the server — so the secret never reaches
+    Firebase Hosting / our logs. The static landing page reads it client-side and
+    hands off to the smerb:// app scheme."""
+    base = str(base_url or "").rstrip("/")
+    return f"{base}/enroll#pid={participant_id}&s={secret}"
+
+
+def enrollment_sms_text(url) -> str:
+    """SMS body delivering the enrollment link to the participant's study phone."""
+    return (
+        "SocialScope (Dartmouth) study: open this link on your study phone to "
+        "sign in to the app.\n" + str(url) + "\n"
+        "Keep this link private — it signs you in. Reply STOP to opt out of texts."
+    )
+
+
+def enrollment_email_subject() -> str:
+    return "Your SocialScope study app sign-in link"
+
+
+def enrollment_email_html(url) -> str:
+    """HTML email body delivering the enrollment link."""
+    safe_url = str(url)
+    return (
+        "<p>Hello,</p>"
+        "<p>To sign in to the SocialScope study app, open this link "
+        "<strong>on the phone where you installed the app</strong>:</p>"
+        f'<p><a href="{safe_url}">Sign in to SocialScope</a></p>'
+        "<p>If the button doesn't open the app, copy and paste this link into "
+        f"your phone's browser:<br>{safe_url}</p>"
+        "<p>Please keep this link private — it signs you in to your study "
+        "account. You can reuse it if you reinstall or change phones.</p>"
+        "<p>— SocialScope Study Team, Dartmouth College</p>"
+    )

@@ -75,6 +75,7 @@ const ParticipantDetailScreen = ({
   const [distSending, setDistSending] = useState(false);
   const [distError, setDistError] = useState(null);
   const [distSuccess, setDistSuccess] = useState(null);
+  const [enrollSending, setEnrollSending] = useState(false);
   const [showDistPanel, setShowDistPanel] = useState(false);
 
   // Compliance notification state
@@ -293,6 +294,32 @@ const ParticipantDetailScreen = ({
       setDistInviteStatus('sent');
       setDistInviteSentAt(new Date().toISOString());
     } catch (e) { setDistError(e.message); } finally { setDistSending(false); }
+  };
+
+  // Send/resend the per-participant app sign-in link (SMS + email). Resending
+  // rotates the secret, so any previously-sent link stops working.
+  const sendEnrollmentLink = async () => {
+    if (!window.confirm(
+      'Send a new app sign-in link to this participant via SMS and email?\n\n' +
+      'This replaces any previous link for them (the old link stops working).'
+    )) return;
+    setEnrollSending(true); setDistError(null); setDistSuccess(null);
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/participant/${currentParticipantId}/enrollment/send`, {
+        method: 'POST',
+      });
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to send link'); }
+      const data = await res.json();
+      const channels = [];
+      if (data.sent?.sms) channels.push('SMS');
+      if (data.sent?.email) channels.push('email');
+      if (channels.length) {
+        setDistSuccess(`Sign-in link sent via ${channels.join(' + ')}.`);
+      } else {
+        const errs = (data.sent?.errors || []).join('; ');
+        setDistError(`Link generated but not delivered${errs ? ': ' + errs : ' (no phone/email on file, or SendGrid not configured)'}.`);
+      }
+    } catch (e) { setDistError(e.message); } finally { setEnrollSending(false); }
   };
 
   // Handle data export - show confirmation for Level 3
@@ -726,6 +753,14 @@ const ParticipantDetailScreen = ({
                   className="flex items-center px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
                 >
                   {distSending ? 'Sending...' : `Send ${distDeviceType ? distDeviceType.toUpperCase() : ''} Invite`}
+                </button>
+                <button
+                  onClick={sendEnrollmentLink}
+                  disabled={enrollSending}
+                  title="Send the per-participant app sign-in link via SMS + email"
+                  className="flex items-center px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {enrollSending ? 'Sending…' : 'Send Sign-in Link'}
                 </button>
               </div>
             </div>

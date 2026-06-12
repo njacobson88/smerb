@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>SocialScope — Sign in</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background:#f4f5f7; color:#222; margin:0; padding:0;
+           display:flex; min-height:100vh; align-items:center; justify-content:center; }
+    .card { background:#fff; max-width:420px; width:90%; margin:24px; padding:28px;
+            border-radius:12px; box-shadow:0 2px 12px rgba(0,0,0,.08); text-align:center; }
+    h1 { font-size:1.4rem; margin:0 0 8px; background:linear-gradient(90deg,#2563eb,#7c3aed);
+         -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+    p { line-height:1.5; color:#444; }
+    a.btn { display:inline-block; margin-top:14px; padding:12px 22px; background:#2563eb;
+            color:#fff; text-decoration:none; border-radius:8px; font-weight:600; }
+    .muted { font-size:.85rem; color:#888; margin-top:18px; word-break:break-all; }
+    .err { color:#b91c1c; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>SocialScope</h1>
+    <div id="content">
+      <p>Opening the SocialScope app to sign you in…</p>
+    </div>
+  </div>
+  <script>
+    // The secret arrives in the URL FRAGMENT (#…), which the browser never sends
+    // to any server — so it stays on this device. We read it client-side and
+    // hand off to the app via its custom scheme.
+    (function () {
+      var content = document.getElementById('content');
+      var hash = (window.location.hash || '').replace(/^#/, '');
+      var params = new URLSearchParams(hash);
+      var pid = params.get('pid');
+      var s = params.get('s');
+
+      if (!pid || !s) {
+        content.innerHTML = '<p class="err">This sign-in link is incomplete. ' +
+          'Please use the most recent link the study team sent you, ' +
+          'or contact the study team.</p>';
+        return;
+      }
+
+      var appUrl = 'smerb://enroll?pid=' + encodeURIComponent(pid) + '&s=' + encodeURIComponent(s);
+
+      content.innerHTML =
+        '<p>Tap the button below to open the SocialScope app and sign in.</p>' +
+        '<a class="btn" id="openBtn" href="' + appUrl + '">Open SocialScope</a>' +
+        '<p class="muted">If nothing happens, make sure you have installed the ' +
+        'SocialScope app on this phone, then tap the button again.</p>';
+
+      // Attempt an automatic hand-off as well (some browsers honor this).
+      try { window.location.href = appUrl; } catch (e) { /* button is the fallback */ }
+    })();
+  </script>
+</body>
+</html>
