@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from phone_utils import normalize_phone, phones_match
+from phone_utils import normalize_phone, phones_match, to_e164
 
 
 class TestNormalizePhone(unittest.TestCase):
@@ -46,6 +46,27 @@ class TestPhonesMatch(unittest.TestCase):
         self.assertFalse(phones_match("", "6035551234"))
         self.assertFalse(phones_match(None, None))
         self.assertFalse(phones_match("6035551234", ""))
+
+
+class TestToE164(unittest.TestCase):
+    def test_formatted_us_number(self):
+        # Yama's number, the case that surfaced this: must become +1XXXXXXXXXX.
+        self.assertEqual(to_e164("(646) 413-0038"), "+16464130038")
+        self.assertEqual(to_e164("646-413-0038"), "+16464130038")
+        self.assertEqual(to_e164("314 397 9832"), "+13143979832")
+
+    def test_already_e164_kept(self):
+        self.assertEqual(to_e164("+16464130038"), "+16464130038")
+        self.assertEqual(to_e164("+447911123456"), "+447911123456")  # non-US kept as-is
+
+    def test_eleven_digit_with_leading_one(self):
+        self.assertEqual(to_e164("16464130038"), "+16464130038")
+
+    def test_empty_returns_blank(self):
+        self.assertEqual(to_e164(""), "")
+        self.assertEqual(to_e164(None), "")
+        self.assertEqual(to_e164("   "), "")
+        self.assertEqual(to_e164("no digits here"), "")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote
 
-from phone_utils import normalize_phone, phones_match
+from phone_utils import normalize_phone, phones_match, to_e164
 from export_utils import is_valid_export_id
 from template_utils import safe_format
 from enrollment_auth import (
@@ -898,15 +898,20 @@ def send_enrollment_link(request: Request, participant_id: str,
 
     if phone and twilio_client:
         try:
-            to = phone if str(phone).startswith("+") else f"+1{normalize_phone(phone)}"
-            twilio_client.messages.create(
+            to = to_e164(phone)
+            msg = twilio_client.messages.create(
                 body=enrollment_sms_text(url), from_=config.TWILIO_FROM_NUMBER, to=to)
+            # NB: a successful create only means Twilio QUEUED it — carriers can
+            # still filter it (error 30007 on the unverified toll-free number).
+            # Capture the SID so delivery can be traced in Twilio.
             sent["sms"] = True
+            sent["smsSid"] = msg.sid
+            logger.info(f"[Enrollment] SMS queued for {participant_id}: {msg.sid} -> {to}")
         except Exception as e:
             sent["errors"].append(f"sms: {e}")
             logger.error(f"[Enrollment] SMS send failed for {participant_id}: {e}")
 
-    sendgrid_key = os.getenv("SENDGRID_API_KEY")
+    sendgrid_key = (os.getenv("SENDGRID_API_KEY") or "").strip()  # strip: secret may carry a trailing newline -> invalid auth header
     if email and sendgrid_key:
         try:
             import sendgrid
@@ -5875,7 +5880,7 @@ def send_compliance_notification(
             template_idx = idx
 
         results = {}
-        sendgrid_key = os.getenv("SENDGRID_API_KEY")
+        sendgrid_key = (os.getenv("SENDGRID_API_KEY") or "").strip()  # strip: secret may carry a trailing newline -> invalid auth header
         sender_email = os.getenv("ALERT_SENDER_EMAIL", "Social.Media.Wellness@dartmouth.edu")
 
         # Send email

@@ -29,3 +29,14 @@ def phones_match(a, b) -> bool:
     Both must be non-empty (an empty/unparseable number matches nothing)."""
     na, nb = normalize_phone(a), normalize_phone(b)
     return bool(na) and na == nb
+
+
+def to_e164(raw) -> str:
+    """Best-effort E.164 for outbound SMS/voice. Keeps an existing +-prefixed
+    number as-is; otherwise prepends +1 to the canonical 10-digit US form.
+    Returns "" when there are no usable digits (caller should skip sending)."""
+    s = str(raw or "").strip()
+    if s.startswith("+"):
+        return s
+    n = normalize_phone(s)
+    return f"+1{n}" if n else ""
