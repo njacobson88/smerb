@@ -76,6 +76,7 @@ const ParticipantDetailScreen = ({
   const [distError, setDistError] = useState(null);
   const [distSuccess, setDistSuccess] = useState(null);
   const [enrollSending, setEnrollSending] = useState(false);
+  const [enrollSmsStatus, setEnrollSmsStatus] = useState(null); // delivery status of last sign-in SMS
   const [showDistPanel, setShowDistPanel] = useState(false);
 
   // Compliance notification state
@@ -194,6 +195,7 @@ const ParticipantDetailScreen = ({
           setDistManualOverride(data.distribution.manualOverride || false);
           setDistInviteStatus(data.distribution.inviteStatus);
           setDistInviteSentAt(data.distribution.inviteSentAt);
+          setEnrollSmsStatus(data.distribution.enrollmentSms || null);
         }
       }
     } catch (e) { /* ignore */ }
@@ -314,7 +316,15 @@ const ParticipantDetailScreen = ({
       if (data.sent?.sms) channels.push('SMS');
       if (data.sent?.email) channels.push('email');
       if (channels.length) {
-        setDistSuccess(`Sign-in link sent via ${channels.join(' + ')}.`);
+        setDistSuccess(`Sign-in link queued via ${channels.join(' + ')} — checking delivery…`);
+        // "Sent" only means queued. Poll the distribution endpoint for the real
+        // Twilio delivery status (delivered / undelivered) reported via webhook.
+        if (data.sent?.sms) {
+          for (let i = 0; i < 6; i++) {
+            await new Promise(r => setTimeout(r, 4000));
+            await fetchDistribution();
+          }
+        }
       } else {
         const errs = (data.sent?.errors || []).join('; ');
         setDistError(`Link generated but not delivered${errs ? ': ' + errs : ' (no phone/email on file, or SendGrid not configured)'}.`);
@@ -734,6 +744,16 @@ const ParticipantDetailScreen = ({
               {distInviteStatus === 'sent' && (
                 <div className="text-indigo-600 text-xs mb-2">
                   Last invite sent: {distInviteSentAt ? new Date(distInviteSentAt).toLocaleString() : 'Unknown'}
+                </div>
+              )}
+              {enrollSmsStatus && (
+                <div className={`text-xs mb-2 rounded p-2 ${
+                  enrollSmsStatus.status === 'delivered' ? 'text-green-700 bg-green-50'
+                    : (enrollSmsStatus.status === 'undelivered' || enrollSmsStatus.status === 'failed') ? 'text-red-700 bg-red-50'
+                    : 'text-gray-600 bg-gray-50'
+                }`}>
+                  Sign-in link SMS: <strong>{enrollSmsStatus.description || enrollSmsStatus.status}</strong>
+                  {enrollSmsStatus.updatedAt ? ` (${new Date(enrollSmsStatus.updatedAt).toLocaleTimeString()})` : ''}
                 </div>
               )}
 

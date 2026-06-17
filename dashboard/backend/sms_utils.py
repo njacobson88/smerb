@@ -60,3 +60,43 @@ def is_resubscribe(body) -> bool:
 def parse_oncall_command(body):
     """Return the disposition for an on-call command, or None if unrecognized."""
     return SMS_DISPOSITION_MAP.get(first_token_upper(body))
+
+
+# Twilio message error codes worth explaining in plain language to coordinators.
+_SMS_ERROR_REASONS = {
+    "30007": "carrier filtered the message (toll-free verification likely needed)",
+    "30003": "unreachable destination (phone off/out of service)",
+    "30005": "unknown/invalid number",
+    "30006": "landline or unreachable carrier",
+    "30008": "carrier could not deliver (unknown reason)",
+    "21610": "recipient has opted out (texted STOP)",
+    "21408": "number not enabled / region not permitted",
+    "21211": "invalid 'To' phone number",
+}
+
+# Terminal failure statuses vs. in-flight ones.
+_SMS_FAILED = {"undelivered", "failed"}
+_SMS_INFLIGHT = {"queued", "accepted", "scheduled", "sending", "sent"}
+
+
+def describe_sms_status(status, error_code=None):
+    """Plain-language delivery status for the dashboard. 'sent' is deliberately
+    shown as in-flight (not success) — only 'delivered' is confirmed receipt."""
+    s = (status or "").strip().lower()
+    code = str(error_code or "").strip()
+    if s == "delivered":
+        return "Delivered"
+    if s in _SMS_FAILED:
+        reason = _SMS_ERROR_REASONS.get(code)
+        if reason:
+            return f"Not delivered — {reason}"
+        return f"Not delivered (error {code})" if code else "Not delivered"
+    if s in _SMS_INFLIGHT:
+        return "Queued…"
+    return s.capitalize() if s else "Unknown"
+
+
+def is_terminal_sms_status(status) -> bool:
+    """True once Twilio won't change the status further (delivered/failed)."""
+    s = (status or "").strip().lower()
+    return s == "delivered" or s in _SMS_FAILED

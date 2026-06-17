@@ -11,6 +11,8 @@ from sms_utils import (
     is_resubscribe,
     parse_oncall_command,
     first_token_upper,
+    describe_sms_status,
+    is_terminal_sms_status,
 )
 
 
@@ -70,6 +72,37 @@ class TestOncallCommand(unittest.TestCase):
         self.assertIsNone(parse_oncall_command("hello"))
         self.assertIsNone(parse_oncall_command(""))
         self.assertIsNone(parse_oncall_command("ok thanks"))
+
+
+class TestDescribeSmsStatus(unittest.TestCase):
+    def test_delivered(self):
+        self.assertEqual(describe_sms_status("delivered"), "Delivered")
+
+    def test_carrier_violation_30007(self):
+        # The exact case that hid Yama's failure.
+        msg = describe_sms_status("undelivered", "30007")
+        self.assertIn("Not delivered", msg)
+        self.assertIn("carrier filtered", msg)
+
+    def test_optout_21610(self):
+        self.assertIn("opted out", describe_sms_status("failed", "21610"))
+
+    def test_failed_unknown_code(self):
+        self.assertEqual(describe_sms_status("failed", "99999"), "Not delivered (error 99999)")
+        self.assertEqual(describe_sms_status("undelivered"), "Not delivered")
+
+    def test_sent_is_inflight_not_success(self):
+        # 'sent' must NOT read as delivered — that was the misleading bit.
+        self.assertEqual(describe_sms_status("sent"), "Queued…")
+        self.assertEqual(describe_sms_status("queued"), "Queued…")
+
+    def test_terminal(self):
+        self.assertTrue(is_terminal_sms_status("delivered"))
+        self.assertTrue(is_terminal_sms_status("undelivered"))
+        self.assertTrue(is_terminal_sms_status("failed"))
+        self.assertFalse(is_terminal_sms_status("sent"))
+        self.assertFalse(is_terminal_sms_status("queued"))
+        self.assertFalse(is_terminal_sms_status(None))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from ipaddress import ip_address, ip_network
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 
 from phone_utils import normalize_phone, phones_match, to_e164
 from export_utils import is_valid_export_id
@@ -31,6 +31,7 @@ from sms_utils import (
     is_optout,
     is_resubscribe,
     parse_oncall_command,
+    describe_sms_status,
 )
 import content_events as content_events_mod
 
@@ -200,6 +201,8 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
         # Participants enroll from anywhere (not the Dartmouth network); this
         # endpoint authenticates with the high-entropy enrollment secret itself.
         "/api/auth/enrollment-token",
+        # Twilio delivery-status callbacks (signature-validated, not IP-bound).
+        "/api/twilio/message-status",
     ):
         return await call_next(request)
 
@@ -358,6 +361,17 @@ def get_participant_distribution(
             return {"distribution": None}
 
         data = doc.to_dict()
+        # Latest enrollment SMS delivery status (set by the send + Twilio
+        # status callback) so the dashboard shows real delivery, not just "sent".
+        enroll_sms = data.get("enrollmentSms")
+        if isinstance(enroll_sms, dict):
+            ts = enroll_sms.get("updatedAt")
+            enroll_sms = {
+                "status": enroll_sms.get("status"),
+                "description": enroll_sms.get("description"),
+                "errorCode": enroll_sms.get("errorCode"),
+                "updatedAt": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+            }
         return {
             "distribution": {
                 "email": data.get("distributionEmail"),
@@ -365,6 +379,7 @@ def get_participant_distribution(
                 "manualOverride": data.get("deviceTypeManualOverride", False),
                 "inviteSentAt": data.get("distributionInviteSentAt").isoformat() if data.get("distributionInviteSentAt") and hasattr(data.get("distributionInviteSentAt"), "isoformat") else data.get("distributionInviteSentAt"),
                 "inviteStatus": data.get("distributionInviteStatus"),
+                "enrollmentSms": enroll_sms,
             }
         }
     except Exception as e:
@@ -843,6 +858,9 @@ def get_participant_ref(participant_id: str):
 # ============================================================================
 
 ENROLLMENT_BASE_URL = os.getenv("ENROLLMENT_BASE_URL", "https://socialscope-dashboard.web.app")
+# This backend's own public URL — the Twilio delivery status_callback target
+# (must be publicly reachable; that callback path is IP-exempt in the middleware).
+PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "https://socialscope-dashboard-api-436153481478.us-central1.run.app")
 
 
 def _store_enrollment_hash(participant_id: str, secret_hash: str):
@@ -899,13 +917,22 @@ def send_enrollment_link(request: Request, participant_id: str,
     if phone and twilio_client:
         try:
             to = to_e164(phone)
+            # Register a delivery status_callback so we learn whether the carrier
+            # actually delivered it (vs. just queued). A successful create only
+            # means QUEUED — carriers can still filter it (error 30007 on the
+            # unverified toll-free number), which is invisible without this.
+            status_cb = f"{PUBLIC_API_BASE_URL}/api/twilio/message-status?participantId={quote(str(participant_id))}"
             msg = twilio_client.messages.create(
-                body=enrollment_sms_text(url), from_=config.TWILIO_FROM_NUMBER, to=to)
-            # NB: a successful create only means Twilio QUEUED it — carriers can
-            # still filter it (error 30007 on the unverified toll-free number).
-            # Capture the SID so delivery can be traced in Twilio.
+                body=enrollment_sms_text(url), from_=config.TWILIO_FROM_NUMBER, to=to,
+                status_callback=status_cb)
             sent["sms"] = True
             sent["smsSid"] = msg.sid
+            # Record the initial (queued) status; the webhook updates it as Twilio
+            # reports sent -> delivered/undelivered.
+            db.collection(config.col("participants")).document(participant_id).set(
+                {"enrollmentSms": {"sid": msg.sid, "status": msg.status or "queued",
+                                   "to": to, "updatedAt": datetime.utcnow(),
+                                   "description": describe_sms_status(msg.status)}}, merge=True)
             logger.info(f"[Enrollment] SMS queued for {participant_id}: {msg.sid} -> {to}")
         except Exception as e:
             sent["errors"].append(f"sms: {e}")
@@ -971,6 +998,38 @@ async def enrollment_token(request: Request):
 
     logger.info(f"[Enrollment] Token issued for {participant_id}")
     return {"token": token, "participantId": participant_id}
+
+
+@app.post("/api/twilio/message-status")
+async def twilio_message_status(request: Request):
+    """Twilio delivery status callback for enrollment SMS. Twilio POSTs here as
+    the message moves queued -> sent -> delivered/undelivered/failed. We record
+    the latest status on the participant doc so the dashboard shows real delivery
+    (vs. the misleading 'queued = sent'). Signature-validated; IP-exempt."""
+    if not await _twilio_webhook_is_valid(request):
+        return _twilio_forbidden()
+    try:
+        form = await request.form()
+    except Exception:
+        return Response(status_code=204)
+    sid = form.get("MessageSid") or form.get("SmsSid")
+    status = form.get("MessageStatus") or form.get("SmsStatus")
+    error_code = form.get("ErrorCode") or None
+    to = form.get("To")
+    participant_id = request.query_params.get("participantId")
+
+    logger.info(f"[MsgStatus] {sid} -> {status} (err={error_code}) pid={participant_id}")
+    if participant_id:
+        try:
+            db.collection(config.col("participants")).document(participant_id).set(
+                {"enrollmentSms": {
+                    "sid": sid, "status": status, "errorCode": error_code, "to": to,
+                    "description": describe_sms_status(status, error_code),
+                    "updatedAt": datetime.utcnow(),
+                }}, merge=True)
+        except Exception as e:
+            logger.error(f"[MsgStatus] failed to record for {participant_id}: {e}")
+    return Response(status_code=204)
 
 
 # ============================================================================
