@@ -163,5 +163,39 @@ class TestRiskScoreParsing(unittest.TestCase):
         self.assertIsNone(c._transform_cssrs({}, "cssrs_screener")["riskScore"])
 
 
+class TestBuildCssrsSafetyAlert(unittest.TestCase):
+    def _build(self, instrument):
+        return c.build_cssrs_safety_alert(
+            participant_id="123456789", instrument=instrument, label="L",
+            severity=5, crisis_trigger_fields=["x"], record_id="7",
+            event_name="weekly_arm_1", now="T")
+
+    def test_weekly_runs_full_confirmed_danger_protocol(self):
+        d = self._build(c.CSSRS_WEEKLY_INSTRUMENT)
+        # These two fields are what drive the full app protocol downstream.
+        self.assertEqual(d["alertType"], "confirmed_danger")
+        self.assertIs(d["confirmedDanger"], True)
+        self.assertEqual(d["triggerSource"], "cssrs_weekly")
+
+    def test_screener_does_NOT_run_full_protocol(self):
+        d = self._build(c.CSSRS_SCREEN_INSTRUMENT)
+        self.assertEqual(d["alertType"], "cssrs_crisis")
+        self.assertIsNone(d["confirmedDanger"])
+        self.assertNotIn("triggerSource", d)
+
+    def test_pediatric_does_NOT_run_full_protocol(self):
+        d = self._build(c.CSSRS_PEDIATRIC_INSTRUMENT)
+        self.assertEqual(d["alertType"], "cssrs_crisis")
+        self.assertIsNone(d["confirmedDanger"])
+
+    def test_common_fields_preserved(self):
+        d = self._build(c.CSSRS_WEEKLY_INSTRUMENT)
+        self.assertEqual(d["participantId"], "123456789")
+        self.assertEqual(d["redcapRecordId"], "7")
+        self.assertEqual(d["redcapInstrument"], c.CSSRS_WEEKLY_INSTRUMENT)
+        self.assertEqual(d["severity"], 5)
+        self.assertFalse(d["handled"])
+
+
 if __name__ == "__main__":
     unittest.main()

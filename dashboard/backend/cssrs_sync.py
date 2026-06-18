@@ -222,6 +222,38 @@ def _transform_cssrs(redcap_data, instrument):
     }
 
 
+def build_cssrs_safety_alert(*, participant_id, instrument, label, severity,
+                             crisis_trigger_fields, record_id, event_name, now):
+    """Build the safety_alert doc for a C-SSRS crisis.
+
+    ONLY the WEEKLY C-SSRS runs the full app confirmed-danger protocol (participant
+    SMS/push confirm -> automated triage call -> page study team -> follow-up):
+    confirmedDanger=True drives onSafetyAlert's participant outreach, and
+    alertType="confirmed_danger" drives checkEscalation's triage call + paging +
+    post-call follow-up. The screener and pediatric versions keep the lesser
+    "cssrs_crisis" alert (on-call is notified, but no automated participant
+    outreach / triage call)."""
+    doc = {
+        "participantId": participant_id,
+        "triggeredAt": now,
+        "handled": False,
+        "source": label,
+        "severity": severity,
+        "crisisTriggerFields": crisis_trigger_fields,
+        "redcapRecordId": record_id,
+        "redcapInstrument": instrument,
+        "redcapEvent": event_name,
+    }
+    if instrument == CSSRS_WEEKLY_INSTRUMENT:
+        doc["alertType"] = "confirmed_danger"
+        doc["confirmedDanger"] = True
+        doc["triggerSource"] = "cssrs_weekly"
+    else:
+        doc["alertType"] = "cssrs_crisis"
+        doc["confirmedDanger"] = None
+    return doc
+
+
 def sync_cssrs_from_redcap(record_id, instrument, event_name, participant_id, db, config, logger):
     """Fetch C-SSRS from REDCap, transform, write to Firestore, and trigger a
     crisis alert if intent/plan/behavior is endorsed."""
@@ -268,19 +300,13 @@ def sync_cssrs_from_redcap(record_id, instrument, event_name, participant_id, db
         # the onSafetyAlert trigger.
         ev = (event_name or "noevent").replace("/", "_").replace(" ", "_")
         alert_id = f"cssrs-{record_id}-{ev}-{instrument}"
-        p_ref.collection("safety_alerts").document(alert_id).set({
-            "participantId": participant_id,
-            "alertType": "cssrs_crisis",
-            "triggeredAt": datetime.utcnow(),
-            "confirmedDanger": None,
-            "handled": False,
-            "source": label,
-            "severity": cssrs["severity"],
-            "crisisTriggerFields": cssrs["crisisTriggerFields"],
-            "redcapRecordId": record_id,
-            "redcapInstrument": instrument,
-            "redcapEvent": event_name,
-        })
+        alert_doc = build_cssrs_safety_alert(
+            participant_id=participant_id, instrument=instrument, label=label,
+            severity=cssrs["severity"], crisis_trigger_fields=cssrs["crisisTriggerFields"],
+            record_id=record_id, event_name=event_name, now=datetime.utcnow())
+        p_ref.collection("safety_alerts").document(alert_id).set(alert_doc)
+        if alert_doc.get("confirmedDanger") is True:
+            logger.warning(f"[C-SSRS CRISIS] Weekly C-SSRS for {participant_id} -> FULL confirmed-danger protocol")
 
         # Auto-send Risk Assessment PDF to Slack (best-effort)
         try:
