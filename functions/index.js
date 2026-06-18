@@ -906,11 +906,33 @@ exports[safetyResponseFnName] = onDocumentCreated(
 // to self-resolve; the automated triage IVR call is placed ~10 min in; on-call
 // is paged only after that call fails to resolve (no pickup / no 988 transfer).
 const IVR_CALL_DELAY_MIN = 10;       // place the participant triage call this long after the alert
+const PARTICIPANT_FOLLOWUP_AFTER_MIN = 13; // text+email the participant ~3 min after the call, if it didn't resolve (no pickup / no response / no 988 transfer)
 const PRIMARY_PAGE_MIN = 15;         // page primary if still unresolved after the call has had a chance
 const BACKUP_AFTER_MIN = 15;         // page backup this long after primary, if unacknowledged
 const PI_AFTER_MIN = 30;             // page PI this long after backup, if unacknowledged
 const ACK_REMINDER_THROTTLE_MIN = 30; // Slack nudge cadence once acknowledged but no final disposition
 const ESCALATION_MAX_AGE_MIN = 1440;  // stop acting on events older than 24h
+
+// Follow-up sent to the participant when the automated triage call did NOT
+// resolve the alert (they didn't pick up, didn't respond, or didn't complete a
+// 988 warm transfer). Same text for SMS and email.
+const PARTICIPANT_FOLLOWUP_SUBJECT = "SocialScope — checking on your safety";
+function participantFollowupBody() {
+  return (
+    "This is the SocialScope research team at Dartmouth College. Based on your " +
+    "recent check-in, we tried to reach you by phone and weren't able to connect.\n\n" +
+    "If you are in immediate danger or thinking about harming yourself right now, " +
+    "please call 911 or go to your nearest emergency room.\n\n" +
+    "If you are having thoughts of suicide, you can call or text 988 (the 988 " +
+    "Suicide & Crisis Lifeline) at any time, day or night, to talk with a trained " +
+    "counselor.\n\n" +
+    "A member of our research team will try to call you within the next 30 minutes. " +
+    "If we are not able to reach you, we may arrange for a wellness check to make " +
+    "sure you are safe, which could involve emergency responders.\n\n" +
+    "If we do reach you, we'll talk with you about how you're doing and, if needed, " +
+    "help connect you directly to the 988 Lifeline or to emergency care."
+  );
+}
 
 const escalationFnName = ENVIRONMENT === "dev" ? "dev_checkEscalation" : "checkEscalation";
 exports[escalationFnName] = onSchedule(
@@ -1147,6 +1169,67 @@ exports[escalationFnName] = onSchedule(
         // Older events are stale — if they weren't resolved within an hour,
         // the on-call escalation pathway has already taken over.
         if (minutesSinceCreation > 60) continue;
+
+        // ─── Follow-up the PARTICIPANT when the automated call didn't resolve ───
+        // Reaching here means the event is still unresolved (not escalationStopped
+        // / participantResolved — a press-1/3 or a completed 988 transfer would
+        // have set those upstream). If the triage call was placed and a few
+        // minutes have passed, the call failed to resolve it (no pickup, no
+        // response, or an incomplete 988 transfer) — send safety guidance + let
+        // them know the team is about to call. Once, idempotently.
+        if (eventData.participantCallPlaced &&
+            minutesSinceCreation >= PARTICIPANT_FOLLOWUP_AFTER_MIN &&
+            !eventData.participantFollowupSent) {
+          // Mark first (idempotent guard) so a transient send error or a crash
+          // can't cause repeated crisis messages on the next 5-min tick.
+          await doc.ref.update({
+            participantFollowupSent: true,
+            participantFollowupSentAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          try {
+            const pInfo = await getParticipantInfo(eventData.participantId);
+            const body = participantFollowupBody();
+            const result = { sms: false, email: false };
+
+            // SMS (skip if opted out — carrier blocks all texts to them anyway).
+            const phone = eventData.participantPhone || pInfo.phone;
+            if (phone && !pInfo.smsOptedOut) {
+              try {
+                const to = phone.startsWith("+") ? phone : `+1${phone}`;
+                await twilioWithRetry("messages.create", () => client.messages.create({
+                  body, from: fromNumber, to,
+                }));
+                result.sms = true;
+              } catch (e) {
+                console.error(`[ParticipantFollowup] SMS failed for ${eventData.participantId}: ${e.message}`);
+              }
+            }
+            // Email (independent channel — not subject to SMS carrier filtering).
+            if (pInfo.email) {
+              try {
+                await sendEmail({
+                  senderEmail: alertSenderEmail.value(),
+                  to: pInfo.email,
+                  subject: PARTICIPANT_FOLLOWUP_SUBJECT,
+                  body,
+                });
+                result.email = true;
+              } catch (e) {
+                console.error(`[ParticipantFollowup] Email failed for ${eventData.participantId}: ${e.message}`);
+              }
+            }
+            await doc.ref.collection("audit_trail").doc().set({
+              type: "participant_followup_sent",
+              result,
+              message: "Post-call safety follow-up (ER/911, 988, team will call, possible wellness check)",
+              loggedBy: "system",
+              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            console.log(`[ParticipantFollowup] Sent to ${eventData.participantId} (sms=${result.sms}, email=${result.email})`);
+          } catch (e) {
+            console.error(`[ParticipantFollowup] Error for ${eventData.participantId}: ${e.message}`);
+          }
+        }
 
         // ─── TEXT emergency contacts once on-call escalation begins ───
         // Aligned with PRIMARY_PAGE_MIN so family is contacted only after the
