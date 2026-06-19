@@ -254,9 +254,15 @@ def build_cssrs_safety_alert(*, participant_id, instrument, label, severity,
     return doc
 
 
-def sync_cssrs_from_redcap(record_id, instrument, event_name, participant_id, db, config, logger):
-    """Fetch C-SSRS from REDCap, transform, write to Firestore, and trigger a
-    crisis alert if intent/plan/behavior is endorsed."""
+def sync_cssrs_from_redcap(record_id, instrument, event_name, participant_id, db, config, logger,
+                           fire_alert=True):
+    """Fetch C-SSRS from REDCap, transform, write to Firestore, and (when
+    fire_alert) trigger a crisis alert if intent/plan/behavior is endorsed.
+
+    fire_alert=False is used by the post-qualify BACKFILL: it syncs the data for
+    display without re-firing escalations for assessments that were saved before
+    the participant's app id existed. Real-time DET saves use fire_alert=True so
+    a live crisis still escalates."""
     redcap_data = fetch_redcap_cssrs(record_id, instrument, event_name, config)
     cssrs = _transform_cssrs(redcap_data, instrument)
 
@@ -284,7 +290,7 @@ def sync_cssrs_from_redcap(record_id, instrument, event_name, participant_id, db
         f"(severity={cssrs['severity']}, crisis={cssrs['crisisTriggered']})"
     )
 
-    if cssrs["crisisTriggered"]:
+    if cssrs["crisisTriggered"] and fire_alert:
         label = {
             CSSRS_WEEKLY_INSTRUMENT: "Weekly C-SSRS",
             CSSRS_PEDIATRIC_INSTRUMENT: "C-SSRS Interview (Pediatric)",

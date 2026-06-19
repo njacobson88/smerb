@@ -6231,6 +6231,39 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
     }
 
 
+def _backfill_clinical_after_qualify(record_id, event_name, participant_id):
+    """Once an app id exists for a REDCap record, backfill clinical instruments
+    that may have been SAVED BEFORE qualification. The REDCap DET fires per-save,
+    and the safety_plan / C-SSRS handlers drop the save when no mapping exists yet
+    (mapping is created by the qualify instrument) — with no retry. If the safety
+    plan was entered before the qualify form (common at the interview), it was
+    silently lost. This re-syncs it (and any interview-event C-SSRS) when the
+    mapping appears. Background thread; best-effort; idempotent. C-SSRS is synced
+    for DISPLAY only (no alert) — live crises escalate via the real-time DET."""
+    import threading
+
+    def _run():
+        try:
+            _sync_safety_plan_core(participant_id, record_id, "redcap_backfill",
+                                   event_name or config.REDCAP_TRIGGER_EVENT)
+        except Exception as e:
+            logger.error(f"[Backfill] safety plan {participant_id}/{record_id}: {e}")
+        for instrument in CSSRS_INSTRUMENTS:
+            try:
+                sync_cssrs_from_redcap(
+                    record_id=record_id, instrument=instrument,
+                    event_name=event_name or config.REDCAP_TRIGGER_EVENT,
+                    participant_id=participant_id, db=db, config=config, logger=logger,
+                    fire_alert=False)
+            except Exception as e:
+                # Wrong event (e.g. weekly C-SSRS lives elsewhere) just means
+                # nothing to backfill here — it syncs via its own real-time DET.
+                logger.info(f"[Backfill] C-SSRS {instrument} {participant_id}: {e}")
+        logger.info(f"[Backfill] Clinical backfill done for {participant_id} (record {record_id})")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @app.post("/api/redcap/data-entry-trigger")
 @limiter.limit("60/minute")
 async def redcap_data_entry_trigger(request: Request):
@@ -6304,23 +6337,11 @@ async def redcap_data_entry_trigger(request: Request):
             if not participant_id:
                 return {"status": "ignored", "reason": "mapping exists but no app_participant_id"}
 
-            # Fetch safety plan fields from REDCap
-            redcap_data = fetch_redcap_safety_plan(record_id, event_name or config.REDCAP_TRIGGER_EVENT)
-
-            # Transform and write to Firestore
-            safety_plan = transform_redcap_safety_plan(redcap_data)
-            safety_plan["syncedAt"] = datetime.utcnow()
-            safety_plan["syncedBy"] = "redcap_trigger"
-            safety_plan["redcapRecordId"] = record_id
-
-            participants_col = config.col("participants")
-            db.collection(participants_col).document(participant_id) \
-                .collection("safety_plan").document("current").set(safety_plan)
-
-            logger.info(
-                f"[REDCap DET] Safety plan synced for participant {participant_id} "
-                f"(REDCap record {record_id})"
-            )
+            # Shared core: writes the subcollection AND copies address/county/
+            # emergency contacts onto the participant doc (used by the RAS + crisis
+            # notifications).
+            _sync_safety_plan_core(participant_id, record_id, "redcap_trigger",
+                                   event_name or config.REDCAP_TRIGGER_EVENT)
             return {
                 "status": "safety_plan_synced",
                 "participant_id": participant_id,
@@ -6389,6 +6410,8 @@ async def redcap_data_entry_trigger(request: Request):
         # Check if already has an app ID in REDCap
         if existing_app_id:
             logger.info(f"[REDCap DET] Record {record_id} already has app ID: {existing_app_id}")
+            # Backfill clinical instruments saved before qualification (DET ordering).
+            _backfill_clinical_after_qualify(record_id, event_name or config.REDCAP_TRIGGER_EVENT, existing_app_id)
             return {"status": "already_exists", "app_id": existing_app_id}
 
         # Check if participant qualified
@@ -6400,6 +6423,11 @@ async def redcap_data_entry_trigger(request: Request):
             redcap_record_id=record_id,
             event_name=event_name or config.REDCAP_TRIGGER_EVENT,
         )
+
+        # Backfill clinical instruments (safety plan / C-SSRS) that the DET dropped
+        # because they were saved before this app id / mapping existed.
+        if result.get("app_id"):
+            _backfill_clinical_after_qualify(record_id, event_name or config.REDCAP_TRIGGER_EVENT, result["app_id"])
 
         return result
 
@@ -6626,6 +6654,52 @@ def fetch_redcap_safety_plan(record_id: str, event_name: str = None) -> dict:
 
 @app.post("/api/admin/safety-plan/sync/{participant_id}")
 @limiter.limit("30/minute")
+def _sync_safety_plan_core(participant_id: str, redcap_record_id: str, synced_by: str,
+                           event_name: str = None) -> dict:
+    """Fetch the safety plan from REDCap, write it to participants/{id}/safety_plan/
+    current, AND copy the contact fields (address/county/homeType/erServiceNumber)
+    + emergency contacts (the safety-plan support network) onto the participant doc
+    — which the Risk Assessment Summary and the crisis-notification functions read.
+
+    Single source of truth shared by the DET trigger, the admin endpoint, and the
+    post-qualify backfill, so all three populate the SAME fields (the DET branch
+    previously only wrote the subcollection, leaving address/county/emergency
+    contacts blank on the participant doc)."""
+    redcap_data = fetch_redcap_safety_plan(redcap_record_id, event_name)
+    safety_plan = transform_redcap_safety_plan(redcap_data)
+    safety_plan["syncedAt"] = datetime.utcnow()
+    safety_plan["syncedBy"] = synced_by
+    safety_plan["redcapRecordId"] = redcap_record_id
+
+    p_ref = db.collection(config.col("participants")).document(participant_id)
+    p_ref.collection("safety_plan").document("current").set(safety_plan)
+
+    participant_update = {}
+    if safety_plan.get("address"):
+        participant_update["address"] = safety_plan["address"]
+    if safety_plan.get("homeType"):
+        participant_update["homeType"] = safety_plan["homeType"]
+    if safety_plan.get("county"):
+        participant_update["county"] = safety_plan["county"]
+    if safety_plan.get("erServiceNumber"):
+        participant_update["erServiceNumber"] = safety_plan["erServiceNumber"]
+    support_contacts = [c for c in (safety_plan.get("supportContacts") or []) if c.get("phone")]
+    if support_contacts:
+        participant_update["emergencyContacts"] = support_contacts
+    if participant_update:
+        p_ref.set(participant_update, merge=True)
+
+    logger.info(f"[SafetyPlan] Synced for participant {participant_id} (REDCap {redcap_record_id}), "
+                f"{sum(1 for v in safety_plan.values() if v)} fields, "
+                f"{len(support_contacts)} emergency contact(s)")
+    return {
+        "status": "synced",
+        "participant_id": participant_id,
+        "redcap_record_id": redcap_record_id,
+        "fields_populated": sum(1 for v in safety_plan.values() if v),
+    }
+
+
 def sync_safety_plan(
     request: Request,
     participant_id: str,
@@ -6652,51 +6726,7 @@ def sync_safety_plan(
         else:
             redcap_record_id = mappings[0].id
 
-        # Fetch from REDCap
-        redcap_data = fetch_redcap_safety_plan(redcap_record_id)
-        logger.info(f"[SafetyPlan] Fetched {len(redcap_data)} fields from REDCap for record {redcap_record_id}")
-
-        # Transform to Firestore format
-        safety_plan = transform_redcap_safety_plan(redcap_data)
-        safety_plan["syncedAt"] = datetime.utcnow()
-        safety_plan["syncedBy"] = user.get("email")
-        safety_plan["redcapRecordId"] = redcap_record_id
-
-        # Write to Firestore
-        participants_col = config.col("participants")
-        p_ref = db.collection(participants_col).document(participant_id)
-        p_ref.collection("safety_plan").document("current").set(safety_plan)
-
-        # Also copy key contact fields to the participant doc for quick access
-        # (used by emergency contact notifications, risk assessment, wellness checks)
-        participant_update = {}
-        if safety_plan.get("address"):
-            participant_update["address"] = safety_plan["address"]
-        if safety_plan.get("homeType"):
-            participant_update["homeType"] = safety_plan["homeType"]
-        if safety_plan.get("county"):
-            participant_update["county"] = safety_plan["county"]
-        if safety_plan.get("erServiceNumber"):
-            participant_update["erServiceNumber"] = safety_plan["erServiceNumber"]
-        # Emergency contacts come from the REDCap safety plan's support network —
-        # this is what the crisis notification functions read (emergencyContacts)
-        support_contacts = [
-            c for c in (safety_plan.get("supportContacts") or []) if c.get("phone")
-        ]
-        if support_contacts:
-            participant_update["emergencyContacts"] = support_contacts
-        if participant_update:
-            # set(merge=True) — update() throws if the participant doc doesn't exist yet
-            p_ref.set(participant_update, merge=True)
-
-        logger.info(f"[SafetyPlan] Synced safety plan for participant {participant_id} (REDCap record {redcap_record_id})")
-
-        return {
-            "status": "synced",
-            "participant_id": participant_id,
-            "redcap_record_id": redcap_record_id,
-            "fields_populated": sum(1 for v in safety_plan.values() if v),
-        }
+        return _sync_safety_plan_core(participant_id, redcap_record_id, user.get("email"))
 
     except HTTPException:
         raise
