@@ -6652,8 +6652,6 @@ def fetch_redcap_safety_plan(record_id: str, event_name: str = None) -> dict:
     return records[0]
 
 
-@app.post("/api/admin/safety-plan/sync/{participant_id}")
-@limiter.limit("30/minute")
 def _sync_safety_plan_core(participant_id: str, redcap_record_id: str, synced_by: str,
                            event_name: str = None) -> dict:
     """Fetch the safety plan from REDCap, write it to participants/{id}/safety_plan/
@@ -6700,6 +6698,8 @@ def _sync_safety_plan_core(participant_id: str, redcap_record_id: str, synced_by
     }
 
 
+@app.post("/api/admin/safety-plan/sync/{participant_id}")
+@limiter.limit("30/minute")
 def sync_safety_plan(
     request: Request,
     participant_id: str,
