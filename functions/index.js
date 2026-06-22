@@ -2,7 +2,6 @@ const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
-const sgMail = require("@sendgrid/mail");
 
 admin.initializeApp();
 
@@ -26,23 +25,67 @@ const twilioAccountSid = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthToken = defineSecret("TWILIO_AUTH_TOKEN");
 const twilioFromNumber = defineSecret("TWILIO_FROM_NUMBER");
 
-// SendGrid + Slack email config
-const sendgridApiKey = defineSecret("SENDGRID_API_KEY");
+// Email config. We send via Microsoft Graph (Mail.Send) as the study mailbox —
+// SendGrid was retired (trial ended; paid plan needed dartmouth.edu DNS changes).
+// Tenant/client IDs are not secret; the client secret is mounted from Secret
+// Manager. The Azure app "R01-SocialScope-Email-Alerts" is admin-consented and
+// scoped to send only as Social.Media.Wellness@dartmouth.edu.
 const slackChannelEmail = defineSecret("SLACK_CHANNEL_EMAIL");
-const alertSenderEmail = defineSecret("ALERT_SENDER_EMAIL"); // e.g., Social.Media.Wellness@dartmouth.edu
+const alertSenderEmail = defineSecret("ALERT_SENDER_EMAIL"); // the study mailbox
+const msgraphClientSecret = defineSecret("MSGRAPH_CLIENT_SECRET");
+const MSGRAPH_TENANT_ID = "995b0936-48d6-40e5-a31e-bf689ec9446f";
+const MSGRAPH_CLIENT_ID = "6fa0910d-2e09-41e2-ba41-0357213d2517";
+
+let _graphToken = { value: null, exp: 0 };
+
+function graphEmailConfigured() {
+  try {
+    return !!(msgraphClientSecret.value() || "").trim();
+  } catch (_) {
+    return false;
+  }
+}
+
+async function getGraphToken() {
+  const now = Date.now() / 1000;
+  if (_graphToken.value && _graphToken.exp - 60 > now) return _graphToken.value;
+  const body = new URLSearchParams({
+    client_id: MSGRAPH_CLIENT_ID,
+    client_secret: msgraphClientSecret.value().trim(),
+    scope: "https://graph.microsoft.com/.default",
+    grant_type: "client_credentials",
+  });
+  const resp = await fetch(
+    `https://login.microsoftonline.com/${MSGRAPH_TENANT_ID}/oauth2/v2.0/token`,
+    { method: "POST", body });
+  if (!resp.ok) throw new Error(`Graph token HTTP ${resp.status}: ${await resp.text()}`);
+  const json = await resp.json();
+  _graphToken.value = json.access_token;
+  _graphToken.exp = now + Number(json.expires_in || 3600);
+  return _graphToken.value;
+}
 
 // ============================================================================
-// Helper: Send email via SendGrid (for Slack channel and participant notifications)
+// Helper: Send email via Microsoft Graph (Slack channel + participant notifications)
 // ============================================================================
 async function sendEmail({ senderEmail, to, subject, body }) {
-  sgMail.setApiKey(sendgridApiKey.value().trim());
-
-  await sgMail.send({
-    to,
-    from: { email: senderEmail, name: "SocialScope Study Team" },
-    subject,
-    text: body,
-  });
+  const token = await getGraphToken();
+  const mailbox = encodeURIComponent(senderEmail);
+  const resp = await fetch(
+    `https://graph.microsoft.com/v1.0/users/${mailbox}/sendMail`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: "Text", content: body },
+          toRecipients: [{ emailAddress: { address: to } }],
+        },
+        saveToSentItems: false,
+      }),
+    });
+  if (!resp.ok) throw new Error(`Graph sendMail HTTP ${resp.status}: ${await resp.text()}`);
 }
 
 // ============================================================================
@@ -462,7 +505,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
     document: `${col("participants")}/{participantId}/safety_alerts/{alertId}`,
     secrets: [
       twilioAccountSid, twilioAuthToken, twilioFromNumber,
-      sendgridApiKey, slackChannelEmail, alertSenderEmail,
+      msgraphClientSecret, slackChannelEmail, alertSenderEmail,
     ],
   },
   async (event) => {
@@ -504,9 +547,9 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
     const slackEmail = slackChannelEmail.value();
     const senderEmailVal = alertSenderEmail.value();
-    const sgKey = sendgridApiKey.value();
+    const emailReady = graphEmailConfigured();
 
-    if (slackEmail && senderEmailVal && sgKey) {
+    if (slackEmail && senderEmailVal && emailReady) {
       try {
         const alertLabel = isConfirmedDanger
           ? "CONFIRMED DANGER"
@@ -749,7 +792,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
         // after the call fails to resolve (no pickup / no 988 transfer).
 
         // 4c. Email participant
-        if (participantInfo.email && senderEmailVal && sgKey) {
+        if (participantInfo.email && senderEmailVal && emailReady) {
           try {
             await sendEmail({
               senderEmail: senderEmailVal,
@@ -939,7 +982,7 @@ exports[escalationFnName] = onSchedule(
   {
     schedule: "every 5 minutes",
     secrets: [twilioAccountSid, twilioAuthToken, twilioFromNumber,
-              sendgridApiKey, slackChannelEmail, alertSenderEmail],
+              msgraphClientSecret, slackChannelEmail, alertSenderEmail],
     timeZone: "America/New_York",
   },
   async () => {
