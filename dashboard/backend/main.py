@@ -24,6 +24,7 @@ from enrollment_auth import (
     build_enrollment_url, enrollment_sms_text,
     enrollment_email_subject, enrollment_email_html,
 )
+from graph_email import graph_email_configured, send_graph_email, GRAPH_SENDER
 from sms_utils import (
     PARTICIPANT_ERROR_KEYWORDS,
     SMS_DISPOSITION_MAP,
@@ -938,24 +939,32 @@ def send_enrollment_link(request: Request, participant_id: str,
             sent["errors"].append(f"sms: {e}")
             logger.error(f"[Enrollment] SMS send failed for {participant_id}: {e}")
 
-    sendgrid_key = (os.getenv("SENDGRID_API_KEY") or "").strip()  # strip: secret may carry a trailing newline -> invalid auth header
-    if email and sendgrid_key:
+    # Email via Microsoft Graph (Mail.Send as the study mailbox). SendGrid is
+    # kept only as a fallback if Graph isn't configured (its trial has lapsed).
+    sendgrid_key = (os.getenv("SENDGRID_API_KEY") or "").strip()
+    if email and graph_email_configured():
+        try:
+            send_graph_email(email, enrollment_email_subject(), html=enrollment_email_html(url))
+            sent["email"] = True
+        except Exception as e:
+            sent["errors"].append(f"email: {e}")
+            logger.error(f"[Enrollment] Graph email failed for {participant_id}: {e}")
+    elif email and sendgrid_key:
         try:
             import sendgrid
             from sendgrid.helpers.mail import Mail
             sg = sendgrid.SendGridAPIClient(api_key=sendgrid_key)
-            msg = Mail(
-                from_email=("Social.Media.Wellness@dartmouth.edu", "SocialScope Study Team"),
+            sg.send(Mail(
+                from_email=(GRAPH_SENDER, "SocialScope Study Team"),
                 to_emails=email,
                 subject=enrollment_email_subject(),
-                html_content=enrollment_email_html(url))
-            sg.send(msg)
+                html_content=enrollment_email_html(url)))
             sent["email"] = True
         except Exception as e:
             sent["errors"].append(f"email: {e}")
             logger.error(f"[Enrollment] Email send failed for {participant_id}: {e}")
-    elif email and not sendgrid_key:
-        sent["errors"].append("email: SENDGRID_API_KEY not configured")
+    elif email:
+        sent["errors"].append("email: no email provider configured")
 
     # Audit (no secret/URL persisted — the link is a credential).
     try:
