@@ -46,28 +46,44 @@ def _get_token(now=None) -> str:
     return _token_cache["value"]
 
 
-def build_graph_message(to, subject, *, html=None, text=None, sender=None):
-    """Build the Graph sendMail request body (pure — unit-tested)."""
+def build_graph_message(to, subject, *, html=None, text=None, sender=None, attachments=None):
+    """Build the Graph sendMail request body (pure — unit-tested).
+
+    attachments: optional list of {name, contentType, contentBytes} where
+    contentBytes is the base64-encoded file content (Graph fileAttachment).
+    """
     content_type = "HTML" if html else "Text"
     content = html if html else (text or "")
+    message = {
+        "subject": subject,
+        "body": {"contentType": content_type, "content": content},
+        "toRecipients": [{"emailAddress": {"address": to}}],
+    }
+    if attachments:
+        message["attachments"] = [
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": a["name"],
+                "contentType": a.get("contentType", "application/octet-stream"),
+                "contentBytes": a["contentBytes"],
+            }
+            for a in attachments
+        ]
     return {
-        "message": {
-            "subject": subject,
-            "body": {"contentType": content_type, "content": content},
-            "toRecipients": [{"emailAddress": {"address": to}}],
-        },
+        "message": message,
         # Don't clutter the shared mailbox's Sent Items with automated mail.
         "saveToSentItems": False,
     }
 
 
-def send_graph_email(to, subject, *, html=None, text=None, sender=None) -> bool:
-    """Send one email. Raises on failure (caller logs / falls back)."""
+def send_graph_email(to, subject, *, html=None, text=None, sender=None, attachments=None) -> bool:
+    """Send one email. Raises on failure (caller logs)."""
     if not graph_email_configured():
         raise RuntimeError("Microsoft Graph email not configured")
     sender = sender or GRAPH_SENDER
     token = _get_token()
-    payload = json.dumps(build_graph_message(to, subject, html=html, text=text)).encode()
+    payload = json.dumps(
+        build_graph_message(to, subject, html=html, text=text, attachments=attachments)).encode()
     req = urllib.request.Request(
         f"https://graph.microsoft.com/v1.0/users/{urllib.parse.quote(sender)}/sendMail",
         data=payload,

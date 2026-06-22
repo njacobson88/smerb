@@ -27,6 +27,24 @@ class TestBuildGraphMessage(unittest.TestCase):
         self.assertEqual(m["message"]["body"]["contentType"], "HTML")
         self.assertEqual(m["message"]["body"]["content"], "<b>h</b>")
 
+    def test_no_attachments_key_when_none(self):
+        m = g.build_graph_message("a@b.edu", "Hi", text="x")
+        self.assertNotIn("attachments", m["message"])
+
+    def test_attachment(self):
+        m = g.build_graph_message("a@b.edu", "Hi", text="x", attachments=[
+            {"name": "r.pdf", "contentType": "application/pdf", "contentBytes": "QUJD"}])
+        att = m["message"]["attachments"][0]
+        self.assertEqual(att["@odata.type"], "#microsoft.graph.fileAttachment")
+        self.assertEqual(att["name"], "r.pdf")
+        self.assertEqual(att["contentType"], "application/pdf")
+        self.assertEqual(att["contentBytes"], "QUJD")
+
+    def test_attachment_default_content_type(self):
+        m = g.build_graph_message("a@b.edu", "Hi", text="x", attachments=[
+            {"name": "f.bin", "contentBytes": "QQ=="}])
+        self.assertEqual(m["message"]["attachments"][0]["contentType"], "application/octet-stream")
+
 
 class TestConfigured(unittest.TestCase):
     def _set(self, ten, cid, sec):

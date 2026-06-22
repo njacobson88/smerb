@@ -3,7 +3,7 @@ SocialScope Compliance Notification System
 - Low compliance alerts (EMA + screenshots)
 - Weekly gamified compliance reports
 - Push notifications via Firebase Cloud Messaging
-- Email via SendGrid
+- Email via Microsoft Graph (Mail.Send as the study mailbox)
 - Multiple message templates with piped variants
 """
 
@@ -13,10 +13,10 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
-import sendgrid
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 import firebase_admin
 from firebase_admin import firestore
+
+from graph_email import send_graph_email, GRAPH_SENDER
 
 import config
 
@@ -161,13 +161,10 @@ def send_compliance_email(
     to_email: str,
     subject: str,
     body: str,
-    sendgrid_api_key: str,
-    from_email: str = "Social.Media.Wellness@dartmouth.edu",
+    from_email: str = GRAPH_SENDER,
 ) -> dict:
-    """Send a compliance notification email via SendGrid. Supports HTML formatting."""
+    """Send a compliance notification email via Microsoft Graph. Supports HTML formatting."""
     try:
-        sg = sendgrid.SendGridAPIClient(api_key=sendgrid_api_key)
-
         # Check if body contains HTML tags
         is_html = '<b>' in body or '<i>' in body or '<u>' in body or '<br' in body or '<p>' in body
 
@@ -178,29 +175,11 @@ def send_compliance_email(
                 {body}
             </div>
             """
-            # Also create a plain text fallback by stripping tags
-            import re
-            plain_body = re.sub(r'<br\s*/?>', '\n', body)
-            plain_body = re.sub(r'<[^>]+>', '', plain_body)
-            plain_body = plain_body.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').strip()
-
-            message = Mail(
-                from_email=(from_email, "SocialScope Study Team"),
-                to_emails=to_email,
-                subject=subject,
-                plain_text_content=plain_body,
-                html_content=html_body,
-            )
+            send_graph_email(to_email, subject, html=html_body, sender=from_email)
         else:
-            message = Mail(
-                from_email=(from_email, "SocialScope Study Team"),
-                to_emails=to_email,
-                subject=subject,
-                plain_text_content=body,
-            )
+            send_graph_email(to_email, subject, text=body, sender=from_email)
 
-        response = sg.send(message)
-        return {"status": response.status_code, "success": response.status_code in (200, 201, 202)}
+        return {"status": 202, "success": True}
     except Exception as e:
         return {"status": 0, "success": False, "error": str(e)}
 

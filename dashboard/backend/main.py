@@ -939,9 +939,7 @@ def send_enrollment_link(request: Request, participant_id: str,
             sent["errors"].append(f"sms: {e}")
             logger.error(f"[Enrollment] SMS send failed for {participant_id}: {e}")
 
-    # Email via Microsoft Graph (Mail.Send as the study mailbox). SendGrid is
-    # kept only as a fallback if Graph isn't configured (its trial has lapsed).
-    sendgrid_key = (os.getenv("SENDGRID_API_KEY") or "").strip()
+    # Email via Microsoft Graph (Mail.Send as the study mailbox).
     if email and graph_email_configured():
         try:
             send_graph_email(email, enrollment_email_subject(), html=enrollment_email_html(url))
@@ -949,20 +947,6 @@ def send_enrollment_link(request: Request, participant_id: str,
         except Exception as e:
             sent["errors"].append(f"email: {e}")
             logger.error(f"[Enrollment] Graph email failed for {participant_id}: {e}")
-    elif email and sendgrid_key:
-        try:
-            import sendgrid
-            from sendgrid.helpers.mail import Mail
-            sg = sendgrid.SendGridAPIClient(api_key=sendgrid_key)
-            sg.send(Mail(
-                from_email=(GRAPH_SENDER, "SocialScope Study Team"),
-                to_emails=email,
-                subject=enrollment_email_subject(),
-                html_content=enrollment_email_html(url)))
-            sent["email"] = True
-        except Exception as e:
-            sent["errors"].append(f"email: {e}")
-            logger.error(f"[Enrollment] Email send failed for {participant_id}: {e}")
     elif email:
         sent["errors"].append("email: no email provider configured")
 
@@ -5948,16 +5932,14 @@ def send_compliance_notification(
             template_idx = idx
 
         results = {}
-        sendgrid_key = (os.getenv("SENDGRID_API_KEY") or "").strip()  # strip: secret may carry a trailing newline -> invalid auth header
-        sender_email = os.getenv("ALERT_SENDER_EMAIL", "Social.Media.Wellness@dartmouth.edu")
+        sender_email = os.getenv("ALERT_SENDER_EMAIL", GRAPH_SENDER)
 
-        # Send email
-        if "email" in body.delivery_methods and participant_email and sendgrid_key:
+        # Send email (via Microsoft Graph)
+        if "email" in body.delivery_methods and participant_email and graph_email_configured():
             results["email"] = send_compliance_email(
                 to_email=participant_email,
                 subject=subject,
                 body=email_body,
-                sendgrid_api_key=sendgrid_key,
                 from_email=sender_email,
             )
         elif "email" in body.delivery_methods and not participant_email:
