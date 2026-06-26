@@ -910,77 +910,71 @@ def _read_enrollment_hash(participant_id: str):
     return None
 
 
+class EnrollmentSendRequest(BaseModel):
+    email: Optional[str] = None        # override recipient; defaults to on-file email
+    send_email: Optional[bool] = True  # False = mint + return the link without emailing
+
+
 @app.post("/api/participant/{participant_id}/enrollment/send")
 @limiter.limit("10/minute")
 def send_enrollment_link(request: Request, participant_id: str,
+                         body: Optional[EnrollmentSendRequest] = None,
                          user: dict = Depends(verify_firebase_token)):
-    """Coordinator action: (re)issue the participant's app sign-in link and send
-    it via SMS + email. Rotates the secret each send (we store only the hash, so
-    a resend necessarily mints a new link and invalidates the prior one)."""
+    """Coordinator action: (re)issue the participant's app sign-in link.
+
+    The link is a one-time credential — we store only its hash, so each call mints
+    a FRESH secret and invalidates any previously-issued link. The freshly-minted
+    URL is returned in the response so the dashboard can display it for an
+    authenticated researcher to copy and send by any channel, and is optionally
+    emailed to the on-file address or an override address (`email`). It is NOT sent
+    by SMS — carriers filter sign-in/credential links (error 30007) — and the URL
+    is never persisted server-side."""
     data = get_participant_data(participant_id)
     if not data:
         raise HTTPException(status_code=404, detail="Participant not found")
 
-    phone = data.get("phone") or data.get("phoneNumber")
-    email = data.get("distributionEmail") or data.get("email")
-    if not phone and not email:
-        raise HTTPException(status_code=400,
-                            detail="No phone or distribution email on file for this participant")
+    override_email = ((body.email if body else None) or "").strip()
+    if override_email and "@" not in override_email:
+        raise HTTPException(status_code=400, detail=f"'{override_email}' is not a valid email address")
+    do_send = body.send_email if (body and body.send_email is not None) else True
+    on_file_email = (data.get("distributionEmail") or data.get("email") or "").strip() or None
+    target_email = override_email or on_file_email
 
-    # Rotate + store the secret, build the link.
+    # Mint + store the secret, build the link (rotates: any prior link stops working).
     secret = generate_enrollment_secret()
     _store_enrollment_hash(participant_id, hash_secret(secret))
     url = build_enrollment_url(ENROLLMENT_BASE_URL, participant_id, secret)
 
-    sent = {"sms": False, "email": False, "errors": []}
+    sent = {"email": False, "errors": []}
+    emailed_to = None
+    if do_send:
+        if not target_email:
+            sent["errors"].append("email: no recipient (none on file and none provided)")
+        elif not graph_email_configured():
+            sent["errors"].append("email: no email provider configured")
+        else:
+            try:
+                send_graph_email(target_email, enrollment_email_subject(),
+                                 html=enrollment_email_html(url))
+                sent["email"] = True
+                emailed_to = target_email
+            except Exception as e:
+                sent["errors"].append(f"email: {e}")
+                logger.error(f"[Enrollment] Graph email failed for {participant_id}: {e}")
 
-    if phone and twilio_client:
-        try:
-            to = to_e164(phone)
-            # Register a delivery status_callback so we learn whether the carrier
-            # actually delivered it (vs. just queued). A successful create only
-            # means QUEUED — carriers can still filter it (error 30007 on the
-            # unverified toll-free number), which is invisible without this.
-            status_cb = f"{PUBLIC_API_BASE_URL}/api/twilio/message-status?participantId={quote(str(participant_id))}"
-            msg = twilio_client.messages.create(
-                body=enrollment_sms_text(url), from_=config.TWILIO_FROM_NUMBER, to=to,
-                status_callback=status_cb)
-            sent["sms"] = True
-            sent["smsSid"] = msg.sid
-            # Record the initial (queued) status; the webhook updates it as Twilio
-            # reports sent -> delivered/undelivered.
-            db.collection(config.col("participants")).document(participant_id).set(
-                {"enrollmentSms": {"sid": msg.sid, "status": msg.status or "queued",
-                                   "to": to, "updatedAt": datetime.utcnow(),
-                                   "description": describe_sms_status(msg.status)}}, merge=True)
-            logger.info(f"[Enrollment] SMS queued for {participant_id}: {msg.sid} -> {to}")
-        except Exception as e:
-            sent["errors"].append(f"sms: {e}")
-            logger.error(f"[Enrollment] SMS send failed for {participant_id}: {e}")
-
-    # Email via Microsoft Graph (Mail.Send as the study mailbox).
-    if email and graph_email_configured():
-        try:
-            send_graph_email(email, enrollment_email_subject(), html=enrollment_email_html(url))
-            sent["email"] = True
-        except Exception as e:
-            sent["errors"].append(f"email: {e}")
-            logger.error(f"[Enrollment] Graph email failed for {participant_id}: {e}")
-    elif email:
-        sent["errors"].append("email: no email provider configured")
-
-    # Audit (no secret/URL persisted — the link is a credential).
+    # Audit — never persist the secret/URL (it's a credential).
     try:
         db.collection(config.col("participants")).document(participant_id).set(
             {"enrollmentLinkLastSentAt": datetime.utcnow(),
-             "enrollmentLinkLastSentBy": user.get("email")}, merge=True)
+             "enrollmentLinkLastSentBy": user.get("email"),
+             "enrollmentLinkLastSentTo": emailed_to}, merge=True)
     except Exception:
         pass
 
     logger.info(f"[Enrollment] Link issued for {participant_id} by {user.get('email')} "
-                f"(sms={sent['sms']}, email={sent['email']})")
-    return {"participantId": participant_id, "sent": sent,
-            "hasPhone": bool(phone), "hasEmail": bool(email)}
+                f"(emailed={sent['email']} to={emailed_to})")
+    return {"participantId": participant_id, "url": url, "emailedTo": emailed_to,
+            "sent": sent, "onFileEmail": on_file_email}
 
 
 @app.post("/api/auth/enrollment-token")

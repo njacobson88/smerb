@@ -76,7 +76,8 @@ const ParticipantDetailScreen = ({
   const [distError, setDistError] = useState(null);
   const [distSuccess, setDistSuccess] = useState(null);
   const [enrollSending, setEnrollSending] = useState(false);
-  const [enrollSmsStatus, setEnrollSmsStatus] = useState(null); // delivery status of last sign-in SMS
+  const [enrollLink, setEnrollLink] = useState(null);       // revealed active sign-in URL (credential)
+  const [enrollLinkEmail, setEnrollLinkEmail] = useState(''); // recipient (defaults to on-file/REDCap email)
   const [showDistPanel, setShowDistPanel] = useState(false);
 
   // Compliance notification state
@@ -195,7 +196,9 @@ const ParticipantDetailScreen = ({
           setDistManualOverride(data.distribution.manualOverride || false);
           setDistInviteStatus(data.distribution.inviteStatus);
           setDistInviteSentAt(data.distribution.inviteSentAt);
-          setEnrollSmsStatus(data.distribution.enrollmentSms || null);
+          // Default the sign-in-link recipient to the on-file (REDCap) email.
+          setEnrollLinkEmail(data.distribution.email || '');
+          setEnrollLink(null); // don't carry a stale link across participants
         }
       }
     } catch (e) { /* ignore */ }
@@ -302,36 +305,31 @@ const ParticipantDetailScreen = ({
     } catch (e) { setDistError(e.message); } finally { setDistSending(false); }
   };
 
-  // Send/resend the per-participant app sign-in link (SMS + email). Resending
-  // rotates the secret, so any previously-sent link stops working.
-  const sendEnrollmentLink = async () => {
-    if (!window.confirm(
-      'Send a new app sign-in link to this participant via SMS and email?\n\n' +
-      'This replaces any previous link for them (the old link stops working).'
-    )) return;
+  // (Re)issue the per-participant app sign-in link. The link is a one-time
+  // credential — each call mints a fresh secret and invalidates any previous
+  // link. Sent by email only (carriers filter sign-in links over SMS); the
+  // returned URL is shown so a researcher can also copy/send it manually.
+  // deliver=true emails it to `email`; deliver=false just reveals it.
+  const sendEnrollmentLink = async ({ email, deliver }) => {
     setEnrollSending(true); setDistError(null); setDistSuccess(null);
     try {
       const res = await authFetch(`${API_BASE_URL}/api/participant/${currentParticipantId}/enrollment/send`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email || null, send_email: !!deliver }),
       });
-      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to send link'); }
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to issue link'); }
       const data = await res.json();
-      const channels = [];
-      if (data.sent?.sms) channels.push('SMS');
-      if (data.sent?.email) channels.push('email');
-      if (channels.length) {
-        setDistSuccess(`Sign-in link queued via ${channels.join(' + ')} — checking delivery…`);
-        // "Sent" only means queued. Poll the distribution endpoint for the real
-        // Twilio delivery status (delivered / undelivered) reported via webhook.
-        if (data.sent?.sms) {
-          for (let i = 0; i < 6; i++) {
-            await new Promise(r => setTimeout(r, 4000));
-            await fetchDistribution();
-          }
+      setEnrollLink(data.url || null);
+      if (deliver) {
+        if (data.sent?.email) {
+          setDistSuccess(`Sign-in link emailed to ${data.emailedTo}. The link below is now the active one — copy it if you need to send it another way.`);
+        } else {
+          const errs = (data.sent?.errors || []).join('; ');
+          setDistError(`Link generated but not emailed${errs ? ': ' + errs : ''}. Copy the link below to send it manually.`);
         }
       } else {
-        const errs = (data.sent?.errors || []).join('; ');
-        setDistError(`Link generated but not delivered${errs ? ': ' + errs : ' (no phone/email on file, or SendGrid not configured)'}.`);
+        setDistSuccess('Sign-in link generated. Copy it below to send to the participant. This is now the active link — any previous link stops working.');
       }
     } catch (e) { setDistError(e.message); } finally { setEnrollSending(false); }
   };
@@ -750,17 +748,6 @@ const ParticipantDetailScreen = ({
                   Last invite sent: {distInviteSentAt ? new Date(distInviteSentAt).toLocaleString() : 'Unknown'}
                 </div>
               )}
-              {enrollSmsStatus && (
-                <div className={`text-xs mb-2 rounded p-2 ${
-                  enrollSmsStatus.status === 'delivered' ? 'text-green-700 bg-green-50'
-                    : (enrollSmsStatus.status === 'undelivered' || enrollSmsStatus.status === 'failed') ? 'text-red-700 bg-red-50'
-                    : 'text-gray-600 bg-gray-50'
-                }`}>
-                  Sign-in link SMS: <strong>{enrollSmsStatus.description || enrollSmsStatus.status}</strong>
-                  {enrollSmsStatus.updatedAt ? ` (${new Date(enrollSmsStatus.updatedAt).toLocaleTimeString()})` : ''}
-                </div>
-              )}
-
               {/* Action buttons */}
               <div className="flex gap-2">
                 <button
@@ -778,14 +765,63 @@ const ParticipantDetailScreen = ({
                 >
                   {distSending ? 'Sending...' : `Send ${distDeviceType ? distDeviceType.toUpperCase() : ''} Invite`}
                 </button>
-                <button
-                  onClick={sendEnrollmentLink}
-                  disabled={enrollSending}
-                  title="Send the per-participant app sign-in link via SMS + email"
-                  className="flex items-center px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {enrollSending ? 'Sending…' : 'Send Sign-in Link'}
-                </button>
+              </div>
+
+              {/* App sign-in link (per-participant link-only auth) */}
+              <div className="mt-3 border-t pt-3">
+                <div className="text-xs font-semibold text-gray-700 mb-1">App sign-in link</div>
+                <div className="text-xs text-gray-500 mb-2">
+                  Per-participant link to sign in to the app. Sent by email (not SMS — carriers
+                  filter sign-in links). Defaults to the on-file email; you can send to another
+                  address. Issuing a link replaces any previous one.
+                </div>
+                <div className="flex gap-2 items-center mb-2">
+                  <input
+                    type="email"
+                    value={enrollLinkEmail}
+                    onChange={(e) => setEnrollLinkEmail(e.target.value)}
+                    placeholder="recipient email"
+                    className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded"
+                  />
+                  <button
+                    onClick={() => sendEnrollmentLink({ email: enrollLinkEmail, deliver: true })}
+                    disabled={enrollSending || !enrollLinkEmail}
+                    title="Email the sign-in link to this address"
+                    className="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {enrollSending ? 'Working…' : 'Email link'}
+                  </button>
+                  <button
+                    onClick={() => sendEnrollmentLink({ email: null, deliver: false })}
+                    disabled={enrollSending}
+                    title="Generate the link without emailing — copy it to send manually"
+                    className="px-3 py-1.5 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    Show link
+                  </button>
+                </div>
+                {enrollLink && (
+                  <div className="bg-gray-50 border border-gray-200 rounded p-2">
+                    <div className="text-xs text-gray-500 mb-1">Active sign-in link (copy to send manually):</div>
+                    <div className="flex gap-2 items-center">
+                      <input
+                        readOnly
+                        value={enrollLink}
+                        onFocus={(e) => e.target.select()}
+                        className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded bg-white font-mono"
+                      />
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(enrollLink);
+                          setDistSuccess('Link copied to clipboard.');
+                        }}
+                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 whitespace-nowrap"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
