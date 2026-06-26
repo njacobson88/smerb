@@ -429,11 +429,17 @@ def update_participant_distribution(
 def send_distribution_invite(
     request: Request,
     participant_id: str,
+    body: Optional[DistributionUpdate] = None,
     user: dict = Depends(verify_firebase_token),
 ):
     """
     Send an app distribution invite to a participant.
     Adds them as a Firebase App Distribution tester and triggers the invite email.
+
+    The dashboard passes the currently-selected email/device type in the body so
+    that hitting "Send Invite" persists and uses that selection — coordinators no
+    longer have to click "Save" first (a common source of "No device type set"
+    confusion). Falls back to whatever is already on the participant doc.
     """
     try:
         doc = db.collection(config.col("participants")).document(participant_id).get()
@@ -443,13 +449,26 @@ def send_distribution_invite(
             raise HTTPException(status_code=404, detail="Participant not found in either collection")
 
         data = doc.to_dict()
-        email = data.get("distributionEmail")
-        device_type = data.get("deviceType")
+        # Prefer the selection sent from the dashboard; fall back to the stored value.
+        email = (body.email if body else None) or data.get("distributionEmail")
+        device_type = (body.device_type if body else None) or data.get("deviceType")
 
         if not email:
             raise HTTPException(status_code=400, detail="No distribution email set for this participant")
         if not device_type:
             raise HTTPException(status_code=400, detail="No device type set for this participant. Please confirm iOS or Android first.")
+        if device_type not in ("ios", "android"):
+            raise HTTPException(status_code=400, detail=f"Invalid device type '{device_type}' (expected 'ios' or 'android').")
+
+        # Persist the selection so the participant doc stays consistent with what
+        # was actually sent (and so a later send doesn't need it re-entered).
+        persist = {}
+        if email != data.get("distributionEmail"):
+            persist["distributionEmail"] = email
+        if device_type != data.get("deviceType"):
+            persist["deviceType"] = device_type
+        if persist:
+            doc.reference.update(persist)
 
         # Use Firebase App Distribution REST API (not CLI — CLI isn't available on Cloud Run)
         import google.auth

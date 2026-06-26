@@ -283,12 +283,16 @@ const ParticipantDetailScreen = ({
   };
 
   const sendInvite = async () => {
-    if (!distDeviceType) { setDistError('Please confirm the device type (iOS or Android) before sending.'); return; }
+    if (!distDeviceType) { setDistError('Please select a device type (iOS or Android) first.'); return; }
     if (!distEmail) { setDistError('Please enter an email address first.'); return; }
     setDistSending(true); setDistError(null); setDistSuccess(null);
     try {
+      // Pass the current selection so the backend persists + uses it — no need
+      // to click "Save" first.
       const res = await authFetch(`${API_BASE_URL}/api/participant/${currentParticipantId}/distribution/send-invite`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: distEmail, device_type: distDeviceType }),
       });
       if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to send'); }
       const data = await res.json();
