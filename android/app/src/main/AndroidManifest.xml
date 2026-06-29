@@ -7,6 +7,15 @@
     <!-- So daily-repeating check-in reminders are re-registered after a reboot
          (flutter_local_notifications' boot receiver reschedules them). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- EXACT alarms so check-in reminders fire at the precise scheduled minute
+         (not batched by Doze). USE_EXACT_ALARM (API 33+) is auto-granted and
+         cannot be revoked — appropriate here because timely reminders are core to
+         the study, and the app is sideloaded via Firebase App Distribution (not
+         subject to Google Play's USE_EXACT_ALARM eligibility review).
+         SCHEDULE_EXACT_ALARM covers Android 12 (API 31-32), where it is granted
+         by default. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
 

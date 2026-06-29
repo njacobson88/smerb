@@ -155,7 +155,7 @@
     "windows_per_day": 3,
     "window_duration_minutes": 60,
     "between_windows_minutes": 240,
-    "default_first_window": "09:00",
+    "default_first_window": "11:00",
     "always_available": true
   }
 }

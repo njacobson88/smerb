@@ -26,7 +26,7 @@ class CheckinService {
   int windowsPerDay = 3;
   int windowDurationMinutes = 60;
   int betweenWindowsMinutes = 240;
-  String defaultFirstWindow = '09:00';
+  String defaultFirstWindow = '11:00'; // 11 AM (→ 11:00 / 15:00 / 19:00) until wake-up set
   bool alwaysAvailable = true;
 
   // State
@@ -101,7 +101,7 @@ class CheckinService {
       windowsPerDay = schedule['windows_per_day'] ?? 3;
       windowDurationMinutes = schedule['window_duration_minutes'] ?? 60;
       betweenWindowsMinutes = schedule['between_windows_minutes'] ?? 240;
-      defaultFirstWindow = schedule['default_first_window'] ?? '12:00';
+      defaultFirstWindow = schedule['default_first_window'] ?? '11:00';
       alwaysAvailable = schedule['always_available'] ?? true;
 
       // Load user's wake-up time and compute first window
@@ -278,7 +278,23 @@ class CheckinService {
     );
 
     for (final window in _todayWindows) {
-      final when = _nextInstanceOfTime(window.start.hour, window.start.minute);
+      await _scheduleWindow(window, details);
+    }
+  }
+
+  /// Schedule one window's daily-repeating reminder. Prefers EXACT delivery so it
+  /// fires at the precise scheduled minute; only if the OS refuses exact alarms
+  /// does it fall back to inexact — so a reminder is never silently lost.
+  Future<void> _scheduleWindow(
+      CheckinWindow window, NotificationDetails details) async {
+    final when = _nextInstanceOfTime(window.start.hour, window.start.minute);
+    final timeOfDay =
+        '${window.start.hour.toString().padLeft(2, '0')}:${window.start.minute.toString().padLeft(2, '0')}';
+
+    for (final mode in const [
+      AndroidScheduleMode.exactAllowWhileIdle,
+      AndroidScheduleMode.inexactAllowWhileIdle,
+    ]) {
       try {
         await _notifications.zonedSchedule(
           window.index,
@@ -286,7 +302,7 @@ class CheckinService {
           'Tap to complete your check-in — it only takes a moment.',
           when,
           details,
-          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          androidScheduleMode: mode,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
           // Repeat every day at this local time.
@@ -298,19 +314,23 @@ class CheckinService {
           'windowIndex': window.index,
           'firstFireAt': when.toIso8601String(),
           'repeats': 'daily',
-          'timeOfDay':
-              '${window.start.hour.toString().padLeft(2, '0')}:${window.start.minute.toString().padLeft(2, '0')}',
+          'mode': mode.name,
+          'timeOfDay': timeOfDay,
           'tz': tz.local.name,
         });
-
-        print('[CheckIn] Scheduled daily reminder for window ${window.index} '
-            'at ${window.start.hour}:${window.start.minute} (next: $when)');
+        print('[CheckIn] Scheduled ${mode.name} daily reminder for window '
+            '${window.index} at $timeOfDay (next: $when)');
+        return; // scheduled successfully — don't also schedule the fallback
       } catch (e) {
-        print('[CheckIn] Failed to schedule window ${window.index}: $e');
-        _logEmaNotificationEvent('ema_notification_schedule_failed', {
-          'windowIndex': window.index,
-          'error': e.toString(),
-        });
+        print('[CheckIn] ${mode.name} schedule failed for window '
+            '${window.index}: $e');
+        if (mode == AndroidScheduleMode.inexactAllowWhileIdle) {
+          // Both modes failed — log it so the gap is visible server-side.
+          _logEmaNotificationEvent('ema_notification_schedule_failed', {
+            'windowIndex': window.index,
+            'error': e.toString(),
+          });
+        }
       }
     }
   }
