@@ -6,8 +6,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:uuid/uuid.dart';
 import 'package:timezone/timezone.dart' as tz;
+import 'package:timezone/data/latest_all.dart' as tzdata;
+import 'package:flutter_timezone/flutter_timezone.dart';
 import '../../../core/config/environment_config.dart';
-import 'package:timezone/data/latest_all.dart' as tz;
 import '../../storage/database/database.dart';
 
 /// Manages check-in windows, notifications, and scheduling.
@@ -48,14 +49,21 @@ class CheckinService {
     // Load schedule config
     await _loadConfig();
 
-    // Initialize timezone
-    tz.initializeTimeZones();
+    // Initialize timezone DB and pin tz.local to the DEVICE's zone. Without this
+    // tz.local defaults to UTC, which makes daily-repeating reminders
+    // (matchDateTimeComponents) fire at the wrong local time.
+    tzdata.initializeTimeZones();
+    await _configureLocalTimeZone();
 
-    // Initialize notifications
+    // Initialize notifications + request OS permission (incl. Android 13+).
     await _initializeNotifications();
 
-    // Generate today's windows
+    // Generate today's windows (used for availability gating + reminder times).
     _generateWindows();
+
+    // Schedule the recurring reminders. THIS is what was missing — previously
+    // notifications were only ever scheduled if the participant opened Settings.
+    await scheduleNotifications();
 
     // Start periodic window check
     _windowCheckTimer = Timer.periodic(
@@ -68,7 +76,20 @@ class CheckinService {
 
     _initialized = true;
     print('[CheckIn] Service initialized. Windows: ${_todayWindows.length}, '
-        'always_available: $alwaysAvailable');
+        'always_available: $alwaysAvailable, tz: ${tz.local.name}');
+  }
+
+  /// Pin tz.local to the device's IANA zone (e.g. America/New_York).
+  Future<void> _configureLocalTimeZone() async {
+    try {
+      final String tzName = await FlutterTimezone.getLocalTimezone();
+      tz.setLocalLocation(tz.getLocation(tzName));
+      print('[CheckIn] Local timezone set to $tzName');
+    } catch (e) {
+      // Leave tz.local at its default; one-shot scheduling still works, but log
+      // it because recurring reminders depend on a correct local zone.
+      print('[CheckIn] Could not resolve local timezone (using ${tz.local.name}): $e');
+    }
   }
 
   Future<void> _loadConfig() async {
@@ -118,11 +139,31 @@ class CheckinService {
       onDidReceiveNotificationResponse: _onNotificationTap,
     );
 
-    // Request permissions on iOS
-    await _notifications
-        .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(alert: true, badge: true, sound: true);
+    // iOS: request full (non-provisional) authorization so reminders are
+    // prominent (banner + sound), not delivered quietly.
+    final iosImpl = _notifications.resolvePlatformSpecificImplementation<
+        IOSFlutterLocalNotificationsPlugin>();
+    if (iosImpl != null) {
+      final granted = await iosImpl.requestPermissions(
+          alert: true, badge: true, sound: true);
+      print('[CheckIn] iOS notification permission granted: $granted');
+    }
+
+    // Android 13+ (API 33): notifications are blocked until POST_NOTIFICATIONS
+    // is granted at runtime. This was never requested before, so Android showed
+    // nothing. Also create the channel up front so its importance is set.
+    final androidImpl = _notifications.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    if (androidImpl != null) {
+      await androidImpl.createNotificationChannel(const AndroidNotificationChannel(
+        'checkin_channel',
+        'Check-in Reminders',
+        description: 'Reminders to complete your SocialScope check-in',
+        importance: Importance.high,
+      ));
+      final granted = await androidImpl.requestNotificationsPermission();
+      print('[CheckIn] Android notification permission granted: $granted');
+    }
   }
 
   void _onNotificationTap(NotificationResponse response) {
@@ -204,51 +245,86 @@ class CheckinService {
     _currentWindowIndex = windowIndex;
   }
 
-  /// Schedule notifications for today's remaining windows
+  /// (Re)schedule the daily check-in reminders. Each of the day's windows is
+  /// scheduled as a DAILY-REPEATING notification at its start time, so the OS
+  /// re-fires it every day without the app needing to be open. Safe to call on
+  /// every launch — it cancels and rebuilds the schedule (self-healing).
   Future<void> scheduleNotifications() async {
-    // Cancel existing notifications
     await _notifications.cancelAll();
 
-    final now = DateTime.now();
+    // Honor the user's toggle (default ON — reminders are core to the study).
+    final prefs = await SharedPreferences.getInstance();
+    final enabled = prefs.getBool('checkin_notifications_enabled') ?? true;
+    if (!enabled) {
+      print('[CheckIn] Reminders disabled by participant — none scheduled');
+      return;
+    }
+
+    const details = NotificationDetails(
+      iOS: DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+        interruptionLevel: InterruptionLevel.active,
+      ),
+      android: AndroidNotificationDetails(
+        'checkin_channel',
+        'Check-in Reminders',
+        channelDescription: 'Reminders to complete your SocialScope check-in',
+        importance: Importance.high,
+        priority: Priority.high,
+        category: AndroidNotificationCategory.reminder,
+      ),
+    );
 
     for (final window in _todayWindows) {
-      if (window.start.isAfter(now) && !window.completed) {
+      final when = _nextInstanceOfTime(window.start.hour, window.start.minute);
+      try {
         await _notifications.zonedSchedule(
           window.index,
-          'Time for a SocialScope check-in!',
-          'Tap to complete your check-in.',
-          tz.TZDateTime.from(window.start, tz.local),
-          const NotificationDetails(
-            iOS: DarwinNotificationDetails(
-              presentAlert: true,
-              presentBadge: true,
-              presentSound: true,
-            ),
-            android: AndroidNotificationDetails(
-              'checkin_channel',
-              'Check-in Reminders',
-              channelDescription: 'Notifications for EMA check-in windows',
-              importance: Importance.high,
-              priority: Priority.high,
-            ),
-          ),
+          'Time for a SocialScope check-in',
+          'Tap to complete your check-in — it only takes a moment.',
+          when,
+          details,
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
+          // Repeat every day at this local time.
+          matchDateTimeComponents: DateTimeComponents.time,
           payload: jsonEncode({'window': window.index}),
         );
 
         _logEmaNotificationEvent('ema_notification_scheduled', {
           'windowIndex': window.index,
-          'scheduledFor': window.start.toIso8601String(),
-          'windowEnd': window.end.toIso8601String(),
-          'title': 'Time for a SocialScope check-in!',
+          'firstFireAt': when.toIso8601String(),
+          'repeats': 'daily',
+          'timeOfDay':
+              '${window.start.hour.toString().padLeft(2, '0')}:${window.start.minute.toString().padLeft(2, '0')}',
+          'tz': tz.local.name,
         });
 
-        print('[CheckIn] Scheduled notification for window ${window.index} '
-            'at ${window.start}');
+        print('[CheckIn] Scheduled daily reminder for window ${window.index} '
+            'at ${window.start.hour}:${window.start.minute} (next: $when)');
+      } catch (e) {
+        print('[CheckIn] Failed to schedule window ${window.index}: $e');
+        _logEmaNotificationEvent('ema_notification_schedule_failed', {
+          'windowIndex': window.index,
+          'error': e.toString(),
+        });
       }
     }
+  }
+
+  /// Next occurrence of [hour]:[minute] in the device's local zone (today if it
+  /// is still ahead, otherwise tomorrow).
+  tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
+    final now = tz.TZDateTime.now(tz.local);
+    var scheduled =
+        tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+    if (!scheduled.isAfter(now)) {
+      scheduled = scheduled.add(const Duration(days: 1));
+    }
+    return scheduled;
   }
 
   /// Mark current window as completed

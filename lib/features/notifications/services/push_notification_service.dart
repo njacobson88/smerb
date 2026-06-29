@@ -35,11 +35,13 @@ class PushNotificationService {
       // Request permission (required on iOS)
       NotificationSettings settings;
       try {
+        // Request FULL (non-provisional) authorization. Provisional auth
+        // delivers everything quietly (no banner/sound), which is wrong for a
+        // study where safety self-confirmation + check-in pushes must be seen.
         settings = await _messaging.requestPermission(
           alert: true,
           badge: true,
           sound: true,
-          provisional: true, // Use provisional to avoid blocking if denied
         );
         print('[Push] Permission status: ${settings.authorizationStatus}');
       } catch (e) {

@@ -1,7 +1,7 @@
 name: smerb_app
 description: SocialScope - Social media research data collection app
 publish_to: 'none'
-version: 1.0.12+12
+version: 1.0.13+13
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -39,6 +39,8 @@ dependencies:
   # Notifications & Scheduling
   flutter_local_notifications: ^18.0.0
   timezone: ^0.9.4
+  flutter_timezone: ^4.1.1  # V2 embedding (1.x uses removed Registrar API)
+                            # (required for daily-repeating check-in reminders)
 
   # URL Launcher (for crisis resources)
   url_launcher: ^6.2.0
