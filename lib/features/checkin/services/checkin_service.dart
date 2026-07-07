@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -16,11 +17,16 @@ import '../../storage/database/database.dart';
 /// - 3 windows per day, 4 hours apart, 1 hour each
 /// - Notifications at window start
 /// - Tracks which windows have been completed
-class CheckinService {
+class CheckinService with WidgetsBindingObserver {
   final AppDatabase database;
   String? participantId;
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
+
+  /// Notification IDs 0-9 are reserved for the daily check-in reminders
+  /// (window.index). The safety walk-away follow-ups in checkin_screen.dart use
+  /// 9001-9003 — NEVER cancelAll() here, it would silently kill those.
+  static const int _reminderIdRangeEnd = 10;
 
   // Configuration (from ema_questions.json schedule section)
   int windowsPerDay = 3;
@@ -65,6 +71,12 @@ class CheckinService {
     // notifications were only ever scheduled if the participant opened Settings.
     await scheduleNotifications();
 
+    // Self-healing: re-verify + reschedule every time the app returns to the
+    // foreground. If ANY path loses the pending schedule (OS eviction, an
+    // errant cancel, app update, force-quit on Android clearing exact alarms),
+    // it heals on the next app open instead of staying dead until Settings.
+    WidgetsBinding.instance.addObserver(this);
+
     // Start periodic window check
     _windowCheckTimer = Timer.periodic(
       const Duration(seconds: 30),
@@ -77,6 +89,17 @@ class CheckinService {
     _initialized = true;
     print('[CheckIn] Service initialized. Windows: ${_todayWindows.length}, '
         'always_available: $alwaysAvailable, tz: ${tz.local.name}');
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _initialized) {
+      // Day may have rolled over while backgrounded; rebuild windows, then
+      // reschedule (idempotent — same IDs replace their pending versions).
+      _generateWindows();
+      _checkWindows();
+      scheduleNotifications();
+    }
   }
 
   /// Pin tz.local to the device's IANA zone (e.g. America/New_York).
@@ -248,9 +271,14 @@ class CheckinService {
   /// (Re)schedule the daily check-in reminders. Each of the day's windows is
   /// scheduled as a DAILY-REPEATING notification at its start time, so the OS
   /// re-fires it every day without the app needing to be open. Safe to call on
-  /// every launch — it cancels and rebuilds the schedule (self-healing).
+  /// every launch AND every app-resume — it rebuilds only the reminder IDs
+  /// (0-9), never touching the safety follow-up notifications (9001-9003).
   Future<void> scheduleNotifications() async {
-    await _notifications.cancelAll();
+    // Cancel ONLY the reminder ID range. cancelAll() here previously wiped the
+    // pending safety walk-away follow-ups too — never reintroduce it.
+    for (var id = 0; id < _reminderIdRangeEnd; id++) {
+      await _notifications.cancel(id);
+    }
 
     // Honor the user's toggle (default ON — reminders are core to the study).
     final prefs = await SharedPreferences.getInstance();
@@ -279,6 +307,25 @@ class CheckinService {
 
     for (final window in _todayWindows) {
       await _scheduleWindow(window, details);
+    }
+
+    // Verify against the OS and log the ground truth — if a device ever shows
+    // zero pending reminders server-side, we know scheduling is broken there.
+    try {
+      final pending = await _notifications.pendingNotificationRequests();
+      final reminderIds = pending
+          .map((p) => p.id)
+          .where((id) => id < _reminderIdRangeEnd)
+          .toList()
+        ..sort();
+      _logEmaNotificationEvent('ema_notifications_verified', {
+        'pendingReminderIds': reminderIds,
+        'expectedCount': _todayWindows.length,
+        'ok': reminderIds.length == _todayWindows.length,
+      });
+      print('[CheckIn] Pending reminders verified: $reminderIds');
+    } catch (e) {
+      print('[CheckIn] Could not verify pending notifications: $e');
     }
   }
 
@@ -376,15 +423,24 @@ class CheckinService {
     _checkWindows();
   }
 
-  /// Cancel all scheduled notifications
+  /// Cancel the scheduled check-in reminders (participant toggled them off).
+  /// Only touches the reminder ID range — safety follow-ups are never affected.
   Future<void> cancelNotifications() async {
-    await _notifications.cancelAll();
-    print('[CheckIn] All notifications cancelled');
+    for (var id = 0; id < _reminderIdRangeEnd; id++) {
+      await _notifications.cancel(id);
+    }
+    print('[CheckIn] Check-in reminders cancelled');
   }
 
   void dispose() {
+    // Do NOT cancel notifications here. This runs whenever the owning widget
+    // tree is torn down (navigation changes, re-init, etc.) and previously
+    // wiped every pending notification — daily reminders AND pending safety
+    // walk-away follow-ups — leaving the participant with no reminders until
+    // the next cold start or Settings visit. OS-scheduled notifications must
+    // outlive the UI: that is their entire purpose.
     _windowCheckTimer?.cancel();
-    _notifications.cancelAll();
+    WidgetsBinding.instance.removeObserver(this);
   }
 }
 

@@ -543,9 +543,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
               ],
             ),
             child: SafeArea(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
+              // Scale the toolbar down (instead of overflowing off screen) on
+              // narrow portrait displays / large text sizes, so every button —
+              // including Settings — is always visible without rotating. The
+              // minWidth keeps the buttons evenly spread when they do fit.
+              child: LayoutBuilder(
+                builder: (context, constraints) => FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: constraints.maxWidth),
+                    child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   IconButton(
@@ -639,6 +646,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                 ],
               ),
+                  ),
+                ),
               ),
             ),
           ),
