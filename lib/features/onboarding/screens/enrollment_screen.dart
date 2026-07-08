@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:uuid/uuid.dart';
-import '../services/participant_service.dart';
 import '../../sync/services/upload_service.dart';
 
 class EnrollmentScreen extends StatefulWidget {
@@ -18,143 +16,13 @@ class EnrollmentScreen extends StatefulWidget {
 }
 
 class _EnrollmentScreenState extends State<EnrollmentScreen> {
+  // Enrollment is link-only (smerb:// sign-in link handled in main.dart /
+  // EnrollmentLinkService); this screen just explains that. The error/attempts
+  // fields remain for the link-failure display below.
   final _formKey = GlobalKey<FormState>();
-  final _participantIdController = TextEditingController();
-  final _confirmIdController = TextEditingController();
-  final _participantService = ParticipantService();
-
-  bool _isLoading = false;
-  String? _errorMessage;
-
-  // Retry and rate limiting
+  final String? _errorMessage = null;
   static const int _maxRetries = 5;
-  int _failedAttempts = 0;
-  DateTime? _lastAttemptTime;
-  static const Duration _rateLimitDuration = Duration(minutes: 1);
-
-  @override
-  void dispose() {
-    _participantIdController.dispose();
-    _confirmIdController.dispose();
-    super.dispose();
-  }
-
-  bool get _isRateLimited {
-    if (_failedAttempts < _maxRetries) return false;
-    if (_lastAttemptTime == null) return false;
-
-    final elapsed = DateTime.now().difference(_lastAttemptTime!);
-    return elapsed < _rateLimitDuration;
-  }
-
-  Duration get _remainingRateLimitTime {
-    if (_lastAttemptTime == null) return Duration.zero;
-    final elapsed = DateTime.now().difference(_lastAttemptTime!);
-    final remaining = _rateLimitDuration - elapsed;
-    return remaining.isNegative ? Duration.zero : remaining;
-  }
-
-  Future<void> _enroll() async {
-    // Check rate limiting
-    if (_isRateLimited) {
-      final remaining = _remainingRateLimitTime;
-      setState(() {
-        _errorMessage = 'Too many attempts. Please wait ${remaining.inSeconds} seconds before trying again.';
-      });
-      return;
-    }
-
-    if (!_formKey.currentState!.validate()) return;
-
-    // Check if IDs match (case-insensitive for test users)
-    final participantId = _participantIdController.text.trim();
-    final confirmId = _confirmIdController.text.trim();
-    final normalizedId = ParticipantService.isTestUserId(participantId)
-        ? participantId.toLowerCase()
-        : participantId;
-    final normalizedConfirmId = ParticipantService.isTestUserId(confirmId)
-        ? confirmId.toLowerCase()
-        : confirmId;
-
-    if (normalizedId != normalizedConfirmId) {
-      setState(() {
-        _errorMessage = 'Participant IDs do not match. Please re-enter.';
-        _failedAttempts++;
-        _lastAttemptTime = DateTime.now();
-      });
-      return;
-    }
-
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      // Validate against Firebase
-      final validationResult = await _participantService.validateParticipantId(normalizedId);
-
-      if (!validationResult.isValid) {
-        setState(() {
-          _errorMessage = validationResult.errorMessage;
-          _isLoading = false;
-          _failedAttempts++;
-          _lastAttemptTime = DateTime.now();
-        });
-        return;
-      }
-
-      // Generate a unique visitor ID for this device
-      final visitorId = const Uuid().v4();
-
-      // Register this device enrollment in Firebase
-      final marked = await _participantService.registerDeviceEnrollment(
-        participantId: normalizedId,
-        visitorId: visitorId,
-        deviceInfo: {'platform': Theme.of(context).platform.name},
-      );
-
-      if (!marked) {
-        setState(() {
-          _errorMessage = 'Failed to register. Please try again.';
-          _isLoading = false;
-          _failedAttempts++;
-          _lastAttemptTime = DateTime.now();
-        });
-        return;
-      }
-
-      // Enroll the participant locally
-      final participant = await _participantService.enroll(
-        participantId: normalizedId,
-        visitorId: visitorId,
-      );
-
-      // Sync enrollment to Firebase participants collection (if uploadService provided)
-      if (widget.uploadService != null) {
-        try {
-          await widget.uploadService!.registerParticipant(
-            participantId: participant.id,
-            visitorId: participant.visitorId,
-            enrolledAt: participant.enrolledAt,
-          );
-        } catch (e) {
-          print('[EnrollmentScreen] Firebase registration failed, continuing locally: $e');
-          // Continue anyway - we have local enrollment
-        }
-      }
-
-      // Notify parent that enrollment is complete
-      widget.onEnrolled();
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Enrollment failed: $e';
-        _isLoading = false;
-        _failedAttempts++;
-        _lastAttemptTime = DateTime.now();
-      });
-    }
-  }
+  final int _failedAttempts = 0;
 
   @override
   Widget build(BuildContext context) {
