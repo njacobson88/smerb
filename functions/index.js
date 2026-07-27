@@ -2018,6 +2018,7 @@ exports.convertScreenshotsToJxl = onSchedule(
           // for any legacy doc written before screenshotStoragePath existed.
           const oldUrl = downloadUrlFor(LIVE_BUCKET, file.name, token);
           const seen = new Set([meta.eventId]);
+          let repointFailed = false;
           for (const collection of ["participants", "dev_participants"]) {
             const evCol = admin.firestore().collection(collection)
               .doc(meta.participantId).collection("events");
@@ -2028,9 +2029,23 @@ exports.convertScreenshotsToJxl = onSchedule(
             for (const sib of [...byPath.docs, ...byUrl.docs]) {
               if (seen.has(sib.id)) continue;
               seen.add(sib.id);
-              await sib.ref.update(newFields).catch((e) =>
-                console.error(`[JxlConvert] sibling repoint failed ${sib.id}: ${e.message}`));
+              await sib.ref.update(newFields).catch((e) => {
+                repointFailed = true;
+                console.error(`[JxlConvert] sibling repoint failed ${sib.id}: ${e.message}`);
+              });
             }
+          }
+
+          // If any referencing event could not be repointed, KEEP the .jpg.
+          // Deleting it would strand that event on a URL that 404s forever:
+          // this function only lists objects that still exist, so an object it
+          // has already deleted can never be revisited to repair the pointer.
+          // Keeping the original costs a little storage and self-heals on the
+          // next hourly pass.
+          if (repointFailed) {
+            console.warn(`[JxlConvert] repoint incomplete for ${file.name} — original kept`);
+            converted++;
+            continue;
           }
 
           if (!updated) {

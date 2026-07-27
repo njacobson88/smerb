@@ -28,8 +28,31 @@ class UploadService {
   int _screenshotsUploaded = 0;
   int _totalBytesUploaded = 0;
 
-  // Storage paths already uploaded (deduped events share one object)
-  final Map<String, String> _uploadedUrlCache = {};
+  // Storage paths already uploaded (deduped events share one object).
+  //
+  // Entries EXPIRE. The hourly Cloud Function rewrites screenshots from .jpg to
+  // .jxl and deletes the original, repointing every event that references the
+  // old object. A cached .jpg URL handed out after that pass would be recorded
+  // on a late-syncing deduped sibling and never repointed again — the function
+  // only lists objects that still exist, so a URL that goes stale this way stays
+  // stale forever. Expiring the cache well inside the conversion interval forces
+  // a re-resolve, which falls through to the .jxl-twin lookup below.
+  final Map<String, ({String url, DateTime at})> _uploadedUrlCache = {};
+  static const Duration _uploadedUrlCacheTtl = Duration(minutes: 10);
+
+  String? _cachedUploadUrl(String storagePath) {
+    final hit = _uploadedUrlCache[storagePath];
+    if (hit == null) return null;
+    if (DateTime.now().difference(hit.at) > _uploadedUrlCacheTtl) {
+      _uploadedUrlCache.remove(storagePath);
+      return null;
+    }
+    return hit.url;
+  }
+
+  void _cacheUploadUrl(String storagePath, String url) {
+    _uploadedUrlCache[storagePath] = (url: url, at: DateTime.now());
+  }
 
   // Local files whose upload succeeded — deleted only after the event doc
   // write lands, so a crash in between can't strand the event unsyncable
@@ -280,7 +303,7 @@ class UploadService {
     // them. Reuse the URL if this path was already uploaded this run.
     final filename = filePath.split('/').last;
     final storagePath = 'screenshots/${event.participantId}/${event.sessionId}/$filename';
-    final cachedUrl = _uploadedUrlCache[storagePath];
+    final cachedUrl = _cachedUploadUrl(storagePath);
     if (cachedUrl != null) {
       return cachedUrl;
     }
@@ -303,7 +326,7 @@ class UploadService {
               .child(candidate)
               .getDownloadURL()
               .timeout(const Duration(seconds: 10));
-          _uploadedUrlCache[storagePath] = url;
+          _cacheUploadUrl(storagePath, url);
           print('[UploadService] Reusing existing storage object: $candidate');
           return url;
         } catch (_) {
@@ -343,7 +366,7 @@ class UploadService {
 
       final downloadUrl = await snapshot.ref.getDownloadURL();
       _totalBytesUploaded += snapshot.totalBytes;
-      _uploadedUrlCache[storagePath] = downloadUrl;
+      _cacheUploadUrl(storagePath, downloadUrl);
       _pendingLocalDeletes[filePath] = true;
 
       print('[UploadService] Uploaded screenshot: $storagePath (${snapshot.totalBytes} bytes)');
