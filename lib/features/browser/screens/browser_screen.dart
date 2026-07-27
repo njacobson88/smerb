@@ -37,6 +37,26 @@ class BrowserScreen extends StatefulWidget {
   State<BrowserScreen> createState() => _BrowserScreenState();
 }
 
+/// Mobile browser user agent, matched to the host platform.
+///
+/// This MUST look like a real mobile browser. It previously claimed to be
+/// desktop macOS Safari, which made Reddit and X serve their DESKTOP layouts
+/// into a phone-width viewport — the account icon was clipped off the right
+/// edge, the Reddit search box overlapped its own placeholder text, and X's
+/// desktop right sidebar (search + For You/Trending tabs) wrapped down into the
+/// middle of the timeline.
+///
+/// Keep the full "Version/... Safari/..." (iOS) and "Chrome/... Mobile Safari"
+/// (Android) suffixes: a bare WKWebView/Android WebView UA reads as an in-app
+/// browser and some sign-in flows treat it differently.
+String get _mobileUserAgent => Platform.isIOS
+    ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) '
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) '
+        'Version/17.2 Mobile/15E148 Safari/604.1'
+    : 'Mozilla/5.0 (Linux; Android 14; Pixel 7) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/120.0.0.0 Mobile Safari/537.36';
+
 class _BrowserScreenState extends State<BrowserScreen> {
   InAppWebViewController? _controller;
   bool _isLoading = true;
@@ -398,9 +418,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 allowsInlineMediaPlayback: true,
                 // Use hybrid composition on emulator to avoid Chromium GPU crash
                 useHybridComposition: _isEmulator,
-                userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                    'AppleWebKit/605.1.15 (KHTML, like Gecko) '
-                    'Version/17.2 Safari/605.1.15',
+                userAgent: _mobileUserAgent,
               ),
               onWebViewCreated: (controller) {
                 _controller = controller;
@@ -493,9 +511,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
                                 javaScriptEnabled: true,
                                 supportMultipleWindows: true,
                                 javaScriptCanOpenWindowsAutomatically: true,
-                                userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                                    'AppleWebKit/605.1.15 (KHTML, like Gecko) '
-                                    'Version/17.2 Safari/605.1.15',
+                                // Must match the parent WebView's UA — a popup
+                                // that identifies differently than the window
+                                // that opened it can break sign-in flows.
+                                userAgent: _mobileUserAgent,
                               ),
                               onCloseWindow: (popupController) {
                                 // Google calls window.close() after postMessage
