@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import '../../../core/config/environment_config.dart';
 import '../../../features/capture/services/capture_service.dart';
 import '../../../features/capture/services/screenshot_service.dart';
 import '../../../features/storage/database/database.dart';
@@ -287,6 +288,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
+        // Compact chrome: participants browse in this app all day, so the app
+        // bar is kept short to leave the maximum amount of screen for the
+        // social media content itself.
+        toolbarHeight: 40,
         flexibleSpace: SafeArea(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -305,44 +310,61 @@ class _BrowserScreenState extends State<BrowserScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
+          // Recording indicator — moved up from the old URL bar so that whole
+          // row could be removed (it cost ~34px of content height).
           Container(
-            margin: const EdgeInsets.only(right: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            margin: const EdgeInsets.only(right: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
             decoration: BoxDecoration(
               color: Colors.white.withOpacity(0.18),
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(10),
             ),
-            child: Text(
-              _currentPlatform.toUpperCase(),
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.notifications_outlined, size: 22, color: Colors.white),
-            onPressed: _openNotifications,
-            tooltip: 'Notifications',
-          ),
-          IconButton(
-            icon: const Icon(Icons.bug_report_outlined, size: 20, color: Colors.white70),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => DebugScreen(
-                    captureService: widget.captureService,
-                    database: widget.database,
-                    uploadService: widget.uploadService,
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.fiber_manual_record, size: 8, color: Color(0xFF7DE38B)),
+                SizedBox(width: 4),
+                Text(
+                  'Recording',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-              );
-            },
-            tooltip: 'Debug',
+              ],
+            ),
           ),
+          IconButton(
+            icon: const Icon(Icons.notifications_outlined, size: 20, color: Colors.white),
+            onPressed: _openNotifications,
+            tooltip: 'Notifications',
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            padding: EdgeInsets.zero,
+          ),
+          // Debug screen is a research-team tool — hide it from participants in prod.
+          if (EnvConfig.isDev)
+            IconButton(
+              icon: const Icon(Icons.bug_report_outlined, size: 18, color: Colors.white70),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => DebugScreen(
+                      captureService: widget.captureService,
+                      database: widget.database,
+                      uploadService: widget.uploadService,
+                    ),
+                  ),
+                );
+              },
+              tooltip: 'Debug',
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              padding: EdgeInsets.zero,
+            ),
+          const SizedBox(width: 4),
         ],
       ),
       body: Column(
@@ -354,41 +376,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
               valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4A6CF7)),
             ),
 
-          // URL bar
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            color: Colors.grey[100],
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _currentUrl,
-                    style: const TextStyle(fontSize: 12),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.green[100],
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Text(
-                    'Recording',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          // (The URL bar that used to sit here was removed — it consumed a full
+          // row of vertical space on every screen while adding nothing the
+          // participant needs. The "Recording" indicator moved into the app bar
+          // and the current platform is already shown by the toolbar below.)
 
           // WebView (wait for emulator detection before creating)
           Expanded(
