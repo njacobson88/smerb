@@ -143,11 +143,29 @@ class _CheckinScreenState extends State<CheckinScreen>
     return false;
   }
 
-  void _onResponseChanged(String questionId, dynamic value) {
+  /// Record a response.
+  ///
+  /// [evaluateSafety] must be false for values the participant has not actually
+  /// committed to — the midpoint a slider seeds on first touch, and the
+  /// intermediate positions it passes through while being dragged. Those are UI
+  /// state, not answers.
+  ///
+  /// This matters: sliders are 0-100, so the seed is 50, which is above the
+  /// safety threshold of 30. Evaluating it meant that merely TOUCHING the
+  /// "desire to kill yourself" slider fired the danger-confirmation flow and
+  /// wrote a pending_safety_confirmation recording 50 — even when the
+  /// participant then answered 0. Confirmed on-device and in live data, where
+  /// affected snapshots all read exactly 50.0 while the other sliders in the
+  /// same check-in held organic dragged values. Only the participant's
+  /// committed answer counts.
+  void _onResponseChanged(String questionId, dynamic value,
+      {bool evaluateSafety = true}) {
     setState(() {
       _responses[questionId] = value;
       _updateVisibleQuestions();
     });
+
+    if (!evaluateSafety) return;
 
     // Track when a threshold is first exceeded
     // Start the 5-minute completion nudge timer + write pending confirmation
@@ -874,14 +892,17 @@ class _CheckinScreenState extends State<CheckinScreen>
             value: response ?? ((question.min! + question.max!) / 2),
             min: question.min!,
             max: question.max!,
+            // Seed + live drag update the UI only. The safety threshold is
+            // evaluated on release, against the value actually chosen.
             onChangeStart: (_) {
               if (!hasInteracted) {
                 _onResponseChanged(
-                    question.id, (question.min! + question.max!) / 2);
+                    question.id, (question.min! + question.max!) / 2,
+                    evaluateSafety: false);
               }
             },
             onChanged: (value) {
-              _onResponseChanged(question.id, value);
+              _onResponseChanged(question.id, value, evaluateSafety: false);
             },
             onChangeEnd: (value) {
               _onResponseChanged(question.id, value);
