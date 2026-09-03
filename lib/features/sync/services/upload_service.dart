@@ -936,6 +936,21 @@ class UploadService {
     return totalSynced;
   }
 
+  /// Run one sync stage in isolation.
+  ///
+  /// Each stage is independently guarded so a failure in one can never prevent
+  /// the stages after it from running. syncAll was previously a bare sequential
+  /// chain, so a single throw (syncEvents rethrows) silently skipped everything
+  /// downstream — including check-in responses and safety alerts.
+  Future<int> _syncStage(String name, Future<int> Function() run) async {
+    try {
+      return await run();
+    } catch (e) {
+      print('[UploadService] Sync stage "$name" failed (continuing): $e');
+      return 0;
+    }
+  }
+
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
     // Reset counters
     _screenshotsUploaded = 0;
@@ -957,27 +972,46 @@ class UploadService {
       }
     }
 
-    // Sync events first (includes OCR data for screenshots)
-    final eventsSynced = await syncEvents(batchSize: eventBatchSize);
+    // ORDER MATTERS. Safety alerts and check-in responses go FIRST.
+    //
+    // These are the study's safety-critical and primary-outcome data, and they
+    // are tiny (a few hundred bytes each). They used to run LAST, after five
+    // large, failure-prone media stages — and because every stage was awaited in
+    // a bare sequential chain (syncEvents rethrows), any upstream failure
+    // aborted syncAll and these two never ran at all. Heavy-capture participants
+    // therefore completed check-ins that never left the device: confirmed in the
+    // live study, where a participant had 3 completed check-ins recorded in
+    // pending_safety_confirmations but 0 documents in ema_responses.
+    //
+    // Every stage is now isolated via _syncStage so one failure can never starve
+    // the ones after it, and the two that must never be lost run before the
+    // bulk uploads can fail.
+    final safetyAlertsSynced =
+        await _syncStage('safetyAlerts', () => syncSafetyAlerts());
+    final emaSynced = await _syncStage(
+        'emaResponses', () => syncEmaResponses(batchSize: eventBatchSize));
+
+    // Bulk data. Relative order preserved: events must sync before the OCR/HTML
+    // stages that update those same event docs.
+    final eventsSynced =
+        await _syncStage('events', () => syncEvents(batchSize: eventBatchSize));
 
     // Offload high-frequency analytics events to compressed GCS objects
     // (content_visible / content_exposure) — not individual Firestore docs.
-    final contentEventsSynced = await syncContentEvents();
+    final contentEventsSynced =
+        await _syncStage('contentEvents', () => syncContentEvents());
 
     // Sync any remaining OCR results (for events that were synced before OCR was done)
-    final ocrSynced = await syncOcrResults(batchSize: ocrBatchSize);
+    final ocrSynced =
+        await _syncStage('ocrResults', () => syncOcrResults(batchSize: ocrBatchSize));
 
     // Sync HTML captures (upload files + update events)
-    final htmlCapturesSynced = await syncHtmlCaptures(batchSize: eventBatchSize);
+    final htmlCapturesSynced = await _syncStage(
+        'htmlCaptures', () => syncHtmlCaptures(batchSize: eventBatchSize));
 
     // Sync HTML status logs (update events with unchanged status)
-    final htmlStatusLogsSynced = await syncHtmlStatusLogs(batchSize: eventBatchSize);
-
-    // Sync EMA check-in responses
-    final emaSynced = await syncEmaResponses(batchSize: eventBatchSize);
-
-    // Sync safety alerts (highest priority — these must never be lost)
-    final safetyAlertsSynced = await syncSafetyAlerts();
+    final htmlStatusLogsSynced = await _syncStage(
+        'htmlStatusLogs', () => syncHtmlStatusLogs(batchSize: eventBatchSize));
 
     return {
       'events': eventsSynced,
