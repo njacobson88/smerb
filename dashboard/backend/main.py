@@ -880,6 +880,24 @@ def _enrolled_docs_indexed(collection_name: str) -> dict:
     return found
 
 
+def _get_all_in_batches(refs: list, batch_size: int = 300):
+    """db.get_all() in chunks; Firestore caps the number of refs per call."""
+    for i in range(0, len(refs), batch_size):
+        chunk = refs[i:i + batch_size]
+        if not chunk:
+            continue
+        try:
+            for snapshot in db.get_all(chunk):
+                yield snapshot
+        except Exception as e:
+            logger.warning(f"Batch get failed ({e}); falling back to individual reads")
+            for ref in chunk:
+                try:
+                    yield ref.get()
+                except Exception:
+                    continue
+
+
 def get_all_participant_ids(enrolled_only: bool = True, use_cache: bool = False) -> list:
     """Get participant records from both collections, merged.
 
@@ -894,16 +912,30 @@ def get_all_participant_ids(enrolled_only: bool = True, use_cache: bool = False)
             return cached
 
     merged: Dict[str, dict] = {}
+    collections = [config.col("participants"), config.col("valid_participants")]
 
     if enrolled_only:
-        # `participants` first, then `valid_participants` overlaid on top, so
-        # the write path's precedence is preserved.
-        for collection_name in [config.col("participants"), config.col("valid_participants")]:
+        # Pass 1: find who is enrolled, cheaply.
+        enrolled_ids = set()
+        for collection_name in collections:
             for doc_id, data in _enrolled_docs_indexed(collection_name).items():
-                merged[doc_id] = _merge_participant_docs(merged.get(doc_id), data)
-        merged = {k: v for k, v in merged.items() if _is_enrolled(v)}
+                if _is_enrolled(data):
+                    enrolled_ids.add(doc_id)
+
+        # Pass 2: fetch BOTH documents for each enrolled participant.
+        # A participant's counterpart document can carry researcher edits
+        # (studyStartDate, manualActiveStatus) while carrying no enrolment
+        # marker of its own, so pass 1 alone would not see it.
+        for collection_name in collections:
+            refs = [db.collection(collection_name).document(pid) for pid in enrolled_ids]
+            for snapshot in _get_all_in_batches(refs):
+                if snapshot is None or not snapshot.exists:
+                    continue
+                merged[snapshot.id] = _merge_participant_docs(
+                    merged.get(snapshot.id), snapshot.to_dict() or {}
+                )
     else:
-        for collection_name in [config.col("participants"), config.col("valid_participants")]:
+        for collection_name in collections:
             for doc in db.collection(collection_name).stream():
                 merged[doc.id] = _merge_participant_docs(merged.get(doc.id), doc.to_dict() or {})
 
