@@ -3,6 +3,7 @@
 
 import os
 import json
+import time
 import uuid
 import zipfile
 import logging
@@ -847,6 +848,33 @@ def get_all_participant_ids(enrolled_only: bool = True) -> list:
     return participants_info
 
 
+def resolve_study_start(participant_data: Optional[dict], fallback=None) -> Optional[datetime]:
+    """Resolve a participant's study start date.
+
+    A researcher-set `studyStartDate` always wins over the enrollment
+    timestamp. Every read path must go through this helper: the dashboard cache
+    used to derive the date from `enrolledAt` alone, so a manually edited date
+    silently reverted on the next hourly cache rebuild.
+    """
+    data = participant_data or {}
+    for value in (data.get("studyStartDate"),
+                  data.get("enrolledAt"),
+                  data.get("lastEnrolledAt"),
+                  fallback):
+        if not value:
+            continue
+        if hasattr(value, "timestamp"):
+            return datetime.fromtimestamp(value.timestamp())
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.strptime(value[:10], "%Y-%m-%d")
+            except ValueError:
+                continue
+    return None
+
+
 def get_participant_data(participant_id: str) -> Optional[dict]:
     """Get participant data from either collection."""
     # Try participants collection first
@@ -1305,11 +1333,16 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
     events_ref = participant_ref.collection("events")
 
     # Query events within date range
+    # Only the fields this function actually reads. Screenshot events carry OCR
+    # text and metadata; streaming whole documents to count them was the main
+    # cost of a cache refresh.
     events_query = events_ref.where(
         "timestamp", ">=", start_dt
     ).where(
         "timestamp", "<", end_dt + timedelta(days=1)
-    )
+    ).select([
+        "timestamp", "createdAt", "eventType", "type", "platform", "ocr.wordCount",
+    ])
 
     events = list(events_query.stream())
 
@@ -1413,6 +1446,113 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
     return dict(daily_status)
 
 
+CACHE_REFRESH_WORKERS = int(os.environ.get("CACHE_REFRESH_WORKERS", "8"))
+# Firestore rejects documents over 1 MiB; the cache holds every participant.
+_CACHE_DOC_SOFT_LIMIT_BYTES = 800_000
+
+
+def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: datetime) -> dict:
+    """Compute one participant's cache row. Safe to run concurrently."""
+    pid = p_info["id"]
+    study_start = resolve_study_start(p_info.get("data"), start_dt)
+    daily_status = compute_participant_stats(pid, start_dt, end_dt)
+
+    total_screenshots = sum(d["screenshots"] for d in daily_status.values())
+    total_checkins = sum(d["checkins"] for d in daily_status.values())
+    total_reddit = sum(d["reddit"] for d in daily_status.values())
+    total_twitter = sum(d["twitter"] for d in daily_status.values())
+    days_count = max(1, len(daily_status))
+
+    daily_list = []
+    current = start_dt
+    while current <= end_dt:
+        date_str = current.strftime("%Y-%m-%d")
+        day_data = daily_status.get(date_str, {
+            "screenshots": 0, "ocr_chars": 0, "checkins": 0, "safety_alerts": 0,
+            "reddit": 0, "twitter": 0, "crisis_indicated": False
+        })
+        daily_list.append({"date": date_str, **day_data})
+        current += timedelta(days=1)
+
+    return {
+        "id": pid,
+        "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
+        "dailyStatus": daily_list,
+        "weeklyScreenshots": total_screenshots,
+        "weeklyCheckins": total_checkins,
+        "weeklyReddit": total_reddit,
+        "weeklyTwitter": total_twitter,
+        "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
+        # Surfaces a dashboard warning when a device's local capture is
+        # paused on a full cache (data-loss risk; usually a long offline gap).
+        "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
+    }
+
+
+def build_and_store_dashboard_cache(log_prefix: str = "") -> dict:
+    """Recompute the overall-status cache for every enrolled participant.
+
+    Participants are processed concurrently: the work is Firestore-bound, and
+    running it serially is what made a refresh take minutes.
+    """
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=14)
+
+    participants_info = get_all_participant_ids(enrolled_only=True)
+    started = time.time()
+    cached_data = []
+    failures = []
+
+    workers = max(1, min(CACHE_REFRESH_WORKERS, len(participants_info) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_build_participant_cache_entry, p_info, start_dt, end_dt): p_info["id"]
+            for p_info in participants_info
+        }
+        for future in as_completed(futures):
+            pid = futures[future]
+            try:
+                cached_data.append(future.result())
+            except Exception as e:
+                # One bad participant must not abandon the whole refresh.
+                failures.append(pid)
+                logger.error(f"{log_prefix}Cache build failed for {pid}: {e}")
+
+    cached_data.sort(key=lambda r: str(r.get("id", "")))
+
+    payload = {
+        "participants": cached_data,
+        "refreshedAt": datetime.utcnow(),
+        "startDate": start_dt.strftime("%Y-%m-%d"),
+        "endDate": end_dt.strftime("%Y-%m-%d"),
+        "participantCount": len(cached_data),
+    }
+
+    approx_bytes = len(json.dumps(cached_data, default=str))
+    if approx_bytes > _CACHE_DOC_SOFT_LIMIT_BYTES:
+        logger.warning(
+            f"{log_prefix}Dashboard cache is {approx_bytes} bytes for "
+            f"{len(cached_data)} participants and is approaching Firestore's "
+            f"1 MiB document limit. Split the cache per participant before "
+            f"enrolling many more."
+        )
+
+    db.collection(DASHBOARD_CACHE_COLLECTION).document("overall_status").set(payload)
+
+    elapsed = time.time() - started
+    logger.info(
+        f"{log_prefix}Dashboard cache refreshed: {len(cached_data)} participants "
+        f"in {elapsed:.1f}s using {workers} workers"
+        + (f"; {len(failures)} failed: {failures}" if failures else "")
+    )
+    return {
+        "participantCount": len(cached_data),
+        "failedParticipants": failures,
+        "elapsedSeconds": round(elapsed, 1),
+        "refreshedAt": datetime.utcnow().isoformat() + "Z",
+    }
+
+
 @app.post("/api/admin/refresh-cache")
 @limiter.limit("5/minute")
 def refresh_dashboard_cache(request: Request, user: dict = Depends(verify_admin_token)):
@@ -1421,83 +1561,8 @@ def refresh_dashboard_cache(request: Request, user: dict = Depends(verify_admin_
     This endpoint should be called by Cloud Scheduler every hour.
     """
     try:
-        # Calculate date range (last 14 days)
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=14)
-
-        # Get all enrolled participants
-        participants_info = get_all_participant_ids(enrolled_only=True)
-
-        cached_data = []
-        for p_info in participants_info:
-            pid = p_info["id"]
-            participant_data = p_info["data"]
-            enrolled_at = p_info["enrolledAt"]
-
-            if enrolled_at:
-                if hasattr(enrolled_at, 'timestamp'):
-                    study_start = datetime.fromtimestamp(enrolled_at.timestamp())
-                else:
-                    study_start = enrolled_at
-            else:
-                study_start = start_dt
-
-            # Compute stats for this participant
-            daily_status = compute_participant_stats(pid, start_dt, end_dt)
-
-            # Calculate totals
-            total_screenshots = sum(d["screenshots"] for d in daily_status.values())
-            total_checkins = sum(d["checkins"] for d in daily_status.values())
-            total_reddit = sum(d["reddit"] for d in daily_status.values())
-            total_twitter = sum(d["twitter"] for d in daily_status.values())
-            days_count = max(1, len(daily_status))
-
-            # Build daily status list
-            daily_list = []
-            current = start_dt
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                day_data = daily_status.get(date_str, {
-                    "screenshots": 0, "ocr_chars": 0, "checkins": 0, "safety_alerts": 0,
-                    "reddit": 0, "twitter": 0, "crisis_indicated": False
-                })
-                daily_list.append({
-                    "date": date_str,
-                    **day_data
-                })
-                current += timedelta(days=1)
-
-            cached_data.append({
-                "id": pid,
-                "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
-                "dailyStatus": daily_list,
-                "weeklyScreenshots": total_screenshots,
-                "weeklyCheckins": total_checkins,
-                "weeklyReddit": total_reddit,
-                "weeklyTwitter": total_twitter,
-                "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
-                # Surfaces a dashboard warning when a device's local capture is
-                # paused on a full cache (data-loss risk; usually a long offline gap).
-                "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
-            })
-
-        # Store in Firestore cache
-        cache_ref = db.collection(DASHBOARD_CACHE_COLLECTION).document("overall_status")
-        cache_ref.set({
-            "participants": cached_data,
-            "refreshedAt": datetime.utcnow(),
-            "startDate": start_dt.strftime("%Y-%m-%d"),
-            "endDate": end_dt.strftime("%Y-%m-%d"),
-            "participantCount": len(cached_data),
-        })
-
-        logger.info(f"Dashboard cache refreshed: {len(cached_data)} participants")
-        return {
-            "message": "Cache refreshed successfully",
-            "participantCount": len(cached_data),
-            "refreshedAt": datetime.utcnow().isoformat() + "Z",
-        }
-
+        result = build_and_store_dashboard_cache()
+        return {"message": "Cache refreshed successfully", **result}
     except Exception as e:
         logger.error(f"Failed to refresh cache: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1542,85 +1607,13 @@ def scheduler_refresh_cache(secret: str = Query(..., description="Scheduler secr
     Authenticated via secret key instead of Firebase token.
     Called automatically every hour by Cloud Scheduler.
     """
-    # Verify secret key
     if secret != config.SCHEDULER_SECRET:
         logger.warning(f"Invalid scheduler secret attempted")
         raise HTTPException(status_code=403, detail="Invalid secret")
 
     try:
-        # Calculate date range (last 14 days)
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=14)
-
-        # Get all enrolled participants
-        participants_info = get_all_participant_ids(enrolled_only=True)
-
-        cached_data = []
-        for p_info in participants_info:
-            pid = p_info["id"]
-            enrolled_at = p_info["enrolledAt"]
-
-            if enrolled_at:
-                if hasattr(enrolled_at, 'timestamp'):
-                    study_start = datetime.fromtimestamp(enrolled_at.timestamp())
-                else:
-                    study_start = enrolled_at
-            else:
-                study_start = start_dt
-
-            # Compute stats for this participant
-            daily_status = compute_participant_stats(pid, start_dt, end_dt)
-
-            # Calculate totals
-            total_screenshots = sum(d.get("screenshots", 0) for d in daily_status.values())
-            total_checkins = sum(d.get("checkins", 0) for d in daily_status.values())
-            total_reddit = sum(d.get("reddit", 0) for d in daily_status.values())
-            total_twitter = sum(d.get("twitter", 0) for d in daily_status.values())
-            days_count = max(1, len(daily_status))
-
-            # Build daily status list
-            daily_list = []
-            current = start_dt
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                day_data = daily_status.get(date_str, {
-                    "screenshots": 0, "ocr_chars": 0, "checkins": 0, "safety_alerts": 0,
-                    "reddit": 0, "twitter": 0, "crisis_indicated": False
-                })
-                daily_list.append({"date": date_str, **day_data})
-                current += timedelta(days=1)
-
-            cached_data.append({
-                "id": pid,
-                "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
-                "dailyStatus": daily_list,
-                "weeklyScreenshots": total_screenshots,
-                "weeklyCheckins": total_checkins,
-                "weeklyReddit": total_reddit,
-                "weeklyTwitter": total_twitter,
-                "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
-                # Surfaces a dashboard warning when a device's local capture is
-                # paused on a full cache (data-loss risk; usually a long offline gap).
-                "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
-            })
-
-        # Store in Firestore cache
-        cache_ref = db.collection(DASHBOARD_CACHE_COLLECTION).document("overall_status")
-        cache_ref.set({
-            "participants": cached_data,
-            "refreshedAt": datetime.utcnow(),
-            "startDate": start_dt.strftime("%Y-%m-%d"),
-            "endDate": end_dt.strftime("%Y-%m-%d"),
-            "participantCount": len(cached_data),
-        })
-
-        logger.info(f"[Scheduler] Dashboard cache refreshed: {len(cached_data)} participants")
-        return {
-            "message": "Cache refreshed successfully by scheduler",
-            "participantCount": len(cached_data),
-            "refreshedAt": datetime.utcnow().isoformat() + "Z",
-        }
-
+        result = build_and_store_dashboard_cache(log_prefix="[Scheduler] ")
+        return {"message": "Cache refreshed successfully by scheduler", **result}
     except Exception as e:
         logger.error(f"[Scheduler] Failed to refresh cache: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1707,10 +1700,22 @@ def get_overall_status(
             if refreshed_at and hasattr(refreshed_at, 'timestamp'):
                 refreshed_at = datetime.fromtimestamp(refreshed_at.timestamp())
 
-            # Filter daily status to requested date range
+            # The roster is read live, so a participant who has just been
+            # created (e.g. from a REDCap submission) shows up immediately
+            # instead of waiting for the next hourly cache rebuild. Only the
+            # expensive per-day stats come from the cache.
+            cached_by_id = {
+                p.get("id"): p for p in cached_participants if p.get("id")
+            }
+            roster = get_all_participant_ids(enrolled_only=True)
+
             results = []
-            for p in cached_participants:
-                daily_status = p.get("dailyStatus", [])
+            for p_info in roster:
+                pid = p_info["id"]
+                p_data = p_info.get("data") or {}
+                cached = cached_by_id.get(pid) or {}
+
+                daily_status = cached.get("dailyStatus", [])
                 filtered_daily = [
                     d for d in daily_status
                     if start_date <= d.get("date", "") <= end_date
@@ -1723,39 +1728,22 @@ def get_overall_status(
                 total_twitter = sum(d.get("twitter", 0) for d in filtered_daily)
                 days_count = max(1, len(filtered_daily))
 
-                # Calculate if participant is active
-                # First check for manual override in participant doc
-                pid = p.get("id")
-                manual_status = None
-                try:
-                    # Check valid_participants first, then participants
-                    p_doc = db.collection(config.col("valid_participants")).document(pid).get()
-                    if not p_doc.exists:
-                        p_doc = db.collection(config.col("participants")).document(pid).get()
-                    if p_doc.exists:
-                        p_data = p_doc.to_dict()
-                        manual_status = p_data.get("manualActiveStatus")
-                except Exception:
-                    pass  # Ignore errors, fall back to auto-calculation
+                # manualActiveStatus comes from the roster document we already
+                # hold; this previously cost two extra reads per participant on
+                # every page load.
+                study_start = resolve_study_start(p_data)
+                manual_status = p_data.get("manualActiveStatus")
 
                 if manual_status is not None:
                     is_active = manual_status
+                elif study_start:
+                    is_active = (datetime.now() - study_start).days <= 90
                 else:
-                    # Auto-calculate based on 90-day window
-                    study_start_str = p.get("study_start_date")
-                    if study_start_str:
-                        try:
-                            p_study_start = datetime.strptime(study_start_str, "%Y-%m-%d")
-                            days_since_start = (datetime.now() - p_study_start).days
-                            is_active = days_since_start <= 90
-                        except (ValueError, TypeError):
-                            is_active = True  # Default to active if can't parse
-                    else:
-                        is_active = True  # Default to active if no start date
+                    is_active = True
 
                 results.append({
                     "id": pid,
-                    "study_start_date": p.get("study_start_date"),
+                    "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
                     "is_active": is_active,
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
@@ -1763,6 +1751,9 @@ def get_overall_status(
                     "weeklyReddit": total_reddit,
                     "weeklyTwitter": total_twitter,
                     "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
+                    "captureDiskPaused": p_data.get("captureDiskPaused", False),
+                    # True until the next cache rebuild picks this participant up.
+                    "awaitingStats": pid not in cached_by_id,
                 })
 
             # Sort the FULL result set BEFORE paginating, so e.g. "lowest
@@ -1815,15 +1806,8 @@ def get_overall_status(
         results = []
         for p_info in paginated_participants:
             pid = p_info["id"]
-            enrolled_at = p_info["enrolledAt"]
-
-            if enrolled_at:
-                if hasattr(enrolled_at, 'timestamp'):
-                    study_start = datetime.fromtimestamp(enrolled_at.timestamp())
-                else:
-                    study_start = enrolled_at
-            else:
-                study_start = start_dt
+            # Honour a researcher-set study start date; fall back to enrolment.
+            study_start = resolve_study_start(p_info.get("data"), start_dt)
 
             # Use the helper function for computing stats
             daily_status = compute_participant_stats(pid, start_dt, end_dt)
