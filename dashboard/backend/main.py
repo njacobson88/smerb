@@ -1839,18 +1839,29 @@ def get_overall_status(
                 # hold; this previously cost two extra reads per participant on
                 # every page load.
                 study_start = resolve_study_start(p_data)
+                # The cache builder falls back to the start of the window when a
+                # participant has no date at all; keep that so the dashboard does
+                # not regress to "Unknown" for them.
+                study_start_str = (
+                    study_start.strftime("%Y-%m-%d") if study_start
+                    else cached.get("study_start_date")
+                )
                 manual_status = p_data.get("manualActiveStatus")
 
                 if manual_status is not None:
                     is_active = manual_status
-                elif study_start:
-                    is_active = (datetime.now() - study_start).days <= 90
                 else:
-                    is_active = True
+                    ref_date = study_start
+                    if ref_date is None and study_start_str:
+                        try:
+                            ref_date = datetime.strptime(study_start_str, "%Y-%m-%d")
+                        except (ValueError, TypeError):
+                            ref_date = None
+                    is_active = ((datetime.now() - ref_date).days <= 90) if ref_date else True
 
                 results.append({
                     "id": pid,
-                    "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
+                    "study_start_date": study_start_str,
                     "is_active": is_active,
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
