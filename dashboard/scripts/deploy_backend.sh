@@ -23,10 +23,13 @@ gcloud run deploy $SERVICE_NAME \
     --allow-unauthenticated \
     --memory 512Mi \
     --cpu 1 \
-    --min-instances 0 \
+    --min-instances 1 \
     --max-instances 2 \
-    --timeout 60 \
-    --set-env-vars "DEV_MODE=false"
+    --timeout 300
+# NOTE: deliberately no --set-env-vars here. That flag REPLACES the service's
+# entire environment, which would wipe REDCAP_API_TOKEN, SCHEDULER_SECRET,
+# TWILIO_*, MSGRAPH_* and the ENVIRONMENT=prod marker that are configured on
+# the service. Use --update-env-vars KEY=VALUE to change a single variable.
 
 BACKEND_URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')
 echo ""
