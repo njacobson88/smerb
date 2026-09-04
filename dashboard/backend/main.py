@@ -9,7 +9,7 @@ import zipfile
 import logging
 import re
 import asyncio
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from ipaddress import ip_address, ip_network
@@ -840,31 +840,43 @@ _ROSTER_CACHE: Dict[str, Any] = {"at": 0.0, "value": None}
 ROSTER_CACHE_TTL_SECONDS = float(os.environ.get("ROSTER_CACHE_TTL_SECONDS", "30"))
 
 
+# Firestore sorts null before every other type, so a range filter excludes
+# nulls. `!= None` would read more naturally but is rejected outright by
+# google-cloud-firestore < 2.19, which is what runs in production.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 def _enrolled_docs_indexed(collection_name: str) -> dict:
     """Enrolled participants only, via index-backed queries.
 
     `valid_participants` holds the pre-generated ID pool (~11k documents).
-    Streaming it and filtering in Python read the whole pool on every call;
-    these queries touch only documents that carry an enrolment marker.
+    Streaming it and filtering in Python read the whole pool on every call.
+    Note that order_by("enrolledAt") does NOT help: pool documents carry that
+    field set to null, so it returns all 11k of them.
+
+    If any query fails, fall back to a full scan of the collection. A short
+    roster would make participants silently vanish from the dashboard, which
+    is far worse than reading too much.
     """
     coll = db.collection(collection_name)
-    found = {}
-    # order_by("enrolledAt") would return the whole ~11k ID pool: those
-    # documents carry the field with a null value. An inequality filter
-    # excludes nulls and returns only genuinely enrolled participants.
-    queries = [
-        coll.where(filter=FieldFilter("inUse", "==", True)),
-        coll.where(filter=FieldFilter("enrolledViaRedcap", "==", True)),
-        coll.where(filter=FieldFilter("enrolledAt", "!=", None)),
-        coll.where(filter=FieldFilter("lastEnrolledAt", "!=", None)),
+    builders = [
+        lambda: coll.where(filter=FieldFilter("inUse", "==", True)),
+        lambda: coll.where(filter=FieldFilter("enrolledViaRedcap", "==", True)),
+        lambda: coll.where(filter=FieldFilter("enrolledAt", ">", _EPOCH)),
+        lambda: coll.where(filter=FieldFilter("lastEnrolledAt", ">", _EPOCH)),
     ]
-    for q in queries:
+    found = {}
+    for build in builders:
         try:
-            for doc in q.stream():
+            for doc in build().stream():
                 if doc.id not in found:
                     found[doc.id] = doc.to_dict() or {}
         except Exception as e:
-            logger.warning(f"Roster query failed on {collection_name}: {e}")
+            logger.error(
+                f"Roster query failed on {collection_name} ({e}); "
+                f"falling back to a full scan to avoid dropping participants."
+            )
+            return {doc.id: (doc.to_dict() or {}) for doc in coll.stream()}
     return found
 
 
