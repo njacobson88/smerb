@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from ipaddress import ip_address, ip_network
 from collections import defaultdict
+from google.cloud.firestore_v1.base_query import FieldFilter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote, quote
 
@@ -808,42 +809,104 @@ def debug_collections():
 # Participant Helpers
 # ============================================================================
 
-def get_all_participant_ids(enrolled_only: bool = True) -> list:
-    """Get participant IDs from both collections.
+def _merge_participant_docs(base: dict, overlay: dict) -> dict:
+    """Merge a participant's two documents.
+
+    17 participants exist in both `participants` and `valid_participants`.
+    Researcher edits (studyStartDate, manualActiveStatus) are written by
+    whichever collection the write path finds first, and that path checks
+    `valid_participants` first — so reads must give the same document
+    precedence or the edit silently disappears.
+    """
+    merged = dict(base or {})
+    for key, value in (overlay or {}).items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def _is_enrolled(data: dict) -> bool:
+    return (
+        data.get("inUse") is True
+        or data.get("enrolledAt") is not None
+        or data.get("lastEnrolledAt") is not None
+        or data.get("enrolledViaRedcap") is True
+    )
+
+
+# Reading the full ID pool costs ~11k document reads; the roster is needed on
+# every dashboard page load, so hold it briefly in-process.
+_ROSTER_CACHE: Dict[str, Any] = {"at": 0.0, "value": None}
+ROSTER_CACHE_TTL_SECONDS = float(os.environ.get("ROSTER_CACHE_TTL_SECONDS", "30"))
+
+
+def _enrolled_docs_indexed(collection_name: str) -> dict:
+    """Enrolled participants only, via index-backed queries.
+
+    `valid_participants` holds the pre-generated ID pool (~11k documents).
+    Streaming it and filtering in Python read the whole pool on every call;
+    these queries touch only documents that carry an enrolment marker.
+    """
+    coll = db.collection(collection_name)
+    found = {}
+    # order_by("enrolledAt") would return the whole ~11k ID pool: those
+    # documents carry the field with a null value. An inequality filter
+    # excludes nulls and returns only genuinely enrolled participants.
+    queries = [
+        coll.where(filter=FieldFilter("inUse", "==", True)),
+        coll.where(filter=FieldFilter("enrolledViaRedcap", "==", True)),
+        coll.where(filter=FieldFilter("enrolledAt", "!=", None)),
+        coll.where(filter=FieldFilter("lastEnrolledAt", "!=", None)),
+    ]
+    for q in queries:
+        try:
+            for doc in q.stream():
+                if doc.id not in found:
+                    found[doc.id] = doc.to_dict() or {}
+        except Exception as e:
+            logger.warning(f"Roster query failed on {collection_name}: {e}")
+    return found
+
+
+def get_all_participant_ids(enrolled_only: bool = True, use_cache: bool = False) -> list:
+    """Get participant records from both collections, merged.
 
     Args:
-        enrolled_only: If True, only return participants that have enrolled (inUse=True or has enrolledAt)
+        enrolled_only: If True, only return participants that have enrolled.
+        use_cache: Serve from a short-lived in-process cache. Used by read
+            paths that run on every page load, not by the cache builder.
     """
-    seen_ids = set()
-    participants_info = []
+    if enrolled_only and use_cache:
+        cached = _ROSTER_CACHE.get("value")
+        if cached is not None and (time.time() - _ROSTER_CACHE["at"]) < ROSTER_CACHE_TTL_SECONDS:
+            return cached
 
-    # Check both collections
-    for collection_name in [config.col("participants"), config.col("valid_participants")]:
-        collection_ref = db.collection(collection_name)
-        for doc in collection_ref.stream():
-            if doc.id in seen_ids:
-                continue
+    merged: Dict[str, dict] = {}
 
-            data = doc.to_dict()
+    if enrolled_only:
+        # `participants` first, then `valid_participants` overlaid on top, so
+        # the write path's precedence is preserved.
+        for collection_name in [config.col("participants"), config.col("valid_participants")]:
+            for doc_id, data in _enrolled_docs_indexed(collection_name).items():
+                merged[doc_id] = _merge_participant_docs(merged.get(doc_id), data)
+        merged = {k: v for k, v in merged.items() if _is_enrolled(v)}
+    else:
+        for collection_name in [config.col("participants"), config.col("valid_participants")]:
+            for doc in db.collection(collection_name).stream():
+                merged[doc.id] = _merge_participant_docs(merged.get(doc.id), doc.to_dict() or {})
 
-            # Filter to only enrolled/registered participants if requested
-            if enrolled_only:
-                is_enrolled = (
-                    data.get("inUse") == True or
-                    data.get("enrolledAt") is not None or
-                    data.get("lastEnrolledAt") is not None or
-                    data.get("enrolledViaRedcap") == True
-                )
-                if not is_enrolled:
-                    continue
+    participants_info = [
+        {
+            "id": doc_id,
+            "data": data,
+            "enrolledAt": data.get("enrolledAt") or data.get("lastEnrolledAt"),
+        }
+        for doc_id, data in merged.items()
+    ]
 
-            seen_ids.add(doc.id)
-            enrolled_at = data.get("enrolledAt") or data.get("lastEnrolledAt")
-            participants_info.append({
-                "id": doc.id,
-                "data": data,
-                "enrolledAt": enrolled_at,
-            })
+    if enrolled_only and use_cache:
+        _ROSTER_CACHE["value"] = participants_info
+        _ROSTER_CACHE["at"] = time.time()
 
     return participants_info
 
@@ -1707,7 +1770,7 @@ def get_overall_status(
             cached_by_id = {
                 p.get("id"): p for p in cached_participants if p.get("id")
             }
-            roster = get_all_participant_ids(enrolled_only=True)
+            roster = get_all_participant_ids(enrolled_only=True, use_cache=True)
 
             results = []
             for p_info in roster:
