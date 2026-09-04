@@ -983,18 +983,23 @@ def resolve_study_start(participant_data: Optional[dict], fallback=None) -> Opti
 
 
 def get_participant_data(participant_id: str) -> Optional[dict]:
-    """Get participant data from either collection."""
-    # Try participants collection first
-    doc = db.collection(config.col("participants")).document(participant_id).get()
-    if doc.exists:
-        return doc.to_dict()
+    """Get participant data merged across both collections.
 
-    # Try valid_participants collection
-    doc = db.collection(config.col("valid_participants")).document(participant_id).get()
-    if doc.exists:
-        return doc.to_dict()
+    A participant can have a document in each collection holding different
+    fields. Returning only the first one found meant the detail screen read a
+    `participants` document with no studyStartDate and no enrolment timestamp,
+    then fell back to `now() - 30 days` — which is why an edited date appeared
+    to "revert to 5 August" and would have silently crept forward each day.
 
-    return None
+    `valid_participants` wins, matching the write path in
+    update_study_start_date / update_active_status.
+    """
+    merged = None
+    for collection_name in (config.col("participants"), config.col("valid_participants")):
+        doc = db.collection(collection_name).document(participant_id).get()
+        if doc.exists:
+            merged = _merge_participant_docs(merged, doc.to_dict() or {})
+    return merged
 
 
 def get_participant_ref(participant_id: str):
