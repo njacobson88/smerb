@@ -6438,15 +6438,11 @@ async def redcap_data_entry_trigger(request: Request):
             if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
                 raise HTTPException(status_code=500, detail="REDCap API not configured")
 
-            # Look up the participant's app ID from the REDCap record
-            mapping_doc = db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).get()
-            if not mapping_doc.exists:
+            # Resolve the participant (tolerates the record having been renamed).
+            participant_id = _resolve_participant_for_record(record_id, event_name)
+            if not participant_id:
                 logger.warning(f"[REDCap DET] No mapping for record {record_id}, cannot sync safety plan")
                 return {"status": "ignored", "reason": f"no app ID mapping for record {record_id}"}
-
-            participant_id = mapping_doc.to_dict().get("app_participant_id")
-            if not participant_id:
-                return {"status": "ignored", "reason": "mapping exists but no app_participant_id"}
 
             # Shared core: writes the subcollection AND copies address/county/
             # emergency contacts onto the participant doc (used by the RAS + crisis
@@ -6466,14 +6462,10 @@ async def redcap_data_entry_trigger(request: Request):
             if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
                 raise HTTPException(status_code=500, detail="REDCap API not configured")
 
-            mapping_doc = db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).get()
-            if not mapping_doc.exists:
+            participant_id = _resolve_participant_for_record(record_id, event_name)
+            if not participant_id:
                 logger.warning(f"[REDCap DET] No mapping for record {record_id}, cannot sync C-SSRS")
                 return {"status": "ignored", "reason": f"no app ID mapping for record {record_id}"}
-
-            participant_id = mapping_doc.to_dict().get("app_participant_id")
-            if not participant_id:
-                return {"status": "ignored", "reason": "mapping exists but no app_participant_id"}
 
             result = sync_cssrs_from_redcap(
                 record_id=record_id,
@@ -6736,6 +6728,75 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
         "address": address,
         "homeType": home_type,
     }
+
+
+def _resolve_participant_for_record(record_id: str, event_name: str = None):
+    """Resolve the app participant ID for a REDCap record, tolerating renames.
+
+    Mappings are keyed by REDCap record_id. Coordinators rename records to match
+    the generated app ID once it exists (e.g. "56.BM" -> "194203310.BM"), which
+    orphaned the mapping: the DET then arrived with a record_id we had never
+    seen, logged "no app ID mapping", and DROPPED the save with no retry. That
+    silently cost three live participants their entire safety plan — county, ER
+    hospital, ER phone and emergency contact were all missing from the Risk
+    Assessment Summary while sitting complete in REDCap.
+
+    So: fall back to the record's own socialscope_app_id, which survives renames,
+    and repair the stored mapping so the next save resolves directly.
+    Returns the participant id, or None if it genuinely cannot be resolved.
+    """
+    mapping_doc = db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).get()
+    if mapping_doc.exists:
+        pid = mapping_doc.to_dict().get("app_participant_id")
+        if pid:
+            return pid
+
+    if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+        return None
+
+    try:
+        resp = http_requests.post(config.REDCAP_API_URL, data={
+            "token": config.REDCAP_API_TOKEN,
+            "content": "record",
+            "format": "json",
+            "records[0]": record_id,
+            "fields[0]": config.REDCAP_APP_ID_FIELD,
+            "events[0]": event_name or config.REDCAP_TRIGGER_EVENT,
+            "returnFormat": "json",
+        }, timeout=30)
+        if resp.status_code != 200:
+            logger.error(f"[REDCap DET] app-id lookup failed for {record_id}: {resp.status_code}")
+            return None
+        records = resp.json()
+        if not records:
+            return None
+        pid = str(records[0].get(config.REDCAP_APP_ID_FIELD) or "").strip()
+        if not pid:
+            return None
+    except Exception as e:
+        logger.error(f"[REDCap DET] app-id lookup error for {record_id}: {e}")
+        return None
+
+    # Only trust it if that participant actually exists.
+    p_ref = db.collection(config.col("participants")).document(pid)
+    if not p_ref.get().exists:
+        logger.warning(f"[REDCap DET] record {record_id} names app id {pid}, but no participant doc")
+        return None
+
+    # Repair the mapping so subsequent saves resolve on the fast path.
+    try:
+        db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).set({
+            "app_participant_id": pid,
+            "redcap_event": event_name or config.REDCAP_TRIGGER_EVENT,
+            "created_at": datetime.utcnow(),
+            "repaired_from_app_id_lookup": True,
+        }, merge=True)
+        p_ref.set({"redcapRecordId": record_id}, merge=True)
+        logger.info(f"[REDCap DET] Repaired mapping: record {record_id} -> participant {pid}")
+    except Exception as e:
+        logger.error(f"[REDCap DET] mapping repair failed for {record_id}: {e}")
+
+    return pid
 
 
 def fetch_redcap_safety_plan(record_id: str, event_name: str = None) -> dict:
