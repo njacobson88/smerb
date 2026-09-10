@@ -1891,6 +1891,14 @@ def get_overall_status(
                 "twitter": "weeklyTwitter",
                 "id": "id",
             }
+            # Test accounts (staff devices, pilots, QA) are pulled OUT of the
+            # roster before sorting, paginating and averaging. Leaving them in
+            # dragged study-wide compliance down and made "Total Participants"
+            # count people who are not in the study. They are returned
+            # separately so they stay visible rather than silently vanishing.
+            test_results = [r for r in results if r.get("is_test_participant")]
+            results = [r for r in results if not r.get("is_test_participant")]
+
             _field = _sort_fields.get(sort_by, "overallCompliance")
             _reverse = (sort_dir or "desc").lower() != "asc"
             if _field == "id":
@@ -1906,6 +1914,8 @@ def get_overall_status(
 
             return {
                 "participants": paginated_results,
+                "test_participants": test_results,
+                "test_participant_count": len(test_results),
                 "pagination": {
                     "page": page,
                     "page_size": page_size,
@@ -1983,10 +1993,18 @@ def get_overall_status(
                 # Surfaces a dashboard warning when a device's local capture is
                 # paused on a full cache (data-loss risk; usually a long offline gap).
                 "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
+                "is_test_participant": bool((p_info.get("data") or {}).get("isTestParticipant")),
             })
+
+        # Same exclusion as the cached path above.
+        _live_test = [r for r in results if r.get("is_test_participant")]
+        results = [r for r in results if not r.get("is_test_participant")]
+        total_participants = len(results)
 
         return {
             "participants": results,
+            "test_participants": _live_test,
+            "test_participant_count": len(_live_test),
             "pagination": {
                 "page": page,
                 "page_size": page_size,

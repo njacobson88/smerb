@@ -123,6 +123,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
   const [error, setError] = useState(null);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, total_pages: 1, page_size: 25 });
+  const [testCount, setTestCount] = useState(0);
   const [cacheInfo, setCacheInfo] = useState({ fromCache: false, refreshedAt: null });
   const [refreshingCache, setRefreshingCache] = useState(false);
   const [cacheMessage, setCacheMessage] = useState(null);
@@ -241,6 +242,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
       setParticipants(participantData);
       if (data.pagination) {
         setPagination(data.pagination);
+        setTestCount(data.test_participant_count || 0);
       }
       if (data.cache) {
         setCacheInfo(data.cache);
@@ -397,9 +399,17 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
         <div className="bg-white rounded-lg shadow p-4">
           <div className="text-sm text-gray-500">Total Participants</div>
           <div className="text-2xl font-bold text-gray-800">{pagination.total || participants.length}</div>
+          {testCount > 0 && (
+            <div className="text-xs text-amber-600 mt-1">
+              {testCount} test account{testCount === 1 ? '' : 's'} excluded
+            </div>
+          )}
         </div>
         <div className="bg-white rounded-lg shadow p-4">
-          <div className="text-sm text-gray-500">Average Check-in Compliance</div>
+          <div className="text-sm text-gray-500">
+            Average Check-in Compliance
+            {testCount > 0 && <span className="text-xs text-gray-400"> (real participants only)</span>}
+          </div>
           <div className="text-2xl font-bold" style={{ color: avgCompliance >= 80 ? COLORS.green : avgCompliance >= 50 ? COLORS.orange : COLORS.red }}>
             {avgCompliance}%
           </div>
