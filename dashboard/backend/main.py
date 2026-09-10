@@ -967,7 +967,9 @@ def resolve_study_start(participant_data: Optional[dict], fallback=None) -> Opti
     for value in (data.get("studyStartDate"),
                   data.get("enrolledAt"),
                   data.get("lastEnrolledAt"),
-                  fallback):
+                  fallback,
+                  data.get("createdAt"),
+                  data.get("created_at")):
         if not value:
             continue
         if hasattr(value, "timestamp"):
@@ -2129,7 +2131,22 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
                 study_start = enrolled_at
             study_start_is_custom = False
         else:
-            study_start = datetime.now() - timedelta(days=30)
+            # Fall back to when the participant record was actually created.
+            # This used to be now() - 30 days, which rendered as a permanent
+            # "Day 31/90" for anyone lacking studyStartDate/enrolledAt.
+            created = (participant_data.get("createdAt")
+                       or participant_data.get("created_at"))
+            if created is not None and hasattr(created, "timestamp"):
+                study_start = datetime.fromtimestamp(created.timestamp())
+            elif isinstance(created, datetime):
+                study_start = created
+            elif isinstance(created, str):
+                try:
+                    study_start = datetime.strptime(created[:10], "%Y-%m-%d")
+                except ValueError:
+                    study_start = datetime.now()
+            else:
+                study_start = datetime.now()
             study_start_is_custom = False
 
         # Get all events for this participant - use 'timestamp' field
@@ -6256,10 +6273,16 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
     app_id = generate_unique_9digit_id()
 
     # Create in valid_participants collection (what the app checks during enrollment)
+    # Stamp the study start at creation. Without it the dashboard had no date to
+    # work from and fell back to now()-30 days, so every REDCap-enrolled
+    # participant displayed "Day 31/90" (and crept forward daily) until a
+    # coordinator corrected it by hand.
+    _now = datetime.utcnow()
     db.collection(VALID_PARTICIPANTS_COLLECTION).document(app_id).set({
         "redcap_record_id": redcap_record_id,
-        "created_at": datetime.utcnow(),
+        "created_at": _now,
         "created_by": "redcap_trigger",
+        "studyStartDate": _now.strftime("%Y-%m-%d"),
         "inUse": False,
     })
 
@@ -6604,8 +6627,10 @@ REDCAP_SAFETY_PLAN_FIELDS = [
     "sp_environment1", "sp_environment2",
     "sp_reasons_live",
     "subj_county", "sp_er_service_number",
+    # Name — crisis responders need to know who they are asking for.
+    "subj_first_name", "subj_last_name", "subj_name_first_last",
     # Interview: participant address & home type (for wellness check dispatching)
-    "sp_subj_address", "subj_address_type", "participant_address_other",
+    "subj_address", "subj_address_type", "participant_address_other",
 ]
 
 # Home type mapping (REDCap radio choices → labels)
@@ -6699,10 +6724,21 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
 
     # Additional fields (hidden in REDCap, used by research team / app)
     county = _nonempty(redcap_data.get("subj_county", ""))
+
+    # Full name, preferring the single combined field and falling back to the
+    # first/last pair from informed consent.
+    full_name = _nonempty(redcap_data.get("subj_name_first_last", ""))
+    if not full_name:
+        parts = [_nonempty(redcap_data.get("subj_first_name", "")),
+                 _nonempty(redcap_data.get("subj_last_name", ""))]
+        full_name = " ".join([p for p in parts if p]) or None
     er_service_number = _nonempty(redcap_data.get("sp_er_service_number", ""))
 
     # Address & home type (from interview_script_questions instrument)
-    address = _nonempty(redcap_data.get("sp_subj_address", ""))
+    # NOTE: the field is subj_address. "sp_subj_address" does not exist in the
+    # REDCap dictionary, so this silently returned blank on every sync and the
+    # Risk Assessment Summary showed no address for anyone.
+    address = _nonempty(redcap_data.get("subj_address", ""))
     home_type_raw = _nonempty(redcap_data.get("subj_address_type", ""))
     home_type = HOME_TYPE_MAP.get(home_type_raw, home_type_raw) if home_type_raw else None
     home_type_other = _nonempty(redcap_data.get("participant_address_other", ""))
@@ -6727,6 +6763,7 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
         "erServiceNumber": er_service_number,
         "address": address,
         "homeType": home_type,
+        "name": full_name,
     }
 
 
@@ -6845,6 +6882,8 @@ def _sync_safety_plan_core(participant_id: str, redcap_record_id: str, synced_by
     p_ref.collection("safety_plan").document("current").set(safety_plan)
 
     participant_update = {}
+    if safety_plan.get("name"):
+        participant_update["name"] = safety_plan["name"]
     if safety_plan.get("address"):
         participant_update["address"] = safety_plan["address"]
     if safety_plan.get("homeType"):
