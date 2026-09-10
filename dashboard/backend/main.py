@@ -6627,8 +6627,6 @@ REDCAP_SAFETY_PLAN_FIELDS = [
     "sp_environment1", "sp_environment2",
     "sp_reasons_live",
     "subj_county", "sp_er_service_number",
-    # Name — crisis responders need to know who they are asking for.
-    "subj_first_name", "subj_last_name", "subj_name_first_last",
     # Interview: participant address & home type (for wellness check dispatching)
     "subj_address", "subj_address_type", "participant_address_other",
 ]
@@ -6725,13 +6723,6 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
     # Additional fields (hidden in REDCap, used by research team / app)
     county = _nonempty(redcap_data.get("subj_county", ""))
 
-    # Full name, preferring the single combined field and falling back to the
-    # first/last pair from informed consent.
-    full_name = _nonempty(redcap_data.get("subj_name_first_last", ""))
-    if not full_name:
-        parts = [_nonempty(redcap_data.get("subj_first_name", "")),
-                 _nonempty(redcap_data.get("subj_last_name", ""))]
-        full_name = " ".join([p for p in parts if p]) or None
     er_service_number = _nonempty(redcap_data.get("sp_er_service_number", ""))
 
     # Address & home type (from interview_script_questions instrument)
@@ -6763,7 +6754,6 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
         "erServiceNumber": er_service_number,
         "address": address,
         "homeType": home_type,
-        "name": full_name,
     }
 
 
@@ -6836,6 +6826,43 @@ def _resolve_participant_for_record(record_id: str, event_name: str = None):
     return pid
 
 
+def fetch_redcap_participant_name(record_id: str):
+    """Resolve the participant's name from REDCap.
+
+    Deliberately queried WITHOUT an event filter. The name is captured on the
+    informed_consent form (consent__screener_arm_1), not the interview event the
+    safety plan is fetched from, so the safety-plan call can never see it —
+    subj_name_first_last on the interview event is blank. Scanning every event
+    also means an event rename cannot silently blank the name again.
+    """
+    if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+        return None
+    try:
+        resp = http_requests.post(config.REDCAP_API_URL, data={
+            "token": config.REDCAP_API_TOKEN,
+            "content": "record",
+            "format": "json",
+            "records[0]": record_id,
+            "fields[0]": "subj_name_first_last",
+            "fields[1]": "subj_first_name",
+            "fields[2]": "subj_last_name",
+            "returnFormat": "json",
+        }, timeout=30)
+        if resp.status_code != 200:
+            return None
+        for row in resp.json() or []:
+            combined = (row.get("subj_name_first_last") or "").strip()
+            if combined:
+                return combined
+            first = (row.get("subj_first_name") or "").strip()
+            last = (row.get("subj_last_name") or "").strip()
+            if first or last:
+                return " ".join([p for p in (first, last) if p])
+    except Exception as e:
+        logger.error(f"[REDCap] name lookup failed for {record_id}: {e}")
+    return None
+
+
 def fetch_redcap_safety_plan(record_id: str, event_name: str = None) -> dict:
     """Fetch safety plan fields from REDCap for a given record."""
     if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
@@ -6874,6 +6901,9 @@ def _sync_safety_plan_core(participant_id: str, redcap_record_id: str, synced_by
     contacts blank on the participant doc)."""
     redcap_data = fetch_redcap_safety_plan(redcap_record_id, event_name)
     safety_plan = transform_redcap_safety_plan(redcap_data)
+    name = fetch_redcap_participant_name(redcap_record_id)
+    if name:
+        safety_plan["name"] = name
     safety_plan["syncedAt"] = datetime.utcnow()
     safety_plan["syncedBy"] = synced_by
     safety_plan["redcapRecordId"] = redcap_record_id
