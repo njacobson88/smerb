@@ -124,6 +124,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, total_pages: 1, page_size: 25 });
   const [testCount, setTestCount] = useState(0);
+  const [realCount, setRealCount] = useState(null);
   const [cacheInfo, setCacheInfo] = useState({ fromCache: false, refreshedAt: null });
   const [refreshingCache, setRefreshingCache] = useState(false);
   const [cacheMessage, setCacheMessage] = useState(null);
@@ -243,6 +244,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
       if (data.pagination) {
         setPagination(data.pagination);
         setTestCount(data.test_participant_count || 0);
+        setRealCount(data.real_participant_count ?? null);
       }
       if (data.cache) {
         setCacheInfo(data.cache);
@@ -330,8 +332,11 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
   });
 
   // Calculate average compliance
-  const avgCompliance = participants.length > 0
-    ? Math.round(participants.reduce((sum, p) => sum + (p.overallCompliance || 0), 0) / participants.length)
+  // Test accounts are shown in the roster (pinned to the bottom) but must never
+  // affect the study-wide figures.
+  const realParticipants = participants.filter(p => !p.is_test_participant);
+  const avgCompliance = realParticipants.length > 0
+    ? Math.round(realParticipants.reduce((sum, p) => sum + (p.overallCompliance || 0), 0) / realParticipants.length)
     : 0;
 
   const { startDate: displayStart, endDate: displayEnd } = getWeekDateRange(weekOffset);
@@ -398,7 +403,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
       <div className="grid grid-cols-3 gap-4 mb-6">
         <div className="bg-white rounded-lg shadow p-4">
           <div className="text-sm text-gray-500">Total Participants</div>
-          <div className="text-2xl font-bold text-gray-800">{pagination.total || participants.length}</div>
+          <div className="text-2xl font-bold text-gray-800">{realCount ?? (pagination.total || participants.length)}</div>
           {testCount > 0 && (
             <div className="text-xs text-amber-600 mt-1">
               {testCount} test account{testCount === 1 ? '' : 's'} excluded
@@ -417,7 +422,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
         <div className="bg-white rounded-lg shadow p-4">
           <div className="text-sm text-gray-500">Week Screenshots</div>
           <div className="text-2xl font-bold text-gray-800">
-            {participants.reduce((sum, p) => sum + (p.weeklyScreenshots || 0), 0).toLocaleString()}
+            {realParticipants.reduce((sum, p) => sum + (p.weeklyScreenshots || 0), 0).toLocaleString()}
           </div>
         </div>
       </div>
@@ -542,9 +547,10 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
                     dailyStatusMap[d.date] = d;
                   });
                   const isInactive = participant.is_active === false;
+                  const isTest = participant.is_test_participant === true;
 
                   return (
-                    <tr key={participant.id} className={`hover:bg-gray-50 ${isInactive ? 'bg-gray-50 opacity-60' : ''}`}>
+                    <tr key={participant.id} className={`hover:bg-gray-50 ${isTest ? 'bg-amber-50/60 border-t-2 border-amber-200' : ''} ${isInactive ? 'bg-gray-50 opacity-60' : ''}`}>
                       {/* Participant ID */}
                       <td className="px-4 py-3">
                         <div className="flex items-center">
@@ -555,6 +561,14 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
                             <User size={16} className="mr-2 text-gray-400" />
                             {participant.id}
                           </button>
+                          {isTest && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs font-semibold rounded bg-amber-500 text-white"
+                              title="Test account — excluded from the participant count and average compliance."
+                            >
+                              TEST
+                            </span>
+                          )}
                           {isInactive && (
                             <span className="ml-2 px-1.5 py-0.5 text-xs rounded bg-gray-300 text-gray-600">
                               inactive

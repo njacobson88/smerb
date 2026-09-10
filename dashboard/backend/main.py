@@ -1906,6 +1906,13 @@ def get_overall_status(
             else:
                 results.sort(key=lambda r: r.get(_field) or 0, reverse=_reverse)
 
+            # Test accounts are sorted to the very BOTTOM of the roster rather
+            # than hidden — they stay inspectable, just visibly separated and
+            # never mixed into the ranking of real participants.
+            test_results.sort(key=lambda r: str(r.get("id", "")))
+            real_count = len(results)
+            results = results + test_results
+
             # Paginate results
             total_participants = len(results)
             start_idx = (page - 1) * page_size
@@ -1914,8 +1921,8 @@ def get_overall_status(
 
             return {
                 "participants": paginated_results,
-                "test_participants": test_results,
                 "test_participant_count": len(test_results),
+                "real_participant_count": real_count,
                 "pagination": {
                     "page": page,
                     "page_size": page_size,
@@ -1999,12 +2006,15 @@ def get_overall_status(
         # Same exclusion as the cached path above.
         _live_test = [r for r in results if r.get("is_test_participant")]
         results = [r for r in results if not r.get("is_test_participant")]
+        _live_real = len(results)
+        _live_test.sort(key=lambda r: str(r.get("id", "")))
+        results = results + _live_test          # test accounts pinned to the bottom
         total_participants = len(results)
 
         return {
             "participants": results,
-            "test_participants": _live_test,
             "test_participant_count": len(_live_test),
+            "real_participant_count": _live_real,
             "pagination": {
                 "page": page,
                 "page_size": page_size,
