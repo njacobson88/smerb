@@ -18,6 +18,9 @@ import 'features/ocr/services/ocr_service.dart';
 import 'features/onboarding/services/participant_service.dart';
 import 'features/onboarding/services/enrollment_link_service.dart';
 import 'features/onboarding/screens/enrollment_screen.dart';
+import 'features/onboarding/screens/study_inactive_screen.dart';
+import 'features/onboarding/services/participant_status_service.dart';
+import 'features/checkin/services/checkin_service.dart';
 import 'features/notifications/services/push_notification_service.dart';
 import 'features/notifications/services/app_update_service.dart';
 
@@ -151,6 +154,7 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
 
   bool _initialized = false;
   bool _enrolled = false;
+  ParticipantStatus? _status; // null until checked; gates the whole app
 
   @override
   void initState() {
@@ -174,6 +178,9 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
       if (_backgroundSyncService != null && !_backgroundSyncService!.isRunning) {
         _backgroundSyncService!.start();
       }
+      // Re-check enrolment status so a participant deactivated from the
+      // dashboard stops interacting with the app without needing a reinstall.
+      _refreshParticipantStatus();
     }
   }
 
@@ -221,12 +228,47 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
       _enrolled = isEnrolled;
     });
 
+    // Gate the app on enrolment status (fails open).
+    if (isEnrolled) await _refreshParticipantStatus();
+
     // Check for app updates after UI is ready
     if (isEnrolled) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) AppUpdateService.checkForUpdate(context);
       });
     }
+  }
+
+  /// Check whether this participant is still actively enrolled. Fails OPEN —
+  /// an unreadable status never locks anyone out.
+  Future<void> _refreshParticipantStatus() async {
+    try {
+      final pid = await _participantService.getParticipantId();
+      if (pid == null) return;
+      final status = await ParticipantStatusService().fetch(pid);
+      if (!mounted) return;
+      if (status.resolved && !status.isActive) {
+        // Stop the daily check-in reminders on the device — they are scheduled
+        // locally and repeat forever, so nothing else would ever cancel them.
+        try {
+          await _checkinNotificationCanceller();
+        } catch (e) {
+          print('[App] failed to cancel reminders: $e');
+        }
+        // Deliberately do NOT stop background sync. The blocking UI already
+        // prevents new capture, and any check-ins still queued on the device
+        // must be allowed to finish uploading — stopping sync here would
+        // strand exactly the data the sync fix was written to rescue.
+      }
+      setState(() => _status = status);
+    } catch (e) {
+      print('[App] status check failed: $e');
+    }
+  }
+
+  Future<void> _checkinNotificationCanceller() async {
+    final svc = CheckinService(database: _database);
+    await svc.cancelNotifications();
   }
 
   Future<void> _initializeServices() async {
@@ -333,6 +375,11 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
     // Show enrollment screen if not enrolled
     if (!_enrolled) {
       return EnrollmentScreen(onEnrolled: _onEnrolled);
+    }
+
+    // Participation ended: block the study UI. Crisis resources stay reachable.
+    if (_status != null && _status!.resolved && !_status!.isActive) {
+      return StudyInactiveScreen(reason: _status!.reason);
     }
 
     // Show main app
