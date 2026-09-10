@@ -1870,6 +1870,7 @@ def get_overall_status(
                     "id": pid,
                     "study_start_date": study_start_str,
                     "is_active": is_active,
+                "is_test_participant": bool((p_data or {}).get("isTestParticipant")),
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
                     "weeklyCheckins": total_checkins,
@@ -2281,6 +2282,7 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
             "study_start_is_custom": study_start_is_custom,
             "is_active": is_active,
             "is_active_manual": is_active_manual,
+            "is_test_participant": bool(participant_data.get("isTestParticipant")),
             "inactive_reason": inactive_reason,
             "study_day": min(study_day, 90) if is_active else 90,
             "days_remaining": max(0, 90 - days_since_start) if is_active else 0,
@@ -2293,6 +2295,59 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
         raise
     except Exception as e:
         logger.error(f"Failed to get participant summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class UpdateTestStatusRequest(BaseModel):
+    is_test: bool
+
+
+@app.put("/api/participant/{participant_id}/test-status")
+@limiter.limit("30/minute")
+def update_test_status(
+    request: Request,
+    participant_id: str,
+    body: UpdateTestStatusRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Flag a participant as a TEST account (staff device, pilot run, QA).
+
+    Test participants are excluded from study-wide compliance so a handful of
+    staff devices cannot drag the real numbers down. Their own data is kept and
+    still viewable — this only changes whether they are counted in aggregates.
+    """
+    try:
+        participant_ref = None
+        valid_ref = db.collection(config.col("valid_participants")).document(participant_id)
+        participants_ref = db.collection(config.col("participants")).document(participant_id)
+        if valid_ref.get().exists:
+            participant_ref = valid_ref
+        elif participants_ref.get().exists:
+            participant_ref = participants_ref
+        else:
+            events_check = list(participants_ref.collection("events").limit(1).stream())
+            if events_check:
+                participant_ref = participants_ref
+            else:
+                raise HTTPException(status_code=404, detail="Participant not found")
+
+        participant_ref.set({
+            "isTestParticipant": body.is_test,
+            "testStatusUpdatedAt": datetime.utcnow(),
+            "testStatusUpdatedBy": user.get("email"),
+        }, merge=True)
+
+        logger.info(f"Test status for {participant_id} set to {body.is_test} by {user.get('email')}")
+        return {
+            "participant_id": participant_id,
+            "is_test": body.is_test,
+            "updated_by": user.get("email"),
+            "message": f"Participant marked as {'test' if body.is_test else 'real'}",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update test status: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

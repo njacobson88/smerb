@@ -64,6 +64,7 @@ const ParticipantDetailScreen = ({
   const [activeStatusError, setActiveStatusError] = useState(null);
   const [showInactiveConfirm, setShowInactiveConfirm] = useState(false);
   const [inactiveReason, setInactiveReason] = useState('');
+  const [testStatusSaving, setTestStatusSaving] = useState(false);
 
   // App distribution state
   const [distEmail, setDistEmail] = useState('');
@@ -541,6 +542,37 @@ const ParticipantDetailScreen = ({
     }
   };
 
+  // Flag/unflag as a TEST participant. Test accounts (staff devices, pilots, QA)
+  // are excluded from study-wide compliance so they can't drag the real numbers
+  // down. Their own data is untouched and still fully viewable.
+  const toggleTestStatus = async () => {
+    const newStatus = !summary?.is_test_participant;
+    if (newStatus && !window.confirm(
+      'Mark this participant as a TEST account?\n\n' +
+      'They will be excluded from study-wide compliance totals. Their data is kept.'
+    )) return;
+    setTestStatusSaving(true);
+    try {
+      const response = await authFetch(
+        `${API_BASE_URL}/api/participant/${currentParticipantId}/test-status`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_test: newStatus }),
+        }
+      );
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to update test status');
+      }
+      setSummary(prev => ({ ...prev, is_test_participant: newStatus }));
+    } catch (err) {
+      setActiveStatusError(err.message);
+    } finally {
+      setTestStatusSaving(false);
+    }
+  };
+
   // Calculate totals
   const dailySummary = summary?.daily_summary || [];
   const totalScreenshots = dailySummary.reduce((sum, d) => sum + (d.screenshots || 0), 0);
@@ -600,6 +632,22 @@ const ParticipantDetailScreen = ({
                   title={summary.is_active ? 'Click to mark as inactive' : 'Click to reactivate'}
                 >
                   {activeStatusSaving ? '...' : (summary.is_active ? 'ACTIVE' : 'INACTIVE')}
+                </button>
+              )}
+              {summary && (
+                <button
+                  onClick={toggleTestStatus}
+                  disabled={testStatusSaving}
+                  className={`ml-2 px-2 py-1 rounded-full text-xs font-semibold transition-colors disabled:opacity-50 ${
+                    summary.is_test_participant
+                      ? 'bg-amber-500 text-white hover:bg-amber-600'
+                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                  }`}
+                  title={summary.is_test_participant
+                    ? 'Test account — excluded from study compliance totals. Click to mark as a real participant.'
+                    : 'Click to mark as a TEST account (excluded from compliance totals)'}
+                >
+                  {testStatusSaving ? '...' : (summary.is_test_participant ? 'TEST ACCOUNT' : 'Mark as test')}
                 </button>
               )}
               {summary && summary.is_active && summary.days_remaining !== undefined && (

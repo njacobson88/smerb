@@ -256,9 +256,37 @@ def calculate_participant_compliance(participant_id: str, db, days: int = 3) -> 
     """Calculate a participant's compliance over the past N days."""
     now = datetime.utcnow()
     start = now - timedelta(days=days)
-    ema_expected = days * config.EMA_PROMPTS_PER_DAY
 
     participant_ref = db.collection(config.col("participants")).document(participant_id)
+
+    # Expected prompts must be capped by how long this participant has ACTUALLY
+    # been enrolled. A fixed `days`-wide denominator made anyone enrolled for
+    # less than the window mathematically incapable of reaching 100% — someone on
+    # day 1 could answer every prompt and still show 33%.
+    effective_days = days
+    try:
+        start_val = None
+        for coll in (config.col("valid_participants"), config.col("participants")):
+            doc = db.collection(coll).document(participant_id).get()
+            if doc.exists:
+                d = doc.to_dict() or {}
+                start_val = (d.get("studyStartDate") or d.get("enrolledAt")
+                             or d.get("createdAt") or d.get("created_at") or start_val)
+        study_start = None
+        if start_val is not None:
+            if hasattr(start_val, "timestamp"):
+                study_start = datetime.utcfromtimestamp(start_val.timestamp())
+            elif isinstance(start_val, datetime):
+                study_start = start_val
+            elif isinstance(start_val, str):
+                study_start = datetime.strptime(start_val[:10], "%Y-%m-%d")
+        if study_start:
+            enrolled_days = (now - study_start).days + 1  # day 1 is the start date
+            effective_days = max(1, min(days, enrolled_days))
+    except Exception:
+        pass
+
+    ema_expected = effective_days * config.EMA_PROMPTS_PER_DAY
 
     # Count EMA responses
     ema_count = 0
@@ -288,6 +316,7 @@ def calculate_participant_compliance(participant_id: str, db, days: int = 3) -> 
     return {
         "ema_count": ema_count,
         "ema_expected": ema_expected,
+        "effective_days": effective_days,
         "screenshot_count": screenshot_count,
         "compliance_pct": compliance_pct,
         "days": days,
