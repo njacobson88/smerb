@@ -478,7 +478,16 @@ const DayDetailScreen = ({
                       {/* Display ONLY SI-related responses */}
                       {siResponses.length > 0 ? (
                         <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                          {siResponses.map(([key, value], rIdx) => (
+                          {siResponses.map(([key, value], rIdx) => {
+                            // Same scale caveat as the check-in grid: ability_safe
+                            // was reversed mid-study, so never show the raw number
+                            // without saying which direction it was collected on.
+                            const abilityScale = key === 'ability_safe'
+                              ? (alert.responses?.__ability_safe_scale === 'high_is_risk'
+                                  ? 'higher = less able (riskier)'
+                                  : 'lower = less able (riskier)')
+                              : null;
+                            return (
                             <div key={rIdx} className="border-l-3 border-red-400 pl-3 py-1 bg-red-50/50 rounded-r">
                               <div className="text-xs text-red-600 font-medium mb-0.5">
                                 {formatQuestionLabel(key)}
@@ -486,8 +495,12 @@ const DayDetailScreen = ({
                               <div className="font-semibold text-gray-800">
                                 {formatSIResponseValue(key, value)}
                               </div>
+                              {abilityScale && (
+                                <div className="text-[11px] text-gray-500 italic mt-0.5">{abilityScale}</div>
+                              )}
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       ) : (
                         <div className="text-gray-500 text-sm italic">
@@ -630,8 +643,18 @@ const DayDetailScreen = ({
                     {/* Display responses as key-value pairs with SI-friendly labels */}
                     {checkin.responses && Object.keys(checkin.responses).length > 0 ? (
                       <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-                        {Object.entries(checkin.responses).map(([key, value], rIdx) => {
+                        {Object.entries(checkin.responses)
+                          .filter(([key]) => !key.startsWith('__'))
+                          .map(([key, value], rIdx) => {
                           const isSIField = SI_RELATED_FIELDS.includes(key);
+                          // ability_safe was reversed mid-study. Always state the
+                          // direction THIS response was collected on, so a raw
+                          // number is never read against the wrong scale.
+                          const abilityScale = key === 'ability_safe'
+                            ? (checkin.responses.__ability_safe_scale === 'high_is_risk'
+                                ? 'higher = less able (riskier)'
+                                : 'lower = less able (riskier)')
+                            : null;
                           return (
                             <div key={rIdx} className={`text-sm border-l-2 pl-3 py-1 ${
                               isSIField ? 'border-red-300 bg-red-50/30' : 'border-gray-300'
@@ -642,6 +665,9 @@ const DayDetailScreen = ({
                               <div className="font-medium text-gray-800">
                                 {formatSIResponseValue(key, value)}
                               </div>
+                              {abilityScale && (
+                                <div className="text-[11px] text-gray-500 italic mt-0.5">{abilityScale}</div>
+                              )}
                             </div>
                           );
                         })}
