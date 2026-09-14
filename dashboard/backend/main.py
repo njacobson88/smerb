@@ -27,6 +27,7 @@ from enrollment_auth import (
     enrollment_email_subject, enrollment_email_html,
 )
 from graph_email import graph_email_configured, send_graph_email, GRAPH_SENDER
+from ema_scale import build_ability_safe_note
 from sms_utils import (
     PARTICIPANT_ERROR_KEYWORDS,
     SMS_DISPOSITION_MAP,
@@ -3230,6 +3231,11 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     checkins_data.append({"id": checkin_doc.id, **checkin})
                 if checkins_data:
                     zf.writestr("ema_responses.json", json.dumps(checkins_data, indent=2, default=str))
+                    # Explain the ability_safe scale reversal for THIS participant
+                    # (values are never altered — the note says how to read them).
+                    _note = build_ability_safe_note(checkins_data)
+                    if _note:
+                        zf.writestr("SCALE_CHANGE_NOTE.txt", _note)
             except Exception as e:
                 logger.warning(f"Error exporting EMA: {e}")
 
@@ -3741,6 +3747,11 @@ def export_participant_data(
 
                 if checkins_data:
                     zf.writestr("ema_responses.json", json.dumps(checkins_data, indent=2, default=str))
+                    # Explain the ability_safe scale reversal for THIS participant
+                    # (values are never altered — the note says how to read them).
+                    _note = build_ability_safe_note(checkins_data)
+                    if _note:
+                        zf.writestr("SCALE_CHANGE_NOTE.txt", _note)
             except Exception as e:
                 logger.warning(f"Error exporting EMA responses: {e}")
 

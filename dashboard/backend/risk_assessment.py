@@ -11,6 +11,10 @@ from fastapi import HTTPException, Query, Request, Response, Depends
 from firebase_admin import firestore
 
 from cssrs_sync import CSSRS_CRISIS_TRIGGER_FIELDS, CSSRS_SCREEN_LABELS
+from ema_scale import (
+    ABILITY_SAFE_SCALE_KEY, ABILITY_SAFE_HIGH_IS_RISK, ABILITY_SAFE_LOW_IS_RISK,
+    ability_safe_high_is_risk, ability_safe_risk_value, compute_ema_risk_score,
+)
 
 # ---------------------------------------------------------------------------
 # EMA constants
@@ -39,22 +43,6 @@ EMA_THRESHOLD = 30
 # ---------------------------------------------------------------------------
 # Scoring helpers
 # ---------------------------------------------------------------------------
-
-def compute_ema_risk_score(responses: dict) -> int:
-    """Composite EMA risk score from safety trigger fields (0-100)."""
-    scores = []
-    for field in EMA_SAFETY_TRIGGER_FIELDS:
-        val = responses.get(field)
-        if val is not None:
-            try:
-                score = float(val)
-                if field == "ability_safe":
-                    score = 100 - score  # inverted: lower = more dangerous
-                scores.append(score)
-            except (ValueError, TypeError):
-                pass
-    return int(max(scores)) if scores else 0
-
 
 def determine_risk_level(ema_score: int, cssrs_severity: int, imminent: bool) -> str:
     """Overall risk level from EMA and C-SSRS data."""
@@ -89,6 +77,7 @@ def _fetch_latest_ema(p_ref):
         except Exception:
             responses = {}
 
+    high_is_risk = ability_safe_high_is_risk(responses)
     ema_score = compute_ema_risk_score(responses)
     imminent = responses.get("safety_confirmed_danger") is True
 
@@ -105,13 +94,22 @@ def _fetch_latest_ema(p_ref):
                 fval = float(val)
                 display_val = round(fval)
                 if is_trigger:
-                    exceeds = (fval <= EMA_THRESHOLD) if field == "ability_safe" else (fval >= EMA_THRESHOLD)
+                    if field == "ability_safe":
+                        # Compare on whichever scale THIS response used.
+                        exceeds = (fval >= EMA_THRESHOLD) if high_is_risk else (fval <= EMA_THRESHOLD)
+                    else:
+                        exceeds = fval >= EMA_THRESHOLD
             except (ValueError, TypeError):
                 pass
 
+        anchors = q_info["anchors"]
+        if field == "ability_safe":
+            anchors = ("0 (Completely) to 100 (Not at all)" if high_is_risk
+                       else "0 (Not at all) to 100 (Completely)")
+
         questions[field] = {
             "label": q_info["label"],
-            "anchors": q_info["anchors"],
+            "anchors": anchors,
             "value": display_val,
             "isTrigger": is_trigger,
             "exceedsThreshold": exceeds,
@@ -120,6 +118,8 @@ def _fetch_latest_ema(p_ref):
     ema = {
         "id": docs[0].id,
         "completedAt": data.get("completedAt"),
+        "abilitySafeScale": (ABILITY_SAFE_HIGH_IS_RISK if high_is_risk else "low_is_risk"),
+        "appVersion": responses.get("__app_version"),
         "responses": responses,
         "riskScore": ema_score,
         "triggeredAlert": ema_score >= EMA_THRESHOLD,

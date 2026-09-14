@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:card_swiper/card_swiper.dart';
 import 'package:uuid/uuid.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -127,8 +128,12 @@ class _CheckinScreenState extends State<CheckinScreen>
     final threshold = (question.safetyTrigger!['threshold'] as num).toDouble();
     final inverted = question.safetyTrigger!['inverted'] == true;
 
+    // `inverted` comes from the bundled ema_questions.json, so the rule always
+    // matches the anchors this build actually showed the participant.
+    // ability_safe was reversed (see abilitySafeScale) and is no longer
+    // inverted: every trigger item is now "higher = riskier".
     if (inverted) {
-      return response < threshold; // e.g., ability_safe < 30 = dangerous
+      return response < threshold;
     } else {
       return response > threshold; // e.g., desire_intensity > 30 = dangerous
     }
@@ -498,15 +503,38 @@ class _CheckinScreenState extends State<CheckinScreen>
     }
   }
 
+  /// Scale marker recorded on EVERY check-in.
+  ///
+  /// "How able are you to keep yourself safe" used to run 0 = Not at all able
+  /// to 100 = Completely able, so a LOW score meant high risk — the opposite of
+  /// every other slider, which made it easy to answer backwards. The anchors are
+  /// now reversed (0 = Completely, 100 = Not at all) so higher always means
+  /// riskier.
+  ///
+  /// Participants update at different times, so the scale can NEVER be inferred
+  /// from a date. Each response carries the scale it was actually collected on,
+  /// and the backend interprets it per-response. Responses with no marker
+  /// predate the change and are read on the old scale.
+  static const String abilitySafeScale = 'high_is_risk';
+
   Future<void> _submitCheckin() async {
     final now = DateTime.now();
     final checkinId = const Uuid().v4();
+
+    String appVersion = 'unknown';
+    try {
+      appVersion = (await PackageInfo.fromPlatform()).version;
+    } catch (_) {/* provenance is best-effort; never block a check-in */}
+
+    final recorded = Map<String, dynamic>.from(_responses)
+      ..['__ability_safe_scale'] = abilitySafeScale
+      ..['__app_version'] = appVersion;
 
     final companion = EmaResponsesCompanion(
       id: drift.Value(checkinId),
       participantId: drift.Value(widget.participantId),
       sessionId: drift.Value(widget.sessionId),
-      responses: drift.Value(jsonEncode(_responses)),
+      responses: drift.Value(jsonEncode(recorded)),
       startedAt: drift.Value(_startedAt!),
       completedAt: drift.Value(now),
       selfInitiated: drift.Value(widget.selfInitiated),

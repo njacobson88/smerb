@@ -12,7 +12,9 @@
           "type": "yes_no",
           "required": true,
           "skip_logic": {
-            "show_if_yes": ["social_media_feeling"]
+            "show_if_yes": [
+              "social_media_feeling"
+            ]
           }
         },
         {
@@ -22,11 +24,26 @@
           "required": true,
           "hidden": true,
           "options": [
-            {"value": 1, "label": "Much worse"},
-            {"value": 2, "label": "Somewhat worse"},
-            {"value": 3, "label": "About the same"},
-            {"value": 4, "label": "Somewhat better"},
-            {"value": 5, "label": "Much better"}
+            {
+              "value": 1,
+              "label": "Much worse"
+            },
+            {
+              "value": 2,
+              "label": "Somewhat worse"
+            },
+            {
+              "value": 3,
+              "label": "About the same"
+            },
+            {
+              "value": 4,
+              "label": "Somewhat better"
+            },
+            {
+              "value": 5,
+              "label": "Much better"
+            }
           ]
         },
         {
@@ -74,7 +91,9 @@
           "max": 100,
           "min_label": "None",
           "max_label": "Extreme",
-          "safety_trigger": {"threshold": 30}
+          "safety_trigger": {
+            "threshold": 30
+          }
         },
         {
           "id": "intention_strength",
@@ -85,7 +104,9 @@
           "max": 100,
           "min_label": "None",
           "max_label": "Extreme",
-          "safety_trigger": {"threshold": 30}
+          "safety_trigger": {
+            "threshold": 30
+          }
         },
         {
           "id": "ability_safe",
@@ -94,9 +115,12 @@
           "required": true,
           "min": 0,
           "max": 100,
-          "min_label": "Not at all",
-          "max_label": "Completely",
-          "safety_trigger": {"threshold": 30, "inverted": true}
+          "min_label": "Completely",
+          "max_label": "Not at all",
+          "safety_trigger": {
+            "threshold": 30,
+            "inverted": false
+          }
         },
         {
           "id": "thoughts_past_4hrs",
@@ -104,7 +128,10 @@
           "type": "yes_no",
           "required": true,
           "skip_logic": {
-            "show_if_yes": ["thoughts_duration", "thoughts_intent"]
+            "show_if_yes": [
+              "thoughts_duration",
+              "thoughts_intent"
+            ]
           }
         },
         {
@@ -114,12 +141,30 @@
           "required": true,
           "hidden": true,
           "options": [
-            {"value": 1, "label": "Less than a minute"},
-            {"value": 2, "label": "1-5 minutes"},
-            {"value": 3, "label": "6-10 minutes"},
-            {"value": 4, "label": "11-30 minutes"},
-            {"value": 5, "label": "31-60 minutes"},
-            {"value": 6, "label": "More than 60 minutes"}
+            {
+              "value": 1,
+              "label": "Less than a minute"
+            },
+            {
+              "value": 2,
+              "label": "1-5 minutes"
+            },
+            {
+              "value": 3,
+              "label": "6-10 minutes"
+            },
+            {
+              "value": 4,
+              "label": "11-30 minutes"
+            },
+            {
+              "value": 5,
+              "label": "31-60 minutes"
+            },
+            {
+              "value": 6,
+              "label": "More than 60 minutes"
+            }
           ]
         },
         {
@@ -132,13 +177,20 @@
           "max": 100,
           "min_label": "None",
           "max_label": "Extreme",
-          "safety_trigger": {"threshold": 30}
+          "safety_trigger": {
+            "threshold": 30
+          }
         }
       ]
     }
   ],
   "safety_alert": {
-    "trigger_questions": ["desire_intensity", "intention_strength", "thoughts_intent", "ability_safe"],
+    "trigger_questions": [
+      "desire_intensity",
+      "intention_strength",
+      "thoughts_intent",
+      "ability_safe"
+    ],
     "threshold": 30,
     "confirmation_prompts": [
       "Based on your response, we want to check in with you. Are you currently in danger of harming yourself?",
@@ -147,8 +199,17 @@
       "We're asking again because your responses indicate you may be in significant distress. Are you in immediate danger right now?"
     ],
     "crisis_resources": [
-      {"name": "988 Suicide & Crisis Lifeline", "action": "call", "value": "988"},
-      {"name": "Crisis Text Line", "action": "text", "value": "741741", "message": "HELLO"}
+      {
+        "name": "988 Suicide & Crisis Lifeline",
+        "action": "call",
+        "value": "988"
+      },
+      {
+        "name": "Crisis Text Line",
+        "action": "text",
+        "value": "741741",
+        "message": "HELLO"
+      }
     ]
   },
   "schedule": {
