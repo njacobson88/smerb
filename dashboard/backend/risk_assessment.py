@@ -28,7 +28,9 @@ EMA_QUESTION_LABELS = {
     "hopeless": {"label": "Right now, how hopeless are you feeling?", "anchors": "0 (Not at all) to 100 (Extremely)"},
     "desire_intensity": {"label": "How intense is your desire to kill yourself right now?", "anchors": "0 (Not at all) to 100 (Extremely)"},
     "intention_strength": {"label": "How strong is your intention to kill yourself right now?", "anchors": "0 (Not at all) to 100 (Extremely)"},
-    "ability_safe": {"label": "How able are you to keep yourself safe right now?", "anchors": "0 (Not at all) to 100 (Completely)"},
+    # Anchors here are only a fallback — _fetch_latest_ema overrides them per
+    # response, because this item's direction was reversed mid-study.
+    "ability_safe": {"label": "How able are you to keep yourself safe right now?", "anchors": "see abilitySafeScale"},
     "thoughts_past_4hrs": {"label": "At any point in the last 4 hours, did you have any thoughts of killing yourself?", "anchors": "Yes / No"},
     "thoughts_duration": {"label": "How long did these thoughts last?", "anchors": "<1 min, 1-5 min, 6-10 min, 11-30 min, 31-60 min, >60 min"},
     "thoughts_intent": {"label": "How strong was your intent to act on these thoughts?", "anchors": "0 (Not at all) to 100 (Extremely)"},

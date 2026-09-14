@@ -101,6 +101,34 @@ const formatQuestionLabel = (key) => {
     .replace(/\b\w/g, c => c.toUpperCase());
 };
 
+// Safety-trigger threshold, mirroring assets/ema_questions.json.
+const EMA_THRESHOLD = 30;
+const EMA_TRIGGER_FIELDS = ['desire_intensity', 'intention_strength', 'ability_safe', 'thoughts_intent'];
+// SI fields that are dangerous when TRUE rather than when over a threshold.
+const EMA_BOOLEAN_RISK_FIELDS = ['thoughts_past_4hrs', 'safety_confirmed_danger'];
+
+// A trigger field's value in RISK units (higher = riskier), honouring the scale
+// THIS response was collected on. ability_safe was reversed mid-study, so 96
+// means "very able to stay safe" on the original scale and "barely able" on the
+// reversed one — the raw number alone cannot be coloured correctly.
+const emaRiskValue = (key, value, responses) => {
+  if (!EMA_TRIGGER_FIELDS.includes(key)) return null;
+  const n = typeof value === 'number' ? value : parseFloat(value);
+  if (!isFinite(n)) return null;
+  if (key !== 'ability_safe') return n;
+  return responses?.__ability_safe_scale === 'high_is_risk' ? n : 100 - n;
+};
+
+// Whether a response should actually be flagged, rather than merely being an SI
+// question. Previously every SI field rendered red, so "Ability to Stay Safe
+// 96.4/100" — a reassuring answer — looked like an alarm.
+const isEmaRisky = (key, value, responses) => {
+  const risk = emaRiskValue(key, value, responses);
+  if (risk !== null) return risk >= EMA_THRESHOLD;
+  if (EMA_BOOLEAN_RISK_FIELDS.includes(key)) return value === true || value === 'true' || value === 1;
+  return false;
+};
+
 // SI-related fields to show in safety alerts box
 const SI_RELATED_FIELDS = [
   'desire_intensity',
@@ -487,10 +515,15 @@ const DayDetailScreen = ({
                                   ? 'higher = less able (riskier)'
                                   : 'lower = less able (riskier)')
                               : null;
+                            const riskyAlert = isEmaRisky(key, value, alert.responses);
                             return (
-                            <div key={rIdx} className="border-l-3 border-red-400 pl-3 py-1 bg-red-50/50 rounded-r">
-                              <div className="text-xs text-red-600 font-medium mb-0.5">
+                            <div key={rIdx} className={`border-l-3 pl-3 py-1 rounded-r ${
+                              riskyAlert ? 'border-red-400 bg-red-50/50' : 'border-gray-300 bg-gray-50/50'
+                            }`}>
+                              <div className={`text-xs font-medium mb-0.5 ${
+                                riskyAlert ? 'text-red-600' : 'text-gray-500'}`}>
                                 {formatQuestionLabel(key)}
+                                {riskyAlert && <span className="ml-1 font-bold">TRIGGER</span>}
                               </div>
                               <div className="font-semibold text-gray-800">
                                 {formatSIResponseValue(key, value)}
@@ -647,6 +680,7 @@ const DayDetailScreen = ({
                           .filter(([key]) => !key.startsWith('__'))
                           .map(([key, value], rIdx) => {
                           const isSIField = SI_RELATED_FIELDS.includes(key);
+                          const risky = isEmaRisky(key, value, checkin.responses);
                           // ability_safe was reversed mid-study. Always state the
                           // direction THIS response was collected on, so a raw
                           // number is never read against the wrong scale.
@@ -657,10 +691,14 @@ const DayDetailScreen = ({
                             : null;
                           return (
                             <div key={rIdx} className={`text-sm border-l-2 pl-3 py-1 ${
-                              isSIField ? 'border-red-300 bg-red-50/30' : 'border-gray-300'
+                              risky ? 'border-red-400 bg-red-50'
+                                    : isSIField ? 'border-amber-200 bg-amber-50/30' : 'border-gray-300'
                             }`}>
-                              <div className={`text-xs mb-0.5 ${isSIField ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                              <div className={`text-xs mb-0.5 ${
+                                risky ? 'text-red-700 font-semibold'
+                                      : isSIField ? 'text-amber-700 font-medium' : 'text-gray-500'}`}>
                                 {formatQuestionLabel(key)}
+                                {risky && <span className="ml-1 text-red-600 font-bold">TRIGGER</span>}
                               </div>
                               <div className="font-medium text-gray-800">
                                 {formatSIResponseValue(key, value)}
