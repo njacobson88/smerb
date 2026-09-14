@@ -686,11 +686,17 @@ def register_risk_assessment_routes(app, db, limiter, verify_firebase_token, con
             latest_ema, ema_score, ema_imminent = _fetch_latest_ema(p_ref)
             cssrs_screen, screen_sev = _fetch_latest_cssrs(p_ref, "latest_screen")
             cssrs_pediatric, ped_sev = _fetch_latest_cssrs(p_ref, "latest_pediatric")
+            # The WEEKLY C-SSRS lives in its own document. The dashboard section
+            # labelled "C-SSRS Screen (Weekly)" was rendering latest_screen — the
+            # interview screener — which is empty for REDCap-enrolled
+            # participants, so the weekly answers never appeared even though they
+            # had synced correctly.
+            cssrs_weekly, weekly_sev = _fetch_latest_cssrs(p_ref, "latest_weekly")
             safety_plan = _fetch_safety_plan(p_ref)
             alerts = _fetch_alert_history(p_ref)
             safety_confirmations = _fetch_safety_confirmations(p_ref)
 
-            cssrs_severity = max(screen_sev, ped_sev)
+            cssrs_severity = max(screen_sev, ped_sev, weekly_sev)
             cssrs_crisis = (
                 (cssrs_screen and cssrs_screen.get("crisisTriggered")) or
                 (cssrs_pediatric and cssrs_pediatric.get("crisisTriggered"))
@@ -739,6 +745,7 @@ def register_risk_assessment_routes(app, db, limiter, verify_firebase_token, con
                 "cssrsSeverity": cssrs_severity,
                 "latestEma": latest_ema,
                 "cssrsScreen": cssrs_screen,
+                "cssrsWeekly": cssrs_weekly,
                 "cssrsPediatric": cssrs_pediatric,
                 "safetyPlan": safety_plan,
                 "alertHistory": alerts,

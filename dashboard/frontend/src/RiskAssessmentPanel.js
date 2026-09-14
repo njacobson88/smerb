@@ -60,6 +60,12 @@ const RiskAssessmentPanel = ({ participantId }) => {
     } catch { return '—'; }
   };
 
+  // Most recent threshold crossing (the API returns them newest-first).
+  const latestConfirmation = (assessment.safetyConfirmations || [])[0] || null;
+  // The weekly C-SSRS has its own document. Older records only have the
+  // interview screener, so fall back to it rather than showing nothing.
+  const weeklyCssrs = assessment.cssrsWeekly || assessment.cssrsScreen || null;
+
   return (
     <div className="space-y-4">
       {/* Risk Level Header */}
@@ -79,6 +85,33 @@ const RiskAssessmentPanel = ({ participantId }) => {
               <div className="text-xs text-gray-600 mt-1">
                 EMA Score: <strong>{assessment.emaScore}</strong> | C-SSRS Severity: <strong>{assessment.cssrsSeverity}</strong>
               </div>
+              {/* Most recent imminent-risk prompt and what the participant
+                  answered. Shown in the header for EVERY participant so a
+                  HIGH badge is never read without knowing whether the person
+                  was asked directly and denied being in danger. */}
+              {latestConfirmation && (
+                <div className={`mt-2 text-xs px-2 py-1 rounded inline-block border ${
+                  latestConfirmation.confirmedDanger
+                    ? 'bg-red-100 border-red-400 text-red-900 font-semibold'
+                    : latestConfirmation.deniedDanger
+                      ? 'bg-green-100 border-green-400 text-green-900'
+                      : 'bg-amber-100 border-amber-400 text-amber-900'
+                }`}>
+                  <span className="font-semibold">Imminent-risk prompt:</span>{' '}
+                  {latestConfirmation.resolutionLabel}
+                  {latestConfirmation.triggerQuestions?.length > 0 && (
+                    <> — triggered by {latestConfirmation.triggerQuestions.map(q =>
+                      `${q}${latestConfirmation.triggerValues?.[q] !== undefined
+                        ? ` = ${latestConfirmation.triggerValues[q]}` : ''}`).join(', ')}</>
+                  )}
+                  {' '}({fmtDate(latestConfirmation.thresholdExceededAt)})
+                </div>
+              )}
+              {!latestConfirmation && (
+                <div className="mt-2 text-xs text-gray-500">
+                  No imminent-risk prompt has been triggered for this participant.
+                </div>
+              )}
             </div>
           </div>
           <div className="flex gap-2">
@@ -256,8 +289,8 @@ const RiskAssessmentPanel = ({ participantId }) => {
       {/* C-SSRS Screen (Weekly) */}
       <CollapsibleSection title="C-SSRS Screen (Weekly)" icon={<ClipboardList size={18} />} color="purple"
         expanded={expanded.cssrsScreen} onToggle={() => toggle('cssrsScreen')}
-        badge={assessment.cssrsScreen ? `Severity: ${assessment.cssrsScreen.severity}` : 'Not synced'}>
-        {assessment.cssrsScreen ? (
+        badge={weeklyCssrs ? `Severity: ${weeklyCssrs.severity}` : 'Not synced'}>
+        {weeklyCssrs ? (
           <table className="w-full text-sm border-collapse">
             <thead>
               <tr className="bg-gray-50">
@@ -266,9 +299,15 @@ const RiskAssessmentPanel = ({ participantId }) => {
               </tr>
             </thead>
             <tbody>
-              {Object.entries(assessment.cssrsScreen.questions || {}).map(([field, q]) => {
+              {Object.entries(weeklyCssrs.questions || {}).map(([field, q]) => {
                 const val = q.value;
-                const isCrisis = ['cssrs_scr_4', 'cssrs_scr_5', 'cssrs_scr_6'].includes(field) && val === true;
+                // Weekly field ids carry a "cssrs_wkly" suffix (e.g.
+                // cssrs_scr_4cssrs_wkly), so match on the base id rather than
+                // an exact name — otherwise crisis rows never highlight.
+                const base = field.replace(/cssrs_wkly$/, '');
+                const isCrisis =
+                  (['cssrs_scr_4', 'cssrs_scr_5', 'cssrs_scr_6'].includes(base) ||
+                   (weeklyCssrs.crisisTriggerFields || []).includes(field)) && val === true;
                 return (
                   <tr key={field} className={isCrisis ? 'bg-red-50 font-semibold text-red-800' : ''}>
                     <td className="p-2 border-b">{q.label}</td>
