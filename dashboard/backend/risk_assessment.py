@@ -143,6 +143,69 @@ def _fetch_safety_plan(p_ref):
     return doc.to_dict() if doc.exists else None
 
 
+# Human-readable meaning of each pending_safety_confirmation resolution.
+SAFETY_CONFIRMATION_RESOLUTIONS = {
+    "denied_danger": ("Participant said they were NOT in danger",
+                      "The participant was asked directly and denied imminent risk."),
+    "confirmed_danger": ("Participant CONFIRMED they were in danger",
+                         "The participant confirmed imminent risk — escalation applies."),
+    "completed_checkin": ("Resolved by completing the check-in",
+                          "The participant finished the check-in without answering the danger prompt."),
+    "walk_away_alert_sent": ("No response — walk-away alert sent",
+                             "The participant left without answering; the team was alerted."),
+}
+
+
+def _fetch_safety_confirmations(p_ref, limit=20):
+    """Threshold crossings during check-ins, and how each one was RESOLVED.
+
+    A trigger on its own is not a crisis. The Risk Assessment Summary showed the
+    triggering item highlighted but never showed that the participant had been
+    asked "are you in immediate danger?" and said no — so a check-in where every
+    crossing was denied still read as unexplained HIGH RISK, and reviewers could
+    not tell whether anyone had been notified.
+    """
+    try:
+        docs = list(
+            p_ref.collection("pending_safety_confirmations")
+            .order_by("thresholdExceededAt", direction=firestore.Query.DESCENDING)
+            .limit(limit).stream()
+        )
+    except Exception:
+        return []
+
+    out = []
+    for d in docs:
+        v = d.to_dict() or {}
+        resolution = v.get("resolution")
+        label, detail = SAFETY_CONFIRMATION_RESOLUTIONS.get(
+            resolution, (resolution or "Unresolved", "Still awaiting a response."))
+        responses = v.get("responses") or {}
+        triggers = v.get("triggerQuestions") or []
+        # Surface the value that actually tripped each trigger.
+        trigger_values = {}
+        for q in triggers:
+            if q in responses:
+                try:
+                    trigger_values[q] = round(float(responses[q]), 1)
+                except (TypeError, ValueError):
+                    trigger_values[q] = responses[q]
+        out.append({
+            "id": d.id,
+            "thresholdExceededAt": v.get("thresholdExceededAt"),
+            "resolvedAt": v.get("resolvedAt"),
+            "resolved": bool(v.get("resolved")),
+            "resolution": resolution,
+            "resolutionLabel": label,
+            "resolutionDetail": detail,
+            "deniedDanger": resolution == "denied_danger",
+            "confirmedDanger": resolution == "confirmed_danger",
+            "triggerQuestions": triggers,
+            "triggerValues": trigger_values,
+        })
+    return out
+
+
 def _fetch_alert_history(p_ref, limit=20):
     """Fetch recent safety alerts."""
     docs = list(
@@ -625,6 +688,7 @@ def register_risk_assessment_routes(app, db, limiter, verify_firebase_token, con
             cssrs_pediatric, ped_sev = _fetch_latest_cssrs(p_ref, "latest_pediatric")
             safety_plan = _fetch_safety_plan(p_ref)
             alerts = _fetch_alert_history(p_ref)
+            safety_confirmations = _fetch_safety_confirmations(p_ref)
 
             cssrs_severity = max(screen_sev, ped_sev)
             cssrs_crisis = (
@@ -678,6 +742,7 @@ def register_risk_assessment_routes(app, db, limiter, verify_firebase_token, con
                 "cssrsPediatric": cssrs_pediatric,
                 "safetyPlan": safety_plan,
                 "alertHistory": alerts,
+                "safetyConfirmations": safety_confirmations,
                 "contactInfo": contact_info,
                 "participantInfo": {
                     "enrolledAt": participant_data.get("enrolledAt"),

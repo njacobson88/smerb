@@ -3,7 +3,7 @@
 // Includes PDF generation + Slack distribution.
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { AlertTriangle, FileText, RefreshCw, Send, Shield, Activity, ClipboardList } from 'lucide-react';
+import { AlertTriangle, FileText, RefreshCw, Send, Shield, Activity, ClipboardList, MessageCircleQuestion } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
 
 const RISK_COLORS = {
@@ -19,7 +19,7 @@ const RiskAssessmentPanel = ({ participantId }) => {
   const [error, setError] = useState(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfResult, setPdfResult] = useState(null);
-  const [expanded, setExpanded] = useState({ ema: true, cssrsScreen: true, cssrsPed: false, plan: false, alerts: false });
+  const [expanded, setExpanded] = useState({ ema: true, confirmations: true, cssrsScreen: true, cssrsPed: false, plan: false, alerts: false });
 
   const fetchAssessment = useCallback(async () => {
     setLoading(true);
@@ -195,6 +195,64 @@ const RiskAssessmentPanel = ({ participantId }) => {
         ) : <p className="text-gray-500 text-sm p-2">No EMA data available</p>}
       </CollapsibleSection>
 
+      {/* Imminent-risk confirmations — what the participant said when a
+          trigger fired. Without this, a highlighted TRIGGER row read as an
+          unexplained HIGH RISK state even when the participant was asked
+          directly and denied being in danger. */}
+      <CollapsibleSection
+        title="Imminent-Risk Confirmations"
+        icon={<MessageCircleQuestion size={18} />}
+        color="amber"
+        expanded={expanded.confirmations}
+        onToggle={() => toggle('confirmations')}
+        badge={`${assessment.safetyConfirmations?.length || 0} triggered`}>
+        {assessment.safetyConfirmations?.length > 0 ? (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-500 px-1">
+              When a check-in answer crosses the safety threshold, the app asks the
+              participant directly whether they are in immediate danger. A trigger on
+              its own is not a crisis — this is what they answered.
+            </p>
+            {assessment.safetyConfirmations.map((c) => {
+              const denied = c.deniedDanger;
+              const confirmed = c.confirmedDanger;
+              const tone = confirmed
+                ? 'bg-red-50 border-red-300'
+                : denied
+                  ? 'bg-green-50 border-green-300'
+                  : 'bg-amber-50 border-amber-300';
+              const textTone = confirmed
+                ? 'text-red-800'
+                : denied ? 'text-green-800' : 'text-amber-800';
+              return (
+                <div key={c.id} className={`border rounded p-3 ${tone}`}>
+                  <div className={`font-semibold text-sm ${textTone}`}>
+                    {confirmed ? '\u26A0 ' : denied ? '\u2713 ' : ''}{c.resolutionLabel}
+                  </div>
+                  <div className="text-xs text-gray-600 mt-1">{c.resolutionDetail}</div>
+                  <div className="text-xs text-gray-600 mt-2">
+                    <span className="font-medium">Triggered by:</span>{' '}
+                    {(c.triggerQuestions || []).map((q) => (
+                      <span key={q} className="inline-block mr-2">
+                        {q}{c.triggerValues?.[q] !== undefined ? ` = ${c.triggerValues[q]}` : ''}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Triggered {fmtDate(c.thresholdExceededAt)}
+                    {c.resolvedAt ? ` \u2014 answered ${fmtDate(c.resolvedAt)}` : ' \u2014 not yet answered'}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-gray-500 text-sm p-2">
+            No safety thresholds have been crossed during a check-in.
+          </p>
+        )}
+      </CollapsibleSection>
+
       {/* C-SSRS Screen (Weekly) */}
       <CollapsibleSection title="C-SSRS Screen (Weekly)" icon={<ClipboardList size={18} />} color="purple"
         expanded={expanded.cssrsScreen} onToggle={() => toggle('cssrsScreen')}
@@ -361,11 +419,11 @@ const RiskAssessmentPanel = ({ participantId }) => {
 const CollapsibleSection = ({ title, icon, color, expanded, onToggle, badge, children }) => {
   const colorMap = {
     blue: 'border-blue-300', purple: 'border-purple-300', indigo: 'border-indigo-300',
-    teal: 'border-teal-300', red: 'border-red-300',
+    teal: 'border-teal-300', red: 'border-red-300', amber: 'border-amber-300',
   };
   const textMap = {
     blue: 'text-blue-600', purple: 'text-purple-600', indigo: 'text-indigo-600',
-    teal: 'text-teal-600', red: 'text-red-600',
+    teal: 'text-teal-600', red: 'text-red-600', amber: 'text-amber-600',
   };
 
   return (
