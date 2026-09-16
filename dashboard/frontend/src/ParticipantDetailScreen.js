@@ -47,6 +47,8 @@ const ParticipantDetailScreen = ({
   const [exportDownload, setExportDownload] = useState(null);
   const [exportLevel, setExportLevel] = useState(1);
   const [showExportOptions, setShowExportOptions] = useState(false);
+  // Researchers can download WITHOUT participant metadata (de-identified).
+  const [includeMetadata, setIncludeMetadata] = useState(true);
   const [showExportConfirm, setShowExportConfirm] = useState(false);
   const [pendingExportLevel, setPendingExportLevel] = useState(null);
   const [activeExport, setActiveExport] = useState(null); // Track async export job
@@ -370,7 +372,8 @@ const ParticipantDetailScreen = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             participant_id: currentParticipantId,
-            export_level: level
+            export_level: level,
+            include_participant_metadata: includeMetadata
           })
         });
 
@@ -402,7 +405,8 @@ const ParticipantDetailScreen = ({
         // Synchronous export for Level 1 and 2
         const params = new URLSearchParams({
           participant_id: currentParticipantId,
-          export_level: level.toString()
+          export_level: level.toString(),
+          include_participant_metadata: includeMetadata.toString()
         });
         const response = await authFetch(`${API_BASE_URL}/api/export?${params}`);
 
@@ -1099,6 +1103,34 @@ const ParticipantDetailScreen = ({
                       </div>
                     </button>
                   ))}
+                </div>
+                {/* Participant metadata toggle — applies to whichever level is
+                    chosen. Off produces a de-identified download with no
+                    participant id and no contact details anywhere in it. */}
+                <div className="border-t px-3 py-3 bg-gray-50 rounded-b-lg">
+                  <label className="flex items-start cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={includeMetadata}
+                      onChange={(e) => setIncludeMetadata(e.target.checked)}
+                      className="mt-0.5 mr-2"
+                    />
+                    <span className="text-sm">
+                      <span className="font-medium text-gray-800">
+                        Include participant metadata
+                      </span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        {includeMetadata
+                          ? 'Download includes the participant ID, name, contact details and emergency contacts.'
+                          : 'De-identified: no participant ID and no contact details anywhere in the download. Cannot be linked back to a participant.'}
+                      </span>
+                    </span>
+                  </label>
+                  {!includeMetadata && (
+                    <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      Measurement data is unchanged — only identifiers are removed.
+                    </div>
+                  )}
                 </div>
               </div>
             )}

@@ -2554,6 +2554,10 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
             "screenshots": 0, "ocr_words": 0, "reddit": 0, "twitter": 0
         })
         platform_totals = {"reddit": 0, "twitter": 0, "other": 0}
+        # OCR words per platform. platform_breakdown previously carried only a
+        # screenshot count, so the Platform Summary always rendered "0 words"
+        # even though the hourly chart on the same page showed them.
+        platform_ocr_words = {"reddit": 0, "twitter": 0, "other": 0}
 
         for event_doc in events_query.stream():
             event = event_doc.to_dict()
@@ -2579,15 +2583,20 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
                 if platform == "reddit":
                     hourly_counts[hour]["reddit"] += 1
                     platform_totals["reddit"] += 1
+                    platform_key = "reddit"
                 elif platform in ("twitter", "x"):
                     hourly_counts[hour]["twitter"] += 1
                     platform_totals["twitter"] += 1
+                    platform_key = "twitter"
                 else:
                     platform_totals["other"] += 1
+                    platform_key = "other"
 
                 ocr = event.get("ocr", {})
                 if ocr:
-                    hourly_counts[hour]["ocr_words"] += ocr.get("wordCount", 0)
+                    word_count = ocr.get("wordCount", 0) or 0
+                    hourly_counts[hour]["ocr_words"] += word_count
+                    platform_ocr_words[platform_key] += word_count
 
             events.append({
                 "id": event_doc.id,
@@ -2813,9 +2822,12 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
             "crisis_indicated": crisis_indicated,
             "hourly_activity": hourly_activity,
             "platform_breakdown": {
-                "reddit": {"screenshots": platform_totals["reddit"]},
-                "twitter": {"screenshots": platform_totals["twitter"]},
-                "other": {"screenshots": platform_totals["other"]},
+                "reddit": {"screenshots": platform_totals["reddit"],
+                           "ocr_words": platform_ocr_words["reddit"]},
+                "twitter": {"screenshots": platform_totals["twitter"],
+                            "ocr_words": platform_ocr_words["twitter"]},
+                "other": {"screenshots": platform_totals["other"],
+                          "ocr_words": platform_ocr_words["other"]},
             },
             "events": events[:100],  # Limit to 100 events for performance
             "checkins": checkins,
@@ -3173,9 +3185,52 @@ def screenshot_view(path: str = Query(...), token: str = Query(...)):
 EXPORT_JOBS_COLLECTION = config.col("export_jobs")
 
 
+# Participant-level identifying fields. When a researcher exports WITHOUT
+# participant metadata these are stripped from every record, not just from
+# participant_metadata.json — otherwise the identifiers simply reappear inside
+# events, check-ins and alerts and the download is not actually de-identified.
+PARTICIPANT_METADATA_FIELDS = {
+    "participantId", "participant_id", "id",
+    "name", "phone", "phoneNormalized", "phoneNumber", "email",
+    "distributionEmail", "address", "county", "homeType",
+    "erServiceNumber", "emergencyContacts", "redcapRecordId",
+    "redcap_record_id", "fcmToken", "enrollmentSecretHash",
+    "enrollmentLinkLastSentTo", "createdBy", "distributionInviteSentBy",
+}
+
+
+def strip_participant_metadata(obj):
+    """Recursively drop participant-identifying fields from exported data."""
+    if isinstance(obj, dict):
+        return {k: strip_participant_metadata(v)
+                for k, v in obj.items() if k not in PARTICIPANT_METADATA_FIELDS}
+    if isinstance(obj, list):
+        return [strip_participant_metadata(v) for v in obj]
+    return obj
+
+
+EXPORT_DEIDENTIFIED_README = """PARTICIPANT METADATA EXCLUDED
+
+This export was generated with participant metadata turned OFF.
+
+Removed:
+  - participant_metadata.json (the whole file)
+  - the participant ID and every participant-level identifying field
+    (name, phone, email, address, county, emergency contacts, ER number,
+    REDCap record id, device/push tokens) wherever they appeared, including
+    inside events, check-ins, safety alerts and notification logs.
+
+Kept: all measurement data — check-in responses, events, OCR, screenshots
+(per the export level), timestamps and session ids.
+
+Because the participant id is removed, this download CANNOT be linked back to a
+participant or joined to another export. Re-run with participant metadata
+enabled if you need linkage.
+"""
+
 def run_background_export(job_id: str, participant_id: str, export_level: int,
                           start_date: Optional[str], end_date: Optional[str],
-                          user_email: str):
+                          user_email: str, include_participant_metadata: bool = True):
     """Background thread function to run export and update job status.
 
     Optimizations:
@@ -3208,9 +3263,12 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
 
         # Use ZIP_DEFLATED for text, but we'll use ZIP_STORED for images
         with zipfile.ZipFile(export_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # Export participant metadata
-            if participant_data:
-                zf.writestr("participant_metadata.json", json.dumps(participant_data, indent=2, default=str))
+            # Export participant metadata (unless the researcher opted out).
+            if include_participant_metadata:
+                if participant_data:
+                    zf.writestr("participant_metadata.json", json.dumps(participant_data, indent=2, default=str))
+            else:
+                zf.writestr("README_DEIDENTIFIED.txt", EXPORT_DEIDENTIFIED_README)
 
             # Export EMA responses
             try:
@@ -3230,7 +3288,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                             pass
                     checkins_data.append({"id": checkin_doc.id, **checkin})
                 if checkins_data:
-                    zf.writestr("ema_responses.json", json.dumps(checkins_data, indent=2, default=str))
+                    zf.writestr("ema_responses.json", json.dumps(checkins_data if include_participant_metadata else strip_participant_metadata(checkins_data), indent=2, default=str))
                     # Explain the ability_safe scale reversal for THIS participant
                     # (values are never altered — the note says how to read them).
                     _note = build_ability_safe_note(checkins_data)
@@ -3251,7 +3309,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                             alert[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
                     alerts_data.append({"id": alert_doc.id, **alert})
                 if alerts_data:
-                    zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
+                    zf.writestr("safety_alerts.json", json.dumps(alerts_data if include_participant_metadata else strip_participant_metadata(alerts_data), indent=2, default=str))
             except Exception as e:
                 logger.debug(f"Silently handled exception in safety alert export: {e}")
 
@@ -3267,7 +3325,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                             notif[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
                     notif_data.append({"id": notif_doc.id, **notif})
                 if notif_data:
-                    zf.writestr("notification_log.json", json.dumps(notif_data, indent=2, default=str))
+                    zf.writestr("notification_log.json", json.dumps(notif_data if include_participant_metadata else strip_participant_metadata(notif_data), indent=2, default=str))
             except Exception as e:
                 logger.debug(f"Error exporting notification log: {e}")
 
@@ -3311,7 +3369,7 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                 merge_content_events(events_data, participant_id, content_start_dt, content_end_dt)
 
                 if events_data:
-                    zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))
+                    zf.writestr("events.json", json.dumps(events_data if include_participant_metadata else strip_participant_metadata(events_data), indent=2, default=str))
 
                 # Level 3: Download screenshots concurrently
                 if export_level >= 3 and screenshot_infos:
@@ -3346,7 +3404,8 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
 
         # Generate filename and store result
         level_names = {1: "meta", 2: "ocr", 3: "full"}
-        filename = f"socialscope_export_{participant_id}_L{export_level}_{level_names.get(export_level, 'meta')}"
+        _who = participant_id if include_participant_metadata else "deidentified"
+        filename = f"socialscope_export_{_who}_L{export_level}_{level_names.get(export_level, 'meta')}"
         if start_date and end_date:
             filename += f"_{start_date}_to_{end_date}"
         filename += ".zip"
@@ -3496,6 +3555,9 @@ def estimate_export(
 
 
 class AsyncExportRequest(BaseModel):
+    # When False the download omits participant_metadata.json AND strips the
+    # participant id and every identifying field from the remaining records.
+    include_participant_metadata: bool = True
     participant_id: str
     export_level: int = 1
     start_date: Optional[str] = None
@@ -3534,6 +3596,7 @@ def start_async_export(
             "jobId": job_id,
             "participantId": body.participant_id,
             "exportLevel": body.export_level,
+            "includeParticipantMetadata": body.include_participant_metadata,
             "startDate": body.start_date,
             "endDate": body.end_date,
             "status": "pending",
@@ -3546,7 +3609,7 @@ def start_async_export(
         thread = threading.Thread(
             target=run_background_export,
             args=(job_id, body.participant_id, body.export_level,
-                  body.start_date, body.end_date, user_email),
+                  body.start_date, body.end_date, user_email, body.include_participant_metadata),
             daemon=True
         )
         thread.start()
@@ -3688,6 +3751,7 @@ def export_participant_data(
     request: Request,
     participant_id: str = Query(...),
     export_level: int = Query(1, ge=1, le=3, description="1=Meta+EMA, 2=+Events/OCR, 3=+Screenshots"),
+    include_participant_metadata: bool = Query(True, description="False omits participant metadata and all identifying fields"),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     user: dict = Depends(verify_firebase_token),
@@ -3723,9 +3787,12 @@ def export_participant_data(
         export_path = EXPORT_DIR / f"{export_id}.zip"
 
         with zipfile.ZipFile(export_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # Export participant metadata (all levels)
-            if participant_data:
-                zf.writestr("participant_metadata.json", json.dumps(participant_data, indent=2, default=str))
+            # Export participant metadata (unless the researcher opted out).
+            if include_participant_metadata:
+                if participant_data:
+                    zf.writestr("participant_metadata.json", json.dumps(participant_data, indent=2, default=str))
+            else:
+                zf.writestr("README_DEIDENTIFIED.txt", EXPORT_DEIDENTIFIED_README)
 
             # Export check-ins/EMA responses (all levels)
             try:
@@ -3746,7 +3813,7 @@ def export_participant_data(
                     checkins_data.append({"id": checkin_doc.id, **checkin})
 
                 if checkins_data:
-                    zf.writestr("ema_responses.json", json.dumps(checkins_data, indent=2, default=str))
+                    zf.writestr("ema_responses.json", json.dumps(checkins_data if include_participant_metadata else strip_participant_metadata(checkins_data), indent=2, default=str))
                     # Explain the ability_safe scale reversal for THIS participant
                     # (values are never altered — the note says how to read them).
                     _note = build_ability_safe_note(checkins_data)
@@ -3768,7 +3835,7 @@ def export_participant_data(
                     alerts_data.append({"id": alert_doc.id, **alert})
 
                 if alerts_data:
-                    zf.writestr("safety_alerts.json", json.dumps(alerts_data, indent=2, default=str))
+                    zf.writestr("safety_alerts.json", json.dumps(alerts_data if include_participant_metadata else strip_participant_metadata(alerts_data), indent=2, default=str))
             except Exception as e:
                 logger.debug(f"Silently handled exception in safety alert export: {e}")
 
@@ -3784,7 +3851,7 @@ def export_participant_data(
                             notif[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
                     notif_data.append({"id": notif_doc.id, **notif})
                 if notif_data:
-                    zf.writestr("notification_log.json", json.dumps(notif_data, indent=2, default=str))
+                    zf.writestr("notification_log.json", json.dumps(notif_data if include_participant_metadata else strip_participant_metadata(notif_data), indent=2, default=str))
             except Exception as e:
                 logger.debug(f"Error exporting notification log: {e}")
 
@@ -3833,7 +3900,7 @@ def export_participant_data(
                 merge_content_events(events_data, participant_id, content_start_dt, content_end_dt)
 
                 if events_data:
-                    zf.writestr("events.json", json.dumps(events_data, indent=2, default=str))
+                    zf.writestr("events.json", json.dumps(events_data if include_participant_metadata else strip_participant_metadata(events_data), indent=2, default=str))
 
                 # Level 3: Download screenshots concurrently
                 if export_level >= 3 and screenshot_infos:
@@ -3854,7 +3921,8 @@ def export_participant_data(
                     logger.info(f"Downloaded {len(downloaded)}/{len(screenshot_infos)} screenshots for sync export")
 
         level_names = {1: "meta", 2: "ocr", 3: "full"}
-        filename = f"socialscope_export_{participant_id}_L{export_level}_{level_names.get(export_level, 'meta')}"
+        _who = participant_id if include_participant_metadata else "deidentified"
+        filename = f"socialscope_export_{_who}_L{export_level}_{level_names.get(export_level, 'meta')}"
         if start_date and end_date:
             filename += f"_{start_date}_to_{end_date}"
         filename += ".zip"
