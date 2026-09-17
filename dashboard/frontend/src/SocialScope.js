@@ -1121,6 +1121,9 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
   const [rosterForm, setRosterForm] = useState({ name: '', email: '', phone: '' });
   const [rosterSaving, setRosterSaving] = useState(false);
   const [dashboardUsers, setDashboardUsers] = useState([]);
+  // Safety-alert SMS recipients (Users tab). They carry the phone numbers, which
+  // the roster previously required you to retype by hand.
+  const [alertRecipients, setAlertRecipients] = useState([]);
 
   // Follow-ups state
   const [followups, setFollowups] = useState([]);
@@ -1168,6 +1171,13 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
     } catch (e) { /* ignore */ }
   }, []);
 
+  const fetchAlertRecipients = React.useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_BASE_URL}/api/admin/alert-recipients`);
+      if (res.ok) { const data = await res.json(); setAlertRecipients(data.recipients || []); }
+    } catch (e) { /* non-admin may not have access, that's ok */ }
+  }, []);
+
   const fetchDashboardUsers = React.useCallback(async () => {
     try {
       const res = await authFetch(`${API_BASE_URL}/api/admin/users`);
@@ -1203,10 +1213,52 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
     fetchRoster();
     fetchFollowups();
     fetchDashboardUsers();
+    fetchAlertRecipients();
     fetchConferenceConfig();
     const interval = setInterval(fetchAlerts, 2 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [fetchAlerts, fetchRoster, fetchFollowups, fetchDashboardUsers, fetchConferenceConfig]);
+  }, [fetchAlerts, fetchRoster, fetchFollowups, fetchDashboardUsers, fetchAlertRecipients, fetchConferenceConfig]);
+
+  // One combined roster picker built from BOTH dashboard users and the safety-
+  // alert SMS recipients. Recipients supply the phone numbers, and anyone who is
+  // only a recipient (not a dashboard user) still needs to be assignable —
+  // otherwise a real on-call person is simply missing from the list.
+  const rosterOptions = React.useMemo(() => {
+    // Match people on FIRST + LAST name only. Emails carry middle initials
+    // (michael.v.heinz) and academic suffixes (...gatsonis.med) that the SMS
+    // recipient names do not, so an exact-name key lists everybody twice and
+    // leaves the phone attached to the wrong copy.
+    const SUFFIXES = new Set(['med', 'phd', 'md', 'ma', 'ms', 'gr', 'jr', 'sr', 'ii', 'iii', 'do', 'rn', 'msw']);
+    const personKey = (raw) => {
+      const parts = (raw || '').toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/)
+        .filter((t) => t && t.length > 1 && !SUFFIXES.has(t));
+      if (!parts.length) return '';
+      return parts.length === 1 ? parts[0] : `${parts[0]}${parts[parts.length - 1]}`;
+    };
+    const nameFromEmail = (email) => (email || '').split('@')[0]
+      .replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
+    const byPerson = new Map();
+
+    (dashboardUsers || []).forEach((u) => {
+      const name = nameFromEmail(u.email);
+      const k = personKey(name);
+      if (k) byPerson.set(k, { name, email: u.email, phone: '', role: u.role });
+    });
+
+    (alertRecipients || []).forEach((r) => {
+      const k = personKey(r.name);
+      if (!k) return;
+      const existing = byPerson.get(k);
+      if (existing) {
+        existing.phone = existing.phone || r.phone || '';
+        existing.name = r.name;   // prefer the human-entered name
+      } else {
+        byPerson.set(k, { name: r.name, email: '', phone: r.phone || '', role: 'sms recipient' });
+      }
+    });
+
+    return Array.from(byPerson.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [dashboardUsers, alertRecipients]);
 
   const saveRosterRole = async (role) => {
     setRosterSaving(true);
@@ -1271,7 +1323,8 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
 
   const startEditRole = (role) => {
     const current = roster[role] || {};
-    setRosterForm({ name: current.name || '', email: current.email || '', phone: current.phone || '' });
+    setRosterForm({ name: current.name || '', email: current.email || '',
+                    phone: current.phone || '', pickKey: current.name || '' });
     setRosterEditing(role);
   };
 
@@ -1309,28 +1362,40 @@ const AlertsScreen = ({ goToParticipantView, goToRiskAssessment }) => {
                   <div className="space-y-2">
                     {/* Dropdown to select from dashboard users */}
                     <select
-                      value={rosterForm.email}
+                      value={rosterForm.pickKey || ''}
                       onChange={e => {
-                        const selectedEmail = e.target.value;
-                        if (selectedEmail === '__manual__') {
-                          setRosterForm({ name: '', email: '', phone: '' });
-                        } else {
-                          const user = dashboardUsers.find(u => u.email === selectedEmail);
-                          setRosterForm(f => ({
-                            ...f,
-                            email: selectedEmail,
-                            name: f.name || selectedEmail.split('@')[0].replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-                          }));
+                        const picked = e.target.value;
+                        if (picked === '__manual__') {
+                          setRosterForm({ name: '', email: '', phone: '', pickKey: '__manual__' });
+                          return;
                         }
+                        const opt = rosterOptions.find(o => o.name === picked);
+                        if (!opt) { setRosterForm(f => ({ ...f, pickKey: '' })); return; }
+                        // Auto-fill the phone from the Users tab SMS recipients so
+                        // it never has to be retyped (and can't be mistyped).
+                        setRosterForm({
+                          name: opt.name,
+                          email: opt.email,
+                          phone: opt.phone,
+                          pickKey: picked,
+                        });
                       }}
                       className="w-full border rounded px-2 py-1 text-sm bg-white"
                     >
                       <option value="">Select team member...</option>
-                      {dashboardUsers.map(u => (
-                        <option key={u.email} value={u.email}>{u.email} ({u.role})</option>
+                      {rosterOptions.map(o => (
+                        <option key={o.name} value={o.name}>
+                          {o.name}{o.phone ? ` — ${o.phone}` : ' — no phone on file'}
+                        </option>
                       ))}
                       <option value="__manual__">Enter manually...</option>
                     </select>
+                    {rosterForm.pickKey && rosterForm.pickKey !== '__manual__' && !rosterForm.phone && (
+                      <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                        No phone on file for this person — add them under Users →
+                        Safety Alert Recipients, or type a number below.
+                      </div>
+                    )}
                     <input value={rosterForm.name} onChange={e => setRosterForm(f => ({...f, name: e.target.value}))}
                       placeholder="Display name" className="w-full border rounded px-2 py-1 text-sm" />
                     <input value={rosterForm.email} onChange={e => setRosterForm(f => ({...f, email: e.target.value}))}

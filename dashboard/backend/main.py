@@ -2657,9 +2657,65 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
                     "responses": responses,
                     "crisis_indicated": checkin_has_crisis,
                     "selfInitiated": checkin.get("selfInitiated", False),
+                    "_ts": ts,
                 })
         except Exception as e:
             logger.warning(f"Error fetching checkins for day: {e}")
+
+        # Attach the imminent-risk prompt to the check-in it belongs to.
+        #
+        # When an answer crosses the safety threshold the app asks the
+        # participant directly whether they are in immediate danger. That answer
+        # was only visible on the Risk Assessment Summary, so reading a day's
+        # check-in you could see a flagged item but not what the participant said
+        # about it. Matched on sessionId, then by nearest time within the
+        # check-in, since a session can contain more than one check-in.
+        try:
+            confirmations = []
+            for cdoc in participant_ref.collection("pending_safety_confirmations").stream():
+                cv = cdoc.to_dict() or {}
+                c_ts = cv.get("thresholdExceededAt")
+                c_dt = datetime.fromtimestamp(c_ts.timestamp()) if hasattr(c_ts, "timestamp") else None
+                if not c_dt or not (target_date <= c_dt < target_date + timedelta(days=1)):
+                    continue
+                confirmations.append((c_dt, cv))
+
+            for ci in checkins:
+                ci_ts = ci.pop("_ts", None)
+                if not confirmations or ci_ts is None:
+                    ci["safetyConfirmation"] = None
+                    continue
+                # Prefer the same session; fall back to any that day.
+                pool = [c for c in confirmations if (c[1].get("sessionId") == ci.get("sessionId"))] or confirmations
+                # The prompt fires DURING the check-in, so pick the nearest one.
+                best = min(pool, key=lambda c: abs((c[0] - ci_ts).total_seconds()))
+                # Guard against attaching an unrelated prompt hours away.
+                if abs((best[0] - ci_ts).total_seconds()) > 1800:
+                    ci["safetyConfirmation"] = None
+                    continue
+                cv = best[1]
+                resolution = cv.get("resolution")
+                labels = {
+                    "denied_danger": "Participant said they were NOT in danger",
+                    "confirmed_danger": "Participant CONFIRMED they were in danger",
+                    "completed_checkin": "Resolved by completing the check-in",
+                    "walk_away_alert_sent": "No response — walk-away alert sent",
+                }
+                ci["safetyConfirmation"] = {
+                    "resolution": resolution,
+                    "resolutionLabel": labels.get(resolution, resolution or "Unresolved"),
+                    "deniedDanger": resolution == "denied_danger",
+                    "confirmedDanger": resolution == "confirmed_danger",
+                    "triggerQuestions": cv.get("triggerQuestions") or [],
+                    "thresholdExceededAt": best[0].isoformat(),
+                    "resolvedAt": (datetime.fromtimestamp(cv["resolvedAt"].timestamp()).isoformat()
+                                   if hasattr(cv.get("resolvedAt"), "timestamp") else None),
+                }
+        except Exception as e:
+            logger.warning(f"Error attaching safety confirmations: {e}")
+            for ci in checkins:
+                ci.pop("_ts", None)
+                ci.setdefault("safetyConfirmation", None)
 
         # Get safety alerts for this day
         # Also match with corresponding EMA responses for full SI data

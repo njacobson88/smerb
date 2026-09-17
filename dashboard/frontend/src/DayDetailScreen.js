@@ -673,6 +673,35 @@ const DayDetailScreen = ({
                         </span>
                       )}
                     </div>
+                    {/* The imminent-risk prompt belongs with the answers it was
+                        triggered by — a flagged item is not a crisis if the
+                        participant was asked directly and said no. */}
+                    {checkin.safetyConfirmation && (
+                      <div className={`mb-3 rounded border px-3 py-2 ${
+                        checkin.safetyConfirmation.confirmedDanger
+                          ? 'bg-red-100 border-red-400'
+                          : checkin.safetyConfirmation.deniedDanger
+                            ? 'bg-green-50 border-green-400'
+                            : 'bg-amber-50 border-amber-400'
+                      }`}>
+                        <div className={`text-sm font-semibold ${
+                          checkin.safetyConfirmation.confirmedDanger
+                            ? 'text-red-800'
+                            : checkin.safetyConfirmation.deniedDanger ? 'text-green-800' : 'text-amber-800'
+                        }`}>
+                          {checkin.safetyConfirmation.confirmedDanger ? '\u26A0 ' :
+                           checkin.safetyConfirmation.deniedDanger ? '\u2713 ' : ''}
+                          Imminent-risk prompt: {checkin.safetyConfirmation.resolutionLabel}
+                        </div>
+                        <div className="text-xs text-gray-600 mt-0.5">
+                          Asked because{' '}
+                          {(checkin.safetyConfirmation.triggerQuestions || [])
+                            .map(q => formatQuestionLabel(q)).join(', ') || 'a response'}
+                          {' '}crossed the safety threshold.
+                        </div>
+                      </div>
+                    )}
+
                     {/* Display responses as key-value pairs with SI-friendly labels */}
                     {checkin.responses && Object.keys(checkin.responses).length > 0 ? (
                       <div className="grid grid-cols-2 gap-x-6 gap-y-2">
