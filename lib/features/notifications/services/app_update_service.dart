@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../core/config/environment_config.dart';
 
@@ -8,12 +9,28 @@ import '../../../core/config/environment_config.dart';
 /// version stored in Firestore. If a newer version is available,
 /// shows a dialog prompting the user to update via Firebase App Distribution.
 class AppUpdateService {
-  // Current app build number — increment this with each release
-  static const int currentBuildNumber = 1;
+  /// The build number actually installed, read from the package at runtime.
+  ///
+  /// This used to be a hardcoded `1` that nobody remembered to bump, so the
+  /// comparison below was effectively "is the published build newer than 1" —
+  /// true for every release forever. Publishing a version would have nagged
+  /// participants who were ALREADY up to date, on every launch.
+  static Future<int> installedBuildNumber() async {
+    try {
+      return int.tryParse((await PackageInfo.fromPlatform()).buildNumber) ?? 0;
+    } catch (e) {
+      print('[AppUpdate] Could not read build number: $e');
+      return 0;
+    }
+  }
 
   /// Check for updates on app launch.
   static Future<void> checkForUpdate(BuildContext context) async {
     try {
+      final currentBuildNumber = await installedBuildNumber();
+      // Unknown build: stay silent rather than nag on a bad read.
+      if (currentBuildNumber == 0) return;
+
       final doc = await FirebaseFirestore.instance
           .collection(EnvConfig.col('app_config'))
           .doc('latest_version')

@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:io' show Platform;
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:app_links/app_links.dart';
@@ -271,6 +274,34 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
     await svc.cancelNotifications();
   }
 
+  Future<PackageInfo?> _safePackageInfo() async {
+    try {
+      return await PackageInfo.fromPlatform();
+    } catch (e) {
+      print('[App] package info unavailable: $e');
+      return null;
+    }
+  }
+
+  /// Best-effort: never let version telemetry block or break startup.
+  Future<void> _recordAppVersion(String participantId, PackageInfo? pkg) async {
+    if (pkg == null) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection(EnvConfig.col('participants'))
+          .doc(participantId)
+          .set({
+        'appVersion': pkg.version,
+        'appBuildNumber': int.tryParse(pkg.buildNumber) ?? 0,
+        'appVersionUpdatedAt': FieldValue.serverTimestamp(),
+        'appPlatform': Platform.isIOS ? 'ios' : 'android',
+      }, SetOptions(merge: true)).timeout(const Duration(seconds: 10));
+      print('[App] Recorded app version ${pkg.version}+${pkg.buildNumber}');
+    } catch (e) {
+      print('[App] Failed to record app version: $e');
+    }
+  }
+
   Future<void> _initializeServices() async {
     // Get participant ID from service
     final participantId = await _participantService.getParticipantId();
@@ -310,13 +341,26 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
     // Start background sync
     _backgroundSyncService!.start();
 
-    // Start a session
+    // Start a session. platform/app_version were previously hardcoded to
+    // 'ios' / '1.0.0' for every device, which is wrong on Android and wrong on
+    // every release since 1.0.0 — so this told us nothing.
+    final pkg = await _safePackageInfo();
     await _captureService!.startSession(
       deviceInfo: {
-        'platform': 'ios',
-        'app_version': '1.0.0',
+        'platform': Platform.isIOS ? 'ios' : 'android',
+        'app_version': pkg?.version ?? 'unknown',
+        'build_number': pkg?.buildNumber ?? 'unknown',
       },
     );
+
+    // Record the installed build on the participant document.
+    //
+    // There was NO record anywhere of which app version a participant was
+    // running: session deviceInfo never leaves the device, and the check-in
+    // stamp only exists from 1.0.17. Diagnosing a stale install meant inferring
+    // it from which telemetry happened to be missing. This is one small write
+    // per launch and makes the answer directly queryable.
+    await _recordAppVersion(participantId, pkg);
 
     // Initialize push notifications
     final pushService = PushNotificationService(participantId: participantId);

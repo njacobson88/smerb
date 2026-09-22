@@ -668,6 +668,26 @@ const ParticipantDetailScreen = ({
                 <span className="ml-2 text-sm text-red-500">{activeStatusError}</span>
               )}
             </div>
+            {summary && (summary.app_version || summary.app_build_number) && (() => {
+              const latest = summary.latest_build_number;
+              const stale = latest != null && summary.app_build_number != null
+                && summary.app_build_number < latest;
+              return (
+                <div className={`mt-1 inline-block text-xs px-2 py-1 rounded border ${
+                  stale ? 'bg-amber-100 border-amber-400 text-amber-900'
+                        : 'bg-gray-100 border-gray-300 text-gray-600'
+                }`}>
+                  App {summary.app_version || '?'}
+                  {summary.app_build_number ? ` (${summary.app_build_number})` : ''}
+                  {stale && <span className="font-semibold"> — UPDATE NEEDED (latest {latest})</span>}
+                </div>
+              );
+            })()}
+            {summary && !summary.app_version && (
+              <div className="mt-1 inline-block text-xs px-2 py-1 rounded border bg-amber-100 border-amber-400 text-amber-900">
+                App version unknown — participant has not opened a build that reports it
+              </div>
+            )}
             {summary && (
               <div className="text-gray-600 text-sm space-y-1">
                 <div className="flex items-center">

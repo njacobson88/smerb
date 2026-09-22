@@ -561,6 +561,22 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
                             <User size={16} className="mr-2 text-gray-400" />
                             {participant.id}
                           </button>
+                          {participant.app_version && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-gray-100 text-gray-600 border border-gray-300"
+                              title={`App version ${participant.app_version}`}
+                            >
+                              v{participant.app_version}
+                            </span>
+                          )}
+                          {!participant.app_version && !isTest && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-amber-100 text-amber-800 border border-amber-300"
+                              title="No app version reported — this participant may be on an old build that predates version reporting."
+                            >
+                              version unknown
+                            </span>
+                          )}
                           {isTest && (
                             <span
                               className="ml-2 px-1.5 py-0.5 text-xs font-semibold rounded bg-amber-500 text-white"

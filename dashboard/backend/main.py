@@ -956,6 +956,22 @@ def get_all_participant_ids(enrolled_only: bool = True, use_cache: bool = False)
     return participants_info
 
 
+def _latest_build_number():
+    """Build number of the newest published release, from app_config.
+
+    Lets the dashboard flag participants running a stale build. Returns None if
+    the config document has not been published, in which case the dashboard
+    simply shows the version without a staleness judgement rather than guessing.
+    """
+    try:
+        doc = db.collection(config.col("app_config")).document("latest_version").get()
+        if doc.exists:
+            return (doc.to_dict() or {}).get("buildNumber")
+    except Exception as e:
+        logger.debug(f"latest_version lookup failed: {e}")
+    return None
+
+
 def resolve_study_start(participant_data: Optional[dict], fallback=None) -> Optional[datetime]:
     """Resolve a participant's study start date.
 
@@ -1872,6 +1888,8 @@ def get_overall_status(
                     "study_start_date": study_start_str,
                     "is_active": is_active,
                 "is_test_participant": bool((p_data or {}).get("isTestParticipant")),
+                "app_version": (p_data or {}).get("appVersion"),
+                "app_build_number": (p_data or {}).get("appBuildNumber"),
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
                     "weeklyCheckins": total_checkins,
@@ -2002,6 +2020,8 @@ def get_overall_status(
                 # paused on a full cache (data-loss risk; usually a long offline gap).
                 "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
                 "is_test_participant": bool((p_info.get("data") or {}).get("isTestParticipant")),
+                "app_version": (p_info.get("data") or {}).get("appVersion"),
+                "app_build_number": (p_info.get("data") or {}).get("appBuildNumber"),
             })
 
         # Same exclusion as the cached path above.
@@ -2312,6 +2332,10 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
             "is_active": is_active,
             "is_active_manual": is_active_manual,
             "is_test_participant": bool(participant_data.get("isTestParticipant")),
+            "app_version": participant_data.get("appVersion"),
+            "app_build_number": participant_data.get("appBuildNumber"),
+            "app_version_updated_at": participant_data.get("appVersionUpdatedAt"),
+            "latest_build_number": _latest_build_number(),
             "inactive_reason": inactive_reason,
             "study_day": min(study_day, 90) if is_active else 90,
             "days_remaining": max(0, 90 - days_since_start) if is_active else 0,
