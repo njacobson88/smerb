@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Download, Loader2, Camera, FileText, AlertTriangle, RefreshCw, Clock, CheckCircle, XCircle, Pencil, Save, X } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
+import ParticipantNotesPanel from './ParticipantNotesPanel';
 
 // Color constants
 const COLORS = {
@@ -917,6 +918,19 @@ const ParticipantDetailScreen = ({
                   {complianceData.weekly.emoji} Weekly: {complianceData.weekly.compliance_pct}%
                 </span>
               )}
+              {/* Weekly REDCap survey — completed in the past 7 days? */}
+              {complianceData?.weeklySurvey && (
+                <span className={`px-2 py-1 text-xs font-medium rounded ${
+                  complianceData.weeklySurvey.status === 'completed' ? 'bg-green-100 text-green-800' :
+                  complianceData.weeklySurvey.status === 'partial' ? 'bg-amber-100 text-amber-800' :
+                  complianceData.weeklySurvey.status === 'unknown' ? 'bg-gray-100 text-gray-600' :
+                  'bg-red-100 text-red-700'
+                }`}
+                  title={complianceData.weeklySurvey.reason
+                    || `REDCap weekly survey — ${complianceData.weeklySurvey.weekly_survey_detail || ''}`}>
+                  📝 Weekly Survey: {complianceData.weeklySurvey.weekly_survey_status || 'Unknown'}
+                </span>
+              )}
               <button onClick={() => { setShowCompliancePanel(!showCompliancePanel); if (!showCompliancePanel) previewNotification(); }}
                 className="text-xs text-purple-600 hover:text-purple-800 font-medium">
                 {showCompliancePanel ? 'Hide' : 'Send'} Notification
@@ -1327,6 +1341,9 @@ const ParticipantDetailScreen = ({
         </div>
         <ChevronRight size={20} className="text-gray-400" />
       </button>
+
+      {/* Study-personnel notes + REDCap contact reminders */}
+      <ParticipantNotesPanel participantId={currentParticipantId} />
 
       {/* Loading State */}
       {loading && (

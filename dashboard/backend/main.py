@@ -6136,8 +6136,57 @@ from compliance_notifications import (
     send_compliance_email, send_push_notification,
     calculate_participant_compliance, calculate_weekly_compliance,
 )
+from redcap_weekly import (
+    WEEKLY_SURVEY_TEMPLATE_KEYS, WEEKLY_SURVEY_UNAVAILABLE,
+    fetch_weekly_survey_rows, summarize_weekly_survey,
+)
 
 NOTIFICATION_HISTORY_COLLECTION = config.col("notification_history")
+
+# Weekly-survey status comes from REDCap, and the notification UI re-previews on
+# every template switch. Cache briefly so cycling templates doesn't hammer the
+# REDCap API — a minute of staleness can't change a 7-day window verdict.
+_WEEKLY_SURVEY_CACHE_TTL = 120
+_weekly_survey_cache: Dict[str, tuple] = {}
+
+
+def weekly_survey_status(participant_id: str, use_cache: bool = True) -> dict:
+    """Weekly-survey completion for a participant, from REDCap.
+
+    Never raises: compliance emails and the compliance panel must still render
+    when REDCap is unreachable or the participant has no REDCap mapping. In that
+    case the template variables say "status unavailable" rather than implying the
+    participant missed the survey.
+    """
+    now = time.time()
+    if use_cache:
+        cached = _weekly_survey_cache.get(participant_id)
+        if cached and now - cached[0] < _WEEKLY_SURVEY_CACHE_TTL:
+            return cached[1]
+
+    record_id = redcap_record_id_for_participant(participant_id)
+    if not record_id:
+        result = dict(WEEKLY_SURVEY_UNAVAILABLE,
+                      status="unknown", available=False,
+                      reason="No REDCap record mapped to this participant")
+    else:
+        try:
+            result = summarize_weekly_survey(fetch_weekly_survey_rows(record_id))
+            result["available"] = True
+            result["redcapRecordId"] = record_id
+        except Exception as e:
+            logger.warning(f"[REDCap] weekly survey lookup failed for {participant_id}: {e}")
+            result = dict(WEEKLY_SURVEY_UNAVAILABLE,
+                          status="unknown", available=False, reason=str(e))
+
+    _weekly_survey_cache[participant_id] = (now, result)
+    return result
+
+
+def weekly_survey_template_vars(participant_id: str) -> dict:
+    """Just the `{weekly_survey_*}` placeholders the email templates reference."""
+    summary = weekly_survey_status(participant_id)
+    return {k: summary.get(k, WEEKLY_SURVEY_UNAVAILABLE[k]) for k in WEEKLY_SURVEY_TEMPLATE_KEYS}
 
 
 class SendNotificationRequest(BaseModel):
@@ -6188,6 +6237,7 @@ def get_participant_compliance(
         return {
             "threeDay": stats,
             "weekly": weekly,
+            "weeklySurvey": weekly_survey_status(participant_id),
             "notificationHistory": history,
         }
     except Exception as e:
@@ -6238,6 +6288,7 @@ def preview_notification(
             "participant_id": body.participant_id,
             **compliance,
             **weekly,
+            **weekly_survey_template_vars(body.participant_id),
         }
 
         if body.custom_subject and body.custom_body:
@@ -6289,6 +6340,7 @@ def send_compliance_notification(
             "participant_id": body.participant_id,
             **compliance,
             **weekly,
+            **weekly_survey_template_vars(body.participant_id),
         }
 
         # Select or use custom template
@@ -6999,6 +7051,128 @@ def transform_redcap_safety_plan(redcap_data: dict) -> dict:
     }
 
 
+_REDCAP_RECORD_ID_TTL = 600
+_redcap_record_id_cache: Dict[str, tuple] = {}
+
+
+def _stored_redcap_record_id(participant_id: str) -> Optional[str]:
+    """What Firestore thinks this participant's REDCap record_id is.
+
+    The single-field copies come first. A rename leaves BOTH the old and new
+    mapping documents pointing at this participant, and the collection query has
+    no ordering, so consulting `redcap_mappings` first can keep handing back the
+    stale id forever — which then looks like a disagreement on every lookup and
+    re-runs the repair writes indefinitely.
+    """
+    for coll, field in ((config.col("participants"), "redcapRecordId"),
+                        (VALID_PARTICIPANTS_COLLECTION, "redcap_record_id")):
+        try:
+            doc = db.collection(coll).document(participant_id).get()
+            if doc.exists:
+                record_id = (doc.to_dict() or {}).get(field)
+                if record_id:
+                    return record_id
+        except Exception as e:
+            logger.warning(f"[REDCap] {coll} lookup failed for {participant_id}: {e}")
+
+    try:
+        mappings = list(db.collection(REDCAP_MAPPINGS_COLLECTION)
+                        .where("app_participant_id", "==", participant_id)
+                        .limit(1).stream())
+        if mappings:
+            return mappings[0].id
+    except Exception as e:
+        logger.warning(f"[REDCap] mapping lookup failed for {participant_id}: {e}")
+
+    return None
+
+
+def _live_redcap_record_id(participant_id: str) -> Optional[str]:
+    """Ask REDCap which record currently carries this app ID.
+
+    `socialscope_app_id` is written into the record itself, so it survives the
+    record renames coordinators do mid-study ("56.BM" -> "194203310.BM"). The
+    stored mapping does not.
+    """
+    if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+        return None
+    try:
+        resp = http_requests.post(config.REDCAP_API_URL, data={
+            "token": config.REDCAP_API_TOKEN,
+            "content": "record",
+            "format": "json",
+            "fields[0]": "record_id",
+            "fields[1]": config.REDCAP_APP_ID_FIELD,
+            "events[0]": config.REDCAP_TRIGGER_EVENT,
+            "returnFormat": "json",
+        }, timeout=30)
+        if resp.status_code != 200:
+            logger.warning(f"[REDCap] app-id scan failed: {resp.status_code}")
+            return None
+        for row in resp.json():
+            if str(row.get(config.REDCAP_APP_ID_FIELD) or "").strip() == participant_id:
+                record_id = str(row.get("record_id") or "").strip()
+                if record_id:
+                    return record_id
+    except Exception as e:
+        logger.warning(f"[REDCap] app-id scan error for {participant_id}: {e}")
+    return None
+
+
+def _repair_redcap_record_id(participant_id: str, record_id: str, previous: Optional[str]):
+    """Point Firestore at the record REDCap actually holds. Never deletes the
+    stale mapping — it stays as history, it just stops being the answer."""
+    previous_note = f"was mapped to {previous!r}" if previous else "was unmapped"
+    logger.warning(
+        f"[REDCap] {participant_id} resolves to record {record_id!r} "
+        f"({previous_note}) — repairing")
+    try:
+        db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).set({
+            "app_participant_id": participant_id,
+            "created_at": datetime.utcnow(),
+            "repaired_from_app_id_lookup": True,
+        }, merge=True)
+    except Exception as e:
+        logger.error(f"[REDCap] failed to repair mapping for {participant_id}: {e}")
+    for coll, field in ((config.col("participants"), "redcapRecordId"),
+                        (VALID_PARTICIPANTS_COLLECTION, "redcap_record_id")):
+        try:
+            ref = db.collection(coll).document(participant_id)
+            if ref.get().exists:
+                ref.set({field: record_id}, merge=True)
+        except Exception as e:
+            logger.error(f"[REDCap] failed to repair {coll}.{field} for {participant_id}: {e}")
+
+
+def redcap_record_id_for_participant(participant_id: str, use_cache: bool = True) -> Optional[str]:
+    """Resolve an app participant ID to its CURRENT REDCap record_id.
+
+    The stored mapping alone is not trustworthy: renaming a record in REDCap
+    leaves Firestore pointing at an id that no longer exists, and REDCap answers
+    a query for a missing record with an empty list — indistinguishable from
+    "this participant has no data". That turned a participant who had completed
+    two weekly surveys into "not completed" on the compliance email. So REDCap
+    is the authority, Firestore is the fallback when REDCap can't be reached,
+    and a disagreement repairs the stored mapping.
+    """
+    now = time.time()
+    if use_cache:
+        cached = _redcap_record_id_cache.get(participant_id)
+        if cached and now - cached[0] < _REDCAP_RECORD_ID_TTL:
+            return cached[1]
+
+    stored = _stored_redcap_record_id(participant_id)
+    live = _live_redcap_record_id(participant_id)
+
+    if live and live != stored:
+        _repair_redcap_record_id(participant_id, live, stored)
+
+    record_id = live or stored
+    if record_id:
+        _redcap_record_id_cache[participant_id] = (now, record_id)
+    return record_id
+
+
 def _resolve_participant_for_record(record_id: str, event_name: str = None):
     """Resolve the app participant ID for a REDCap record, tolerating renames.
 
@@ -7193,21 +7367,9 @@ def sync_safety_plan(
     Looks up the REDCap record_id via the redcap_mappings collection.
     """
     try:
-        # Look up REDCap record_id from participant's app ID
-        # Check redcap_mappings for a mapping where app_participant_id == participant_id
-        mappings = list(db.collection(REDCAP_MAPPINGS_COLLECTION)
-            .where("app_participant_id", "==", participant_id)
-            .limit(1).stream())
-
-        if not mappings:
-            # Also check valid_participants which stores redcap_record_id
-            vp_doc = db.collection(VALID_PARTICIPANTS_COLLECTION).document(participant_id).get()
-            if vp_doc.exists and vp_doc.to_dict().get("redcap_record_id"):
-                redcap_record_id = vp_doc.to_dict()["redcap_record_id"]
-            else:
-                raise HTTPException(status_code=404, detail=f"No REDCap mapping found for participant {participant_id}")
-        else:
-            redcap_record_id = mappings[0].id
+        redcap_record_id = redcap_record_id_for_participant(participant_id)
+        if not redcap_record_id:
+            raise HTTPException(status_code=404, detail=f"No REDCap mapping found for participant {participant_id}")
 
         return _sync_safety_plan_core(participant_id, redcap_record_id, user.get("email"))
 
@@ -7285,6 +7447,16 @@ from risk_assessment import (
 )
 
 register_risk_assessment_routes(app, db, limiter, verify_firebase_token, config, logger)
+
+
+# ============================================================================
+# Study-personnel notes (see staff_notes.py)
+# ============================================================================
+
+from staff_notes import register_staff_notes_routes
+
+register_staff_notes_routes(app, db, limiter, verify_firebase_token, config, logger,
+                            redcap_record_id_for_participant)
 
 
 # ============================================================================

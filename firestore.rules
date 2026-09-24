@@ -153,6 +153,14 @@ service cloud.firestore {
         allow update: if true;
         allow delete: if false;
       }
+
+      // Study-personnel notes — dashboard only. Stated explicitly rather than
+      // relying on the default deny so nobody later assumes the parent doc's
+      // open write cascades here (rules don't cascade, but the intent should be
+      // readable): the participant must never see or touch staff notes.
+      match /staff_notes/{noteId} {
+        allow read, write: if false;  // Admin SDK only (dashboard backend)
+      }
     }
 
     // ========================================================================
@@ -266,6 +274,9 @@ service cloud.firestore {
         allow create: if true;
         allow update: if true;
         allow delete: if false;
+      }
+      match /staff_notes/{noteId} {
+        allow read, write: if false;  // Admin SDK only (dashboard backend)
       }
     }
 

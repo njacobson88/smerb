@@ -77,35 +77,35 @@ WEEKLY_REPORT_TEMPLATES = {
     "high": [
         {
             "subject": "🌟 Your SocialScope Weekly Report — Great Week!",
-            "body": "Hi {name}! 🌟\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n📱 Browsing Sessions: {session_count}\n\n{emoji} {compliance_label}! You're doing an amazing job keeping up with the study. Your consistent participation makes our research possible.\n\nKeep up the fantastic work! 🎉\n\nThe SocialScope Team\nDartmouth College",
+            "body": "Hi {name}! 🌟\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n📱 Browsing Sessions: {session_count}\n{weekly_survey_line}\n\n{emoji} {compliance_label}! You're doing an amazing job keeping up with the study. Your consistent participation makes our research possible.\n\nKeep up the fantastic work! 🎉\n\nThe SocialScope Team\nDartmouth College",
         },
         {
             "subject": "🌟 Weekly Update — You're a SocialScope Star!",
-            "body": "Hey {name}! 🌟\n\nYour week in SocialScope:\n\n📋 EMA Compliance: {compliance_pct}% {emoji}\n✅ {ema_completed} of {ema_expected} check-ins completed\n📸 {screenshot_count} screenshots captured\n\nYou're crushing it! Your dedication to this study is truly appreciated. Every check-in brings us closer to understanding how social media impacts well-being.\n\nSee you next week! 💙\n\nThe SocialScope Research Team",
+            "body": "Hey {name}! 🌟\n\nYour week in SocialScope:\n\n📋 EMA Compliance: {compliance_pct}% {emoji}\n✅ {ema_completed} of {ema_expected} check-ins completed\n📸 {screenshot_count} screenshots captured\n{weekly_survey_line}\n\nYou're crushing it! Your dedication to this study is truly appreciated. Every check-in brings us closer to understanding how social media impacts well-being.\n\nSee you next week! 💙\n\nThe SocialScope Research Team",
         },
         {
             "subject": "🌟 SocialScope Report — Outstanding Participation!",
-            "body": "Hi {name},\n\n🌟 Weekly Summary 🌟\n\nEMA Check-ins: {ema_completed}/{ema_expected} ({compliance_pct}%)\nScreenshots: {screenshot_count}\nBrowsing Sessions: {session_count}\n\nOutstanding work this week! You're among our most dedicated participants and your data is making a real impact on mental health research.\n\nThank you for everything you do! 🙏\n\nBest,\nThe SocialScope Team",
+            "body": "Hi {name},\n\n🌟 Weekly Summary 🌟\n\nEMA Check-ins: {ema_completed}/{ema_expected} ({compliance_pct}%)\nScreenshots: {screenshot_count}\nBrowsing Sessions: {session_count}\n{weekly_survey_line}\n\nOutstanding work this week! You're among our most dedicated participants and your data is making a real impact on mental health research.\n\nThank you for everything you do! 🙏\n\nBest,\nThe SocialScope Team",
         },
     ],
     "medium": [
         {
             "subject": "👍 Your SocialScope Weekly Report",
-            "body": "Hi {name}! 👍\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n\n{emoji} {compliance_label} progress! You're on the right track. Completing just a couple more check-ins each day would boost your contribution even further.\n\nEvery response matters — thank you for your participation! 💙\n\nThe SocialScope Team\nDartmouth College",
+            "body": "Hi {name}! 👍\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n{weekly_survey_line}\n\n{emoji} {compliance_label} progress! You're on the right track. Completing just a couple more check-ins each day would boost your contribution even further.\n\nEvery response matters — thank you for your participation! 💙\n\nThe SocialScope Team\nDartmouth College",
         },
         {
             "subject": "👍 Weekly SocialScope Update — Solid Progress",
-            "body": "Hey {name},\n\nYour SocialScope week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n\nNice work! You're making a meaningful contribution. A small boost in daily check-ins would take your participation to the next level.\n\nThanks for sticking with us! 🤝\n\nThe SocialScope Research Team",
+            "body": "Hey {name},\n\nYour SocialScope week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n{weekly_survey_line}\n\nNice work! You're making a meaningful contribution. A small boost in daily check-ins would take your participation to the next level.\n\nThanks for sticking with us! 🤝\n\nThe SocialScope Research Team",
         },
     ],
     "low": [
         {
             "subject": "💪 Your SocialScope Weekly Report — We Believe in You!",
-            "body": "Hi {name},\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n\n{emoji} We know life gets busy, and we appreciate every check-in you complete. Even small increases in participation make a big difference for our research.\n\nReminder: Check-ins take less than 2 minutes and can be done anytime through the app.\n\nWe're here if you need any help! 💙\n\nThe SocialScope Team\nDartmouth College",
+            "body": "Hi {name},\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n{weekly_survey_line}\n\n{emoji} We know life gets busy, and we appreciate every check-in you complete. Even small increases in participation make a big difference for our research.\n\nReminder: Check-ins take less than 2 minutes and can be done anytime through the app.\n\nWe're here if you need any help! 💙\n\nThe SocialScope Team\nDartmouth College",
         },
         {
             "subject": "💪 Weekly Update — Every Check-in Counts!",
-            "body": "Hey {name},\n\nYour SocialScope week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n\nWe appreciate your continued participation! We know it can be tough to keep up. Just opening the app and completing one check-in a day would be a great step.\n\nYou've got this! 💪\n\nThe SocialScope Research Team",
+            "body": "Hey {name},\n\nYour SocialScope week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n{weekly_survey_line}\n\nWe appreciate your continued participation! We know it can be tough to keep up. Just opening the app and completing one check-in a day would be a great step.\n\nYou've got this! 💪\n\nThe SocialScope Research Team",
         },
     ],
 }
