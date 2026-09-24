@@ -328,6 +328,7 @@ const ExportScreen = () => {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [exportLevel, setExportLevel] = useState(1);
+  const [includeMetadata, setIncludeMetadata] = useState(true);
   const [loading, setLoading] = useState(false);
   const [estimating, setEstimating] = useState(false);
   const [error, setError] = useState(null);
@@ -512,6 +513,7 @@ const ExportScreen = () => {
             export_level: exportLevel,
             start_date: startDate || null,
             end_date: endDate || null,
+            include_participant_metadata: includeMetadata,
           }),
         });
 
@@ -542,7 +544,8 @@ const ExportScreen = () => {
     try {
       const params = new URLSearchParams({
         participant_id: participantId,
-        export_level: exportLevel.toString()
+        export_level: exportLevel.toString(),
+        include_participant_metadata: includeMetadata.toString()
       });
       if (startDate) params.append('start_date', startDate);
       if (endDate) params.append('end_date', endDate);
@@ -731,6 +734,35 @@ const ExportScreen = () => {
                 </div>
               </div>
             </label>
+
+            {/* Participant metadata toggle — applies to whichever level is
+                chosen. Off produces a de-identified download with no
+                participant id and no contact details anywhere in it. */}
+            <div className="border border-gray-200 rounded-lg px-4 py-3 bg-gray-50">
+              <label className="flex items-start cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeMetadata}
+                  onChange={(e) => setIncludeMetadata(e.target.checked)}
+                  className="mt-0.5 mr-2"
+                />
+                <span className="text-sm">
+                  <span className="font-medium text-gray-800">
+                    Include participant metadata
+                  </span>
+                  <span className="block text-xs text-gray-500 mt-0.5">
+                    {includeMetadata
+                      ? 'Download includes the participant ID, name, contact details and emergency contacts.'
+                      : 'De-identified: no participant ID and no contact details anywhere in the download. Cannot be linked back to a participant.'}
+                  </span>
+                </span>
+              </label>
+              {!includeMetadata && (
+                <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                  Measurement data is unchanged — only identifiers are removed.
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -840,8 +872,14 @@ const ExportScreen = () => {
               >
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="font-medium text-gray-800">
-                      {job.participantId} - Level {job.exportLevel}
+                    <div className="font-medium text-gray-800 flex items-center gap-2 flex-wrap">
+                      <span>{job.participantId} - Level {job.exportLevel}</span>
+                      {job.includeParticipantMetadata === false && (
+                        <span className="px-2 py-0.5 rounded-full bg-gray-200 text-gray-700 text-xs font-medium"
+                          title="No participant ID or contact details in this download">
+                          De-identified
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-gray-500">
                       Started: {job.createdAt ? new Date(job.createdAt).toLocaleString('en-US', {
