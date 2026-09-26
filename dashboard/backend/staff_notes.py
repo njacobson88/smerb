@@ -10,13 +10,14 @@ default in the UI).
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from redcap_weekly import fetch_reminders, summarize_reminders
+from time_utils import iso_utc as _iso
 
 logger = logging.getLogger(__name__)
 
@@ -40,28 +41,6 @@ class NoteUpdateRequest(BaseModel):
     category: Optional[str] = None
     pinned: Optional[bool] = None
     archived: Optional[bool] = None
-
-
-def _iso(value: Any) -> Optional[str]:
-    """Firestore timestamps, datetimes and ISO strings all end up as UTC ISO strings.
-
-    Firestore hands back a tz-aware `DatetimeWithNanoseconds` (a datetime
-    subclass), while a value that never round-tripped is the naive UTC datetime
-    we wrote. Check `isinstance` before `.timestamp()`, or the naive one gets
-    shifted by the server's local offset.
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone(timezone.utc).replace(tzinfo=None)
-        return value.isoformat() + "Z"
-    if hasattr(value, "timestamp"):
-        try:
-            return datetime.utcfromtimestamp(value.timestamp()).isoformat() + "Z"
-        except Exception:
-            return None
-    return str(value)
 
 
 def _normalize_category(value: Optional[str]) -> str:

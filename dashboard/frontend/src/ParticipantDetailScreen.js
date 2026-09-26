@@ -1066,8 +1066,15 @@ const ParticipantDetailScreen = ({
                     {complianceData.notificationHistory.map((notif, idx) => {
                       const categoryLabels = { ema: 'EMA Compliance', screenshots: 'Screenshot Compliance', weekly: 'Weekly Report' };
                       const categoryColors = { ema: 'bg-blue-100 text-blue-700', screenshots: 'bg-orange-100 text-orange-700', weekly: 'bg-green-100 text-green-700' };
-                      const sentDate = notif.sentAt ? new Date(notif.sentAt) : null;
-                      const daysAgo = sentDate ? Math.floor((Date.now() - sentDate.getTime()) / (1000 * 60 * 60 * 24)) : null;
+                      const sentDate = notif.sentAt && !Number.isNaN(new Date(notif.sentAt).getTime())
+                        ? new Date(notif.sentAt) : null;
+                      // Calendar days in study time, not 24-hour blocks: something
+                      // sent yesterday afternoon should read "Yesterday", not "Today".
+                      // Clamped at 0 so clock skew can never render as "-1d ago".
+                      const studyDay = (d) => new Date(d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }));
+                      const daysAgo = sentDate
+                        ? Math.max(0, Math.round((studyDay(new Date()) - studyDay(sentDate)) / (1000 * 60 * 60 * 24)))
+                        : null;
 
                       return (
                         <div key={idx} className="bg-white border border-purple-100 rounded p-2">
@@ -1095,8 +1102,9 @@ const ParticipantDetailScreen = ({
                           </div>
                           <div className="text-[10px] text-gray-400 mt-0.5">
                             {sentDate ? sentDate.toLocaleString('en-US', {
+                              timeZone: 'America/New_York',
                               month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
-                            }) : ''} — by {notif.sentBy || 'unknown'}
+                            }) : ''} EST — by {notif.sentBy || 'unknown'}
                           </div>
                         </div>
                       );

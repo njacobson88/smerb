@@ -21,6 +21,7 @@ from urllib.parse import unquote, quote
 from phone_utils import normalize_phone, phones_match, to_e164
 from export_utils import is_valid_export_id
 from template_utils import safe_format
+from time_utils import iso_utc
 from enrollment_auth import (
     generate_enrollment_secret, hash_secret, verify_secret,
     build_enrollment_url, enrollment_sms_text,
@@ -1300,7 +1301,7 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                             se = se_doc.to_dict()
                             lr = se.get("lastRespondedAt")
                             if lr and hasattr(lr, "timestamp"):
-                                lr = datetime.fromtimestamp(lr.timestamp()).isoformat()
+                                lr = iso_utc(lr)
                             handled_status = {
                                 "escalationStopped": se.get("escalationStopped", False),
                                 "currentDisposition": se.get("currentDisposition"),
@@ -2731,9 +2732,8 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
                     "deniedDanger": resolution == "denied_danger",
                     "confirmedDanger": resolution == "confirmed_danger",
                     "triggerQuestions": cv.get("triggerQuestions") or [],
-                    "thresholdExceededAt": best[0].isoformat(),
-                    "resolvedAt": (datetime.fromtimestamp(cv["resolvedAt"].timestamp()).isoformat()
-                                   if hasattr(cv.get("resolvedAt"), "timestamp") else None),
+                    "thresholdExceededAt": iso_utc(best[0]),
+                    "resolvedAt": iso_utc(cv.get("resolvedAt")),
                 }
         except Exception as e:
             logger.warning(f"Error attaching safety confirmations: {e}")
@@ -4671,10 +4671,8 @@ def get_audit_trail(
         for doc in event_ref.collection("audit_trail").order_by("loggedAt").stream():
             entry = doc.to_dict()
             entry["id"] = doc.id
-            if entry.get("loggedAt") and hasattr(entry["loggedAt"], "isoformat"):
-                entry["loggedAt"] = entry["loggedAt"].isoformat()
-            elif entry.get("loggedAt") and hasattr(entry["loggedAt"], "timestamp"):
-                entry["loggedAt"] = datetime.fromtimestamp(entry["loggedAt"].timestamp()).isoformat()
+            if entry.get("loggedAt"):
+                entry["loggedAt"] = iso_utc(entry["loggedAt"])
             trail.append(entry)
 
         return {
@@ -4817,8 +4815,8 @@ def generate_safety_report(
             trail = []
             for trail_doc in doc.reference.collection("audit_trail").order_by("loggedAt").stream():
                 entry = trail_doc.to_dict()
-                if entry.get("loggedAt") and hasattr(entry["loggedAt"], "timestamp"):
-                    entry["loggedAt"] = datetime.fromtimestamp(entry["loggedAt"].timestamp()).isoformat()
+                if entry.get("loggedAt"):
+                    entry["loggedAt"] = iso_utc(entry["loggedAt"])
                 trail.append(entry)
 
             # Get follow-ups
@@ -4827,10 +4825,10 @@ def generate_safety_report(
                 "safetyEventId", "==", doc.id
             ).order_by("scheduledAt").stream():
                 fu = fu_doc.to_dict()
-                if fu.get("scheduledAt") and hasattr(fu["scheduledAt"], "timestamp"):
-                    fu["scheduledAt"] = datetime.fromtimestamp(fu["scheduledAt"].timestamp()).isoformat()
-                if fu.get("completedAt") and hasattr(fu["completedAt"], "timestamp"):
-                    fu["completedAt"] = datetime.fromtimestamp(fu["completedAt"].timestamp()).isoformat()
+                if fu.get("scheduledAt"):
+                    fu["scheduledAt"] = iso_utc(fu["scheduledAt"])
+                if fu.get("completedAt"):
+                    fu["completedAt"] = iso_utc(fu["completedAt"])
                 followups.append(fu)
 
             events.append({
@@ -6219,14 +6217,12 @@ def get_participant_compliance(
             ).order_by("sentAt", direction=firestore.Query.DESCENDING).limit(20)
             for doc in hist_query.stream():
                 d = doc.to_dict()
-                sent_at = d.get("sentAt")
-                if sent_at and hasattr(sent_at, "timestamp"):
-                    sent_at = datetime.fromtimestamp(sent_at.timestamp())
+                sent_at = iso_utc(d.get("sentAt"))
                 history.append({
                     "id": doc.id,
                     "category": d.get("category"),
                     "subject": d.get("subject"),
-                    "sentAt": sent_at.isoformat() if sent_at else None,
+                    "sentAt": sent_at,
                     "sentBy": d.get("sentBy"),
                     "deliveryMethods": d.get("deliveryMethods"),
                     "results": d.get("results"),
