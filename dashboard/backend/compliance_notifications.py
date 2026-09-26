@@ -27,38 +27,38 @@ import config
 LOW_COMPLIANCE_TEMPLATES = {
     "ema": [
         {
-            "subject": "Quick check-in from the SocialScope team",
-            "body": "Hi <b>{name}</b>,<br><br>We noticed you've completed <b>{ema_count} of {ema_expected}</b> check-ins over the past few days. We know life gets busy, and we really appreciate your continued participation.<br><br>Each check-in takes <u>less than 2 minutes</u> and helps us understand how social media affects well-being. Your responses are <i>incredibly valuable</i> to our research.<br><br>If you're having any trouble with the app, please don't hesitate to reach out — we're happy to help!<br><br>Best,<br>The SocialScope Study Team<br>Dartmouth College",
+            "subject": "Quick check-in from the Social Media Wellness team",
+            "body": "Hi <b>{name}</b>,<br><br>We noticed you've completed <b>{ema_count} of {ema_expected}</b> check-ins over the past few days. We know life gets busy, and we really appreciate your continued participation.<br><br>Each check-in takes <u>less than 2 minutes</u> and helps us understand how social media affects well-being. Your responses are <i>incredibly valuable</i> to our research.<br><br>If you're having any trouble with the app, please don't hesitate to reach out — we're happy to help!<br><br>Best,<br>The Social Media Wellness Study Team<br>Dartmouth College",
         },
         {
             "subject": "We miss your check-ins!",
-            "body": "Hi {name},\n\nJust a friendly note — it looks like we've missed a few of your SocialScope check-ins recently ({ema_count}/{ema_expected} completed). No worries at all! We understand that things come up.\n\nWhen you get a chance, completing your check-ins helps us build a clearer picture of how social media impacts daily life. Every response counts.\n\nThanks for being part of this important research!\n\nWarm regards,\nThe SocialScope Study Team",
+            "body": "Hi {name},\n\nJust a friendly note — it looks like we've missed a few of your Social Media Wellness check-ins recently ({ema_count}/{ema_expected} completed). No worries at all! We understand that things come up.\n\nWhen you get a chance, completing your check-ins helps us build a clearer picture of how social media impacts daily life. Every response counts.\n\nThanks for being part of this important research!\n\nWarm regards,\nThe Social Media Wellness Study Team",
         },
         {
-            "subject": "Your input matters — SocialScope check-in reminder",
-            "body": "Hi {name},\n\nWe wanted to touch base and let you know that your recent check-in completion has been {compliance_pct}%. We value every response you provide, and even completing one or two more check-ins per day would make a big difference.\n\nRemember, you can complete check-ins anytime by opening the SocialScope app.\n\nThank you for your dedication to this study!\n\nBest wishes,\nThe SocialScope Study Team\nDartmouth College",
+            "subject": "Your input matters — Social Media Wellness check-in reminder",
+            "body": "Hi {name},\n\nWe wanted to touch base and let you know that your recent check-in completion has been {compliance_pct}%. We value every response you provide, and even completing one or two more check-ins per day would make a big difference.\n\nRemember, you can complete check-ins anytime by opening the study app (the SocialScope icon on your phone).\n\nThank you for your dedication to this study!\n\nBest wishes,\nThe Social Media Wellness Study Team\nDartmouth College",
         },
         {
-            "subject": "A gentle reminder from SocialScope",
-            "body": "Hi {name},\n\nHope you're doing well! We noticed your check-in activity has been a bit lower than usual lately ({compliance_pct}% over the past 3 days). We completely understand — everyone has busy stretches.\n\nJust a reminder that each check-in only takes about 90 seconds and helps us learn about the relationship between social media use and well-being.\n\nWe appreciate you!\n\nThe SocialScope Research Team",
+            "subject": "A gentle reminder from Social Media Wellness",
+            "body": "Hi {name},\n\nHope you're doing well! We noticed your check-in activity has been a bit lower than usual lately ({compliance_pct}% over the past 3 days). We completely understand — everyone has busy stretches.\n\nJust a reminder that each check-in only takes about 90 seconds and helps us learn about the relationship between social media use and well-being.\n\nWe appreciate you!\n\nThe Social Media Wellness Research Team",
         },
         {
-            "subject": "Checking in with you — SocialScope",
-            "body": "Hi {name},\n\nThis is a quick note to check in with you about the SocialScope study. We've noticed fewer check-ins from you recently ({ema_count}/{ema_expected}).\n\nIf you're experiencing any issues with the app or have questions about the study, we'd love to hear from you. You can reply to this email anytime.\n\nYour participation makes a real difference in understanding social media's impact on mental health.\n\nWith gratitude,\nThe SocialScope Study Team",
+            "subject": "Checking in with you — Social Media Wellness",
+            "body": "Hi {name},\n\nThis is a quick note to check in with you about the Social Media Wellness study. We've noticed fewer check-ins from you recently ({ema_count}/{ema_expected}).\n\nIf you're experiencing any issues with the app or have questions about the study, we'd love to hear from you. You can reply to this email anytime.\n\nYour participation makes a real difference in understanding social media's impact on mental health.\n\nWith gratitude,\nThe Social Media Wellness Study Team",
         },
     ],
     "screenshots": [
         {
-            "subject": "SocialScope app — quick heads up",
-            "body": "Hi {name},\n\nWe wanted to let you know that the SocialScope app hasn't been capturing much browsing activity recently ({screenshot_count} screenshots in the past 3 days).\n\nFor the study to work best, we need the app running while you browse Reddit and X/Twitter. Here are a few things to check:\n\n- Make sure you're browsing social media through the SocialScope app (not your regular browser)\n- Check that the app is open and running when you use social media\n\nIf you need any help, just reply to this email!\n\nThanks,\nThe SocialScope Study Team",
+            "subject": "Social Media Wellness — quick heads up",
+            "body": "Hi {name},\n\nWe wanted to let you know that the study app hasn't been capturing much browsing activity recently ({screenshot_count} screenshots in the past 3 days).\n\nFor the study to work best, we need the app running while you browse Reddit and X/Twitter. Here are a few things to check:\n\n- Make sure you're browsing social media through the study app — the SocialScope icon on your phone — not your regular browser\n- Check that the app is open and running when you use social media\n\nIf you need any help, just reply to this email!\n\nThanks,\nThe Social Media Wellness Study Team",
         },
         {
-            "subject": "Making the most of SocialScope",
-            "body": "Hi {name},\n\nJust a friendly reminder — the SocialScope app captures your social media browsing to help us understand content exposure patterns. We've noticed lower activity from your account recently.\n\nTo get the most out of the study, try to use the SocialScope browser when you check Reddit or X/Twitter. Every session helps!\n\nAppreciate your continued participation.\n\nBest,\nThe SocialScope Team",
+            "subject": "Making the most of Social Media Wellness",
+            "body": "Hi {name},\n\nJust a friendly reminder — the study app captures your social media browsing to help us understand content exposure patterns. We've noticed lower activity from your account recently.\n\nTo get the most out of the study, try to use the study app's browser (the SocialScope icon on your phone) when you check Reddit or X/Twitter. Every session helps!\n\nAppreciate your continued participation.\n\nBest,\nThe Social Media Wellness Team",
         },
         {
-            "subject": "Quick tip for SocialScope",
-            "body": "Hi {name},\n\nHope you're having a good week! We noticed the SocialScope app hasn't been recording much browsing activity lately ({screenshot_count} captures over 3 days).\n\nA quick reminder: please use the in-app browser for your social media browsing so we can track content exposure. This is a key part of the study data.\n\nLet us know if you have any questions!\n\nThe SocialScope Research Team\nDartmouth College",
+            "subject": "Quick tip for Social Media Wellness",
+            "body": "Hi {name},\n\nHope you're having a good week! We noticed the study app (the SocialScope icon on your phone) hasn't been recording much browsing activity lately ({screenshot_count} captures over 3 days).\n\nA quick reminder: please use the in-app browser for your social media browsing so we can track content exposure. This is a key part of the study data.\n\nLet us know if you have any questions!\n\nThe Social Media Wellness Research Team\nDartmouth College",
         },
     ],
 }
@@ -76,36 +76,36 @@ COMPLIANCE_LEVELS = {
 WEEKLY_REPORT_TEMPLATES = {
     "high": [
         {
-            "subject": "🌟 Your SocialScope Weekly Report — Great Week!",
-            "body": "Hi {name}! 🌟\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n📱 Browsing Sessions: {session_count}\n{weekly_survey_line}\n\n{emoji} {compliance_label}! You're doing an amazing job keeping up with the study. Your consistent participation makes our research possible.\n\nKeep up the fantastic work! 🎉\n\nThe SocialScope Team\nDartmouth College",
+            "subject": "🌟 Your Social Media Wellness Weekly Report — Great Week!",
+            "body": "Hi {name}! 🌟\n\nHere's your weekly Social Media Wellness summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n📱 Browsing Sessions: {session_count}\n{weekly_survey_line}\n\n{emoji} {compliance_label}! You're doing an amazing job keeping up with the study. Your consistent participation makes our research possible.\n\nKeep up the fantastic work! 🎉\n\nThe Social Media Wellness Team\nDartmouth College",
         },
         {
-            "subject": "🌟 Weekly Update — You're a SocialScope Star!",
-            "body": "Hey {name}! 🌟\n\nYour week in SocialScope:\n\n📋 EMA Compliance: {compliance_pct}% {emoji}\n✅ {ema_completed} of {ema_expected} check-ins completed\n📸 {screenshot_count} screenshots captured\n{weekly_survey_line}\n\nYou're crushing it! Your dedication to this study is truly appreciated. Every check-in brings us closer to understanding how social media impacts well-being.\n\nSee you next week! 💙\n\nThe SocialScope Research Team",
+            "subject": "🌟 Weekly Update — You're a Social Media Wellness Star!",
+            "body": "Hey {name}! 🌟\n\nYour week in Social Media Wellness:\n\n📋 EMA Compliance: {compliance_pct}% {emoji}\n✅ {ema_completed} of {ema_expected} check-ins completed\n📸 {screenshot_count} screenshots captured\n{weekly_survey_line}\n\nYou're crushing it! Your dedication to this study is truly appreciated. Every check-in brings us closer to understanding how social media impacts well-being.\n\nSee you next week! 💙\n\nThe Social Media Wellness Research Team",
         },
         {
-            "subject": "🌟 SocialScope Report — Outstanding Participation!",
-            "body": "Hi {name},\n\n🌟 Weekly Summary 🌟\n\nEMA Check-ins: {ema_completed}/{ema_expected} ({compliance_pct}%)\nScreenshots: {screenshot_count}\nBrowsing Sessions: {session_count}\n{weekly_survey_line}\n\nOutstanding work this week! You're among our most dedicated participants and your data is making a real impact on mental health research.\n\nThank you for everything you do! 🙏\n\nBest,\nThe SocialScope Team",
+            "subject": "🌟 Social Media Wellness Report — Outstanding Participation!",
+            "body": "Hi {name},\n\n🌟 Weekly Summary 🌟\n\nEMA Check-ins: {ema_completed}/{ema_expected} ({compliance_pct}%)\nScreenshots: {screenshot_count}\nBrowsing Sessions: {session_count}\n{weekly_survey_line}\n\nOutstanding work this week! You're among our most dedicated participants and your data is making a real impact on mental health research.\n\nThank you for everything you do! 🙏\n\nBest,\nThe Social Media Wellness Team",
         },
     ],
     "medium": [
         {
-            "subject": "👍 Your SocialScope Weekly Report",
-            "body": "Hi {name}! 👍\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n{weekly_survey_line}\n\n{emoji} {compliance_label} progress! You're on the right track. Completing just a couple more check-ins each day would boost your contribution even further.\n\nEvery response matters — thank you for your participation! 💙\n\nThe SocialScope Team\nDartmouth College",
+            "subject": "👍 Your Social Media Wellness Weekly Report",
+            "body": "Hi {name}! 👍\n\nHere's your weekly Social Media Wellness summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n{weekly_survey_line}\n\n{emoji} {compliance_label} progress! You're on the right track. Completing just a couple more check-ins each day would boost your contribution even further.\n\nEvery response matters — thank you for your participation! 💙\n\nThe Social Media Wellness Team\nDartmouth College",
         },
         {
-            "subject": "👍 Weekly SocialScope Update — Solid Progress",
-            "body": "Hey {name},\n\nYour SocialScope week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n{weekly_survey_line}\n\nNice work! You're making a meaningful contribution. A small boost in daily check-ins would take your participation to the next level.\n\nThanks for sticking with us! 🤝\n\nThe SocialScope Research Team",
+            "subject": "👍 Weekly Social Media Wellness Update — Solid Progress",
+            "body": "Hey {name},\n\nYour Social Media Wellness week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n{weekly_survey_line}\n\nNice work! You're making a meaningful contribution. A small boost in daily check-ins would take your participation to the next level.\n\nThanks for sticking with us! 🤝\n\nThe Social Media Wellness Research Team",
         },
     ],
     "low": [
         {
-            "subject": "💪 Your SocialScope Weekly Report — We Believe in You!",
-            "body": "Hi {name},\n\nHere's your weekly SocialScope summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n{weekly_survey_line}\n\n{emoji} We know life gets busy, and we appreciate every check-in you complete. Even small increases in participation make a big difference for our research.\n\nReminder: Check-ins take less than 2 minutes and can be done anytime through the app.\n\nWe're here if you need any help! 💙\n\nThe SocialScope Team\nDartmouth College",
+            "subject": "💪 Your Social Media Wellness Weekly Report — We Believe in You!",
+            "body": "Hi {name},\n\nHere's your weekly Social Media Wellness summary:\n\n📊 Check-in Compliance: {compliance_pct}%\n✅ Check-ins Completed: {ema_completed}/{ema_expected}\n📸 Screenshots Captured: {screenshot_count}\n{weekly_survey_line}\n\n{emoji} We know life gets busy, and we appreciate every check-in you complete. Even small increases in participation make a big difference for our research.\n\nReminder: Check-ins take less than 2 minutes and can be done anytime through the app.\n\nWe're here if you need any help! 💙\n\nThe Social Media Wellness Team\nDartmouth College",
         },
         {
             "subject": "💪 Weekly Update — Every Check-in Counts!",
-            "body": "Hey {name},\n\nYour SocialScope week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n{weekly_survey_line}\n\nWe appreciate your continued participation! We know it can be tough to keep up. Just opening the app and completing one check-in a day would be a great step.\n\nYou've got this! 💪\n\nThe SocialScope Research Team",
+            "body": "Hey {name},\n\nYour Social Media Wellness week:\n\n📋 EMA: {compliance_pct}% ({ema_completed}/{ema_expected})\n📸 Screenshots: {screenshot_count}\n{weekly_survey_line}\n\nWe appreciate your continued participation! We know it can be tough to keep up. Just opening the app and completing one check-in a day would be a great step.\n\nYou've got this! 💪\n\nThe Social Media Wellness Research Team",
         },
     ],
 }

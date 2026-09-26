@@ -5907,7 +5907,7 @@ async def twilio_sms_reply(request: Request):
                 _log_inbound_sms(from_number, body, "participant", "participant_freeform",
                                  participant_id=participant_id, needs_review=True)
                 return Response(
-                    content='<Response><Message>This is an automated research system (SocialScope, Dartmouth College). '
+                    content='<Response><Message>This is an automated research system (Social Media Wellness, Dartmouth College). '
                             'We are unable to monitor or respond to text messages from this number. '
                             'Responses must be structured (reply ERROR or 1 if your earlier response was accidental).\n\n'
                             'If you are in crisis:\n'
@@ -5945,7 +5945,7 @@ async def twilio_sms_reply(request: Request):
                              "optout" if is_optout(body) else "unknown_sender",
                              needs_review=True)
             return Response(
-                content='<Response><Message>This is an automated research system (SocialScope, Dartmouth College). '
+                content='<Response><Message>This is an automated research system (Social Media Wellness, Dartmouth College). '
                         'This number is not monitored for incoming messages.\n\n'
                         'If you are in crisis:\n'
                         '- Call 911 or go to your nearest emergency room\n'
@@ -6104,7 +6104,7 @@ async def twilio_incoming_call(request: Request):
     twiml = (
         '<Response>'
         '<Say voice="Polly.Joanna">'
-        'Hello. You have reached the SocialScope research study automated system at Dartmouth College. '
+        'Hello. You have reached the Social Media Wellness research study automated system at Dartmouth College. '
         'This phone number is part of an automated research system and is not monitored for incoming calls. '
         'We are unable to take your call.'
         '</Say>'
@@ -6117,7 +6117,7 @@ async def twilio_incoming_call(request: Request):
         '<Pause length="1"/>'
         '<Say voice="Polly.Joanna">'
         'If you are a study participant and need to reach the research team, '
-        'please contact us through the SocialScope app or email the study team directly. '
+        'please contact us through the study app or email the study team directly. '
         'Thank you and take care. Goodbye.'
         '</Say>'
         '</Response>'

@@ -181,7 +181,7 @@ class CheckinService with WidgetsBindingObserver {
       await androidImpl.createNotificationChannel(const AndroidNotificationChannel(
         'checkin_channel',
         'Check-in Reminders',
-        description: 'Reminders to complete your SocialScope check-in',
+        description: 'Reminders to complete your Social Media Wellness check-in',
         importance: Importance.high,
       ));
       final granted = await androidImpl.requestNotificationsPermission();
@@ -298,7 +298,7 @@ class CheckinService with WidgetsBindingObserver {
       android: AndroidNotificationDetails(
         'checkin_channel',
         'Check-in Reminders',
-        channelDescription: 'Reminders to complete your SocialScope check-in',
+        channelDescription: 'Reminders to complete your Social Media Wellness check-in',
         importance: Importance.high,
         priority: Priority.high,
         category: AndroidNotificationCategory.reminder,
@@ -345,7 +345,7 @@ class CheckinService with WidgetsBindingObserver {
       try {
         await _notifications.zonedSchedule(
           window.index,
-          'Time for a SocialScope check-in',
+          'Time for your check-in',
           'Tap to complete your check-in — it only takes a moment.',
           when,
           details,

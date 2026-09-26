@@ -43,7 +43,7 @@ class StudyInactiveScreen extends StatelessWidget {
               Text(
                 reason?.trim().isNotEmpty == true
                     ? reason!
-                    : 'Thank you for taking part in the SocialScope study. '
+                    : 'Thank you for taking part in the Social Media Wellness study. '
                         'You do not need to complete any more check-ins, and the '
                         'app is no longer collecting data.',
                 style: Theme.of(context).textTheme.bodyMedium

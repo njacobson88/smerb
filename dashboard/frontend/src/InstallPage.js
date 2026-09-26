@@ -41,9 +41,9 @@ const InstallPage = () => {
       <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white py-12 px-4">
         <div className="max-w-2xl mx-auto text-center">
           <Smartphone size={48} className="mx-auto mb-4 opacity-90" />
-          <h1 className="text-3xl font-bold mb-2">Install SocialScope</h1>
+          <h1 className="text-3xl font-bold mb-2">Install the Study App</h1>
           <p className="text-blue-100 text-lg">
-            Social Media Research Platform — Dartmouth College
+            Social Media Wellness — Dartmouth College
           </p>
         </div>
       </div>
@@ -239,7 +239,7 @@ const InstallPage = () => {
 
         {/* Footer */}
         <div className="mt-12 pt-8 border-t text-center text-sm text-gray-500">
-          <p>SocialScope Research Study</p>
+          <p>Social Media Wellness Research Study</p>
           <p className="mt-1">Dartmouth College</p>
           <p className="mt-2">
             If you need help installing the app, please contact the research team.

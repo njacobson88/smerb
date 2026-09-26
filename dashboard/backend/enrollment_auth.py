@@ -53,14 +53,14 @@ def build_enrollment_url(base_url, participant_id, secret) -> str:
 def enrollment_sms_text(url) -> str:
     """SMS body delivering the enrollment link to the participant's study phone."""
     return (
-        "SocialScope (Dartmouth) study: open this link on your study phone to "
-        "sign in to the app.\n" + str(url) + "\n"
+        "Social Media Wellness (Dartmouth) study: open this link on your study "
+        "phone to sign in to the app (the SocialScope icon).\n" + str(url) + "\n"
         "Keep this link private — it signs you in. Reply STOP to opt out of texts."
     )
 
 
 def enrollment_email_subject() -> str:
-    return "Your SocialScope study app sign-in link"
+    return "Your Social Media Wellness study app sign-in link"
 
 
 def enrollment_email_html(url) -> str:
@@ -68,12 +68,13 @@ def enrollment_email_html(url) -> str:
     safe_url = str(url)
     return (
         "<p>Hello,</p>"
-        "<p>To sign in to the SocialScope study app, open this link "
+        "<p>To sign in to the study app — the <strong>SocialScope</strong> icon "
+        "on your phone — open this link "
         "<strong>on the phone where you installed the app</strong>:</p>"
-        f'<p><a href="{safe_url}">Sign in to SocialScope</a></p>'
+        f'<p><a href="{safe_url}">Sign in to the study app</a></p>'
         "<p>If the button doesn't open the app, copy and paste this link into "
         f"your phone's browser:<br>{safe_url}</p>"
         "<p>Please keep this link private — it signs you in to your study "
         "account. You can reuse it if you reinstall or change phones.</p>"
-        "<p>— SocialScope Study Team, Dartmouth College</p>"
+        "<p>— Social Media Wellness Study Team, Dartmouth College</p>"
     )

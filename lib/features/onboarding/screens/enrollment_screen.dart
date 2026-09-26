@@ -49,7 +49,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 const SizedBox(height: 24),
 
                 Text(
-                  'SocialScope',
+                  'Social Media Wellness',
                   style: Theme.of(context).textTheme.headlineLarge?.copyWith(
                     fontWeight: FontWeight.bold,
                     color: const Color(0xFF1A1A2E),
