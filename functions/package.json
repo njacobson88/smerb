@@ -11,5 +11,8 @@
     "jpegtran-bin": "^7.0.0",
     "tar-stream": "^3.2.0",
     "twilio": "^5.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
   }
 }

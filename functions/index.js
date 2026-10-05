@@ -1,6 +1,8 @@
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
+const { secretValue, assertSafeMailbox } = require("./secret_utils");
+const { emergencyContactReason, buildEmergencyContactSms } = require("./escalation_rules");
 const admin = require("firebase-admin");
 
 admin.initializeApp();
@@ -39,11 +41,7 @@ const MSGRAPH_CLIENT_ID = "6fa0910d-2e09-41e2-ba41-0357213d2517";
 let _graphToken = { value: null, exp: 0 };
 
 function graphEmailConfigured() {
-  try {
-    return !!(msgraphClientSecret.value() || "").trim();
-  } catch (_) {
-    return false;
-  }
+  return !!secretValue(msgraphClientSecret);
 }
 
 async function getGraphToken() {
@@ -51,7 +49,7 @@ async function getGraphToken() {
   if (_graphToken.value && _graphToken.exp - 60 > now) return _graphToken.value;
   const body = new URLSearchParams({
     client_id: MSGRAPH_CLIENT_ID,
-    client_secret: msgraphClientSecret.value().trim(),
+    client_secret: secretValue(msgraphClientSecret),
     scope: "https://graph.microsoft.com/.default",
     grant_type: "client_credentials",
   });
@@ -69,8 +67,13 @@ async function getGraphToken() {
 // Helper: Send email via Microsoft Graph (Slack channel + participant notifications)
 // ============================================================================
 async function sendEmail({ senderEmail, to, subject, body }) {
+  // Belt and braces alongside secretValue(): whatever the caller passes, a
+  // control character here would encode into the URL path (%0A) and Graph would
+  // reject the request before auth with an opaque HTML error page. Fail with a
+  // message that names the real problem instead.
+  const cleanSender = assertSafeMailbox(senderEmail);
   const token = await getGraphToken();
-  const mailbox = encodeURIComponent(senderEmail);
+  const mailbox = encodeURIComponent(cleanSender);
   const resp = await fetch(
     `https://graph.microsoft.com/v1.0/users/${mailbox}/sendMail`,
     {
@@ -93,8 +96,8 @@ async function sendEmail({ senderEmail, to, subject, body }) {
 // ============================================================================
 function getTwilioClient() {
   return require("twilio")(
-    twilioAccountSid.value(),
-    twilioAuthToken.value()
+    secretValue(twilioAccountSid),
+    secretValue(twilioAuthToken)
   );
 }
 
@@ -198,21 +201,37 @@ async function placeParticipantTriageCall(client, fromNumber, participantId, ale
   return { sid: call.sid, status: call.status, phone: participantPhone };
 }
 
-// Read a participant's current SMS opt-out status (best-effort, defaults false).
-async function _participantSmsOptedOut(participantId) {
-  try {
-    const snap = await admin.firestore().collection(col("participants")).doc(participantId).get();
-    return snap.exists && snap.data().smsOptedOut === true;
-  } catch (_) {
-    return false;
-  }
-}
-
 // ============================================================================
 // Helper: Create a safety event in the audit trail system
 // ============================================================================
 async function createSafetyEvent(alertData, participantId, alertId) {
   const eventRef = admin.firestore().collection(col("safety_events")).doc(alertId);
+
+  // Snapshot how to reach the participant ONTO the event. checkEscalation runs
+  // against safety_events alone and reads eventData.participantPhone to place
+  // the +10 min triage call. Commit 8d93471 moved that call into the scheduler
+  // and pointed it at this field — but nothing ever wrote it, so the field was
+  // undefined on every event and the triage call silently never fired again,
+  // for any alert type, from June 11 onward (participantCallPlaced is null on
+  // every event in the collection). This is the write that was missing.
+  let participantPhone = null;
+  let participantEmail = null;
+  let participantSmsOptedOut = false;
+  try {
+    const snap = await admin.firestore().collection(col("participants")).doc(participantId).get();
+    if (snap.exists) {
+      const p = snap.data() || {};
+      participantPhone = p.phone || p.phoneNumber || null;
+      participantEmail = p.email || null;
+      participantSmsOptedOut = p.smsOptedOut === true;
+    }
+  } catch (err) {
+    console.error(`[SafetyEvent] Could not read participant ${participantId}: ${err.message}`);
+  }
+  if (!participantPhone) {
+    // Loud, because without this the participant cannot be called.
+    console.error(`[SafetyEvent] No phone on file for ${participantId} — triage call will not be possible`);
+  }
 
   await eventRef.set({
     participantId,
@@ -227,9 +246,11 @@ async function createSafetyEvent(alertData, participantId, alertId) {
     responses: alertData.responses || {},
     confirmationNumber: alertData.confirmationNumber || null,
     triggerQuestion: alertData.triggerQuestion || null,
-    // Snapshot SMS-reachability onto the event so every escalation step (and the
-    // dashboard) knows whether the participant can be texted/can reply by text.
-    participantSmsOptedOut: await _participantSmsOptedOut(participantId),
+    participantPhone,
+    participantEmail,
+    // SMS-reachability, so every escalation step (and the dashboard) knows
+    // whether the participant can be texted / can reply by text.
+    participantSmsOptedOut,
   });
 
   // Log initial event in audit trail
@@ -435,61 +456,44 @@ async function getParticipantInfo(participantId) {
 // ============================================================================
 // Helper: Notify emergency contacts via SMS and call
 // ============================================================================
-async function notifyEmergencyContacts(client, participantId, participantInfo, fromNumber, safetyEventRef) {
+/**
+ * Text a participant's emergency contacts.
+ *
+ * SMS only, by PI direction: this is deliberately not part of the IVR and does
+ * not place calls. It is also a one-way, irreversible disclosure to a third
+ * party, so every caller must have already ruled out an explicit denial.
+ */
+async function notifyEmergencyContacts(
+  client, participantId, participantInfo, fromNumber, safetyEventRef, reason = "affirmative") {
   const results = [];
+  const participantName = participantInfo.name || null; // escalation_rules supplies the ID-free fallback
 
   for (const contact of (participantInfo.emergencyContacts || [])) {
     if (!contact.phone) continue;
-
-    const participantName = participantInfo.name || `Study participant ${participantId}`;
     const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
 
-    // SMS first
     try {
       const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
-        body: `This is the SocialScope research study team at Dartmouth College. ` +
-              `${participantName} has designated you (${contact.name}) as an emergency contact ` +
-              `and has indicated they are currently experiencing a mental health crisis. ` +
-              `We encourage you to reach out to them to provide support. ` +
-              `If you believe they are in immediate danger, please call 911. ` +
-              `You can also call the 988 Suicide & Crisis Lifeline.`,
+        body: buildEmergencyContactSms(reason, participantName, contact.name),
         from: fromNumber,
         to: contactPhone,
       }));
-      results.push({ name: contact.name, phone: contact.phone, smsSid: smsResult.sid, type: "sms" });
+      results.push({ name: contact.name, phone: contact.phone, smsSid: smsResult.sid, type: "sms", reason });
     } catch (err) {
-      results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "sms" });
+      console.error(`[EmergencyContact] SMS to ${contact.name} failed: ${err.message}`);
+      results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "sms", reason });
     }
 
-    // Voice call with voicemail
-    try {
-      const callResult = await twilioWithRetry("calls.create", () => client.calls.create({
-        twiml: `<Response><Say voice="alice">` +
-          `Hello ${contact.name}. This is the SocialScope research study team at Dartmouth College. ` +
-          `${participantName} has designated you as an emergency contact and has indicated ` +
-          `they are currently experiencing a mental health crisis. ` +
-          `We encourage you to proactively reach out to them to provide support. ` +
-          `If you believe they are in immediate danger, please call 911. ` +
-          `Thank you.</Say></Response>`,
-        from: fromNumber,
-        to: contactPhone,
-        timeout: 30,
-      }));
-      results.push({ name: contact.name, phone: contact.phone, callSid: callResult.sid, type: "call" });
-    } catch (err) {
-      results.push({ name: contact.name, phone: contact.phone, error: err.message, type: "call" });
-    }
-
-    // Log to audit trail
     if (safetyEventRef) {
       await safetyEventRef.collection("audit_trail").doc().set({
         type: "emergency_contact_notified",
         contactName: contact.name,
         contactPhone: contact.phone,
+        reason,
         results: results.filter(r => r.phone === contact.phone),
         loggedBy: "system",
         loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      }).catch(() => {});
     }
   }
 
@@ -545,8 +549,8 @@ exports[safetyAlertFnName] = onDocumentCreated(
     let slackResult = null;
     let slackError = null;
 
-    const slackEmail = slackChannelEmail.value();
-    const senderEmailVal = alertSenderEmail.value();
+    const slackEmail = secretValue(slackChannelEmail);
+    const senderEmailVal = secretValue(alertSenderEmail);
     const emailReady = graphEmailConfigured();
 
     if (slackEmail && senderEmailVal && emailReady) {
@@ -583,129 +587,50 @@ exports[safetyAlertFnName] = onDocumentCreated(
       }
     }
 
-    // ================================================================
-    // Step 3: Notify on-call team via SMS (uses on-call roster)
-    // For CONFIRMED DANGER: on-call is NOT paged immediately — automated
-    //   participant outreach (SMS + IVR call) happens first. On-call is
-    //   paged by the escalation scheduler after 15 min if unresolved.
-    // For other alert types (fallback, walk-away): on-call is paged immediately.
-    // ================================================================
-    const roster = await getOnCallRoster();
-    const recipients = [];
-
-    // Build recipient list from on-call roster (primary first, then backup, then PI)
-    for (const role of ["primary", "backup", "pi"]) {
-      const person = roster[role];
-      if (person && person.phone) {
-        recipients.push({ phone: person.phone, name: person.name || role, role });
-      }
-    }
-
-    // Legacy fallback: also check alert_recipients collection
-    try {
-      const legacySnapshot = await admin.firestore()
-        .collection(col("alert_recipients")).get();
-      legacySnapshot.forEach((doc) => {
-        const data = doc.data();
-        if (!recipients.find(r => r.phone === doc.id)) {
-          recipients.push({ phone: doc.id, name: data.name || null, role: "legacy" });
-        }
-      });
-    } catch (e) { /* ignore legacy collection errors */ }
-
-    if (alertData.pageTarget && !recipients.find(r => r.phone === alertData.pageTarget)) {
-      recipients.push({ phone: alertData.pageTarget, name: "Legacy Target", role: "legacy" });
-    }
-
-    let smsResults = [];
-    let smsErrors = [];
-
-    // For confirmed danger: skip immediate on-call page — automated outreach first
-    // Escalation scheduler will page on-call after 15 min if participant doesn't resolve
-    // If the participant opted out of SMS, on-call must reach them by phone.
-    const participantSmsOptedOut = await _participantSmsOptedOut(participantId);
-    const smsUnreachableWarning = participantSmsOptedOut
-      ? `\n** PARTICIPANT OPTED OUT OF SMS — they will NOT receive texts and cannot reply by text. Reach them by PHONE CALL. They can still answer the automated call or respond in-app. **\n`
-      : ``;
-
-    if (recipients.length > 0 && !isConfirmedDanger) {
-      try {
-        const client = getTwilioClient();
-        const alertLabel = isConfirmedDanger
-          ? "CONFIRMED DANGER"
-          : isWalkAway
-            ? "POTENTIAL RISK (walked away)"
-            : isFallback
-              ? "INCOMPLETE CHECK-IN"
-              : "ALERT";
-
-        const smsBody =
-          `[SocialScope ${alertLabel}]\n` +
-          `Participant: ${participantId}\n` +
-          `Time: ${timestamp}\n` +
-          (isConfirmedDanger
-            ? `Participant CONFIRMED they are in immediate danger.\n`
-            : isWalkAway
-              ? `POTENTIAL RISK: Participant gave concerning responses then walked away. Not confirmed — please follow up.\n`
-              : isFallback
-                ? `High-risk responses, exited before confirmation.\n`
-                : `Endorsed imminent self-harm risk.\n`) +
-          smsUnreachableWarning +
-          `\nReply ACK to acknowledge.\n` +
-          `Reply SAFE, SUPPORT, NOREACH, FALSE, 988, or ER to log disposition.\n` +
-          `Dashboard: ${DASHBOARD_URL}`;
-
-        for (const recipient of recipients) {
-          try {
-            const result = await twilioWithRetry("messages.create", () => client.messages.create({
-              body: smsBody,
-              from: twilioFromNumber.value(),
-              to: `+1${recipient.phone}`,
-            }));
-            smsResults.push({
-              phone: recipient.phone,
-              name: recipient.name,
-              role: recipient.role,
-              sid: result.sid,
-              status: result.status,
-            });
-          } catch (recipientError) {
-            smsErrors.push({
-              phone: recipient.phone,
-              name: recipient.name,
-              error: recipientError.message,
-            });
-          }
-        }
-      } catch (error) {
-        console.error("Error initializing Twilio client:", error);
-        smsErrors.push({ error: error.message });
-      }
-    }
+    // NOTE: there is deliberately no immediate page to on-call here.
+    // Walk-away and incomplete alerts used to blast every on-call researcher
+    // the moment the alert was created. Per PI direction the participant now
+    // gets the same triage sequence as an affirmative crisis first, and
+    // checkEscalation pages primary/backup/PI on the standard ladder if they
+    // do not resolve it themselves.
 
     // ================================================================
-    // Step 4: Automated participant outreach (confirmed danger only)
+    // Step 4: Automated participant outreach — EVERY alert type.
     //
     // Sequence:
     //   4a. SMS participant: "We'll be calling. Reply ERROR or 1 if accidental."
-    //   4b. IVR call: Press 1 = error, Press 2 = crisis (warm handoff 988),
-    //       Press 3 = crisis + notify emergency contacts
-    //   4c. If no resolution from 4a/4b → page on-call with full history
-    //   Emergency contacts notified if press 2 or press 3 in IVR
+    //   4a-push. In-app self-confirm push (confirm / error).
+    //   4c. Email participant.
+    //   4b. IVR triage call ~10 min later, placed by checkEscalation. The three
+    //       options the participant actually hears are:
+    //         1 = it was an error, not in crisis   -> stops escalation
+    //         2 = transfer me to 988 now           -> bridges to 988
+    //         3 = I WAS in crisis but already got support -> stops escalation
+    //   4d. On-call paged on the ladder if still unresolved.
+    //
+    // Emergency contacts are NOT part of the IVR. They are texted by
+    // checkEscalation when the participant affirms a crisis (in-app YES or
+    // press 2) or goes unreachable — never after an explicit denial. Press 3 is
+    // an all-clear, not an escalation; an earlier version of this comment said
+    // otherwise and that was never what the code or the call script did.
     // ================================================================
     let participantSmsResult = null;
     let participantCallResult = null;
     let emergencyContactResults = null;
 
     // Get enriched participant info (phone, email, emergency contacts, REDCap ID)
-    const participantInfo = isConfirmedDanger
-      ? await getParticipantInfo(participantId)
-      : null;
+    //
+    // Fetched for EVERY alert type now. This outreach used to be gated on
+    // confirmed danger, so a participant who gave concerning answers and walked
+    // away received no text, no push, no email and no call — only the on-call
+    // team was told. Per PI direction an incomplete check-in is handled exactly
+    // like an affirmative one.
+    const participantInfo = await getParticipantInfo(participantId);
 
-    if (isConfirmedDanger && participantInfo) {
+    if (participantInfo) {
       try {
         const client = getTwilioClient();
-        const fromNumber = twilioFromNumber.value();
+        const fromNumber = secretValue(twilioFromNumber);
 
         // 4a. SMS participant — includes error acknowledgment option
         if (participantInfo.phone) {
@@ -845,11 +770,9 @@ exports[safetyAlertFnName] = onDocumentCreated(
     // Step 5: Update alert document with all results
     // ================================================================
     await snapshot.ref.update({
-      handled: smsResults.length > 0 || slackResult === "sent" || (participantSmsResult && participantSmsResult.sid) || (participantCallResult && participantCallResult.sid),
-      smsResults: smsResults.length > 0 ? smsResults : null,
-      smsErrors: smsErrors.length > 0 ? smsErrors : null,
-      recipientCount: recipients.length,
-      successCount: smsResults.length,
+      handled: slackResult === "sent" || (participantSmsResult && participantSmsResult.sid) || (participantCallResult && participantCallResult.sid),
+      smsResults: null,
+      smsErrors: null,
       slackResult,
       slackError,
       participantSmsResult,
@@ -861,13 +784,11 @@ exports[safetyAlertFnName] = onDocumentCreated(
 
     console.log(
       `Safety alert ${alertId}: type=${alertType}, ` +
-      `SMS ${smsResults.length}/${recipients.length}, ` +
       `Slack: ${slackResult || "skipped"}, ` +
-      `Participant outreach: ${isConfirmedDanger ? "yes" : "skipped"}`
+      `Participant outreach: sms=${participantSmsResult ? "yes" : "no"}`
     );
   }
 );
-
 
 // ============================================================================
 // Escalation Scheduler: Check for unresponded safety events
@@ -977,6 +898,94 @@ function participantFollowupBody() {
   );
 }
 
+// ============================================================================
+// Emergency contacts (PI-specified)
+//
+// Text them when the participant has AFFIRMED a crisis, or has gone
+// unreachable — never after an explicit denial. The decision itself lives in
+// escalation_rules.js so it is unit tested; this wraps it with the I/O and the
+// two guards that make an irreversible third-party disclosure safe to automate:
+//   - claim the event BEFORE sending, so a Twilio failure cannot cause the next
+//     cron tick to text the same people again
+//   - one notification per PARTICIPANT per 24h across events, so a walk-away
+//     that becomes a confirmed-danger alert minutes later does not produce two
+// ============================================================================
+const EMERGENCY_CONTACT_COOLDOWN_MIN = 24 * 60;
+
+async function maybeNotifyEmergencyContacts(doc, eventData, minutesSinceCreation, client, fromNumber) {
+  const ecReason = emergencyContactReason(eventData, minutesSinceCreation);
+  if (!ecReason) return;
+
+  const participantId = eventData.participantId;
+  const now = Date.now();
+
+  // Per-participant cooldown across events.
+  try {
+    const recent = await admin.firestore().collection(col("safety_events"))
+      .where("participantId", "==", participantId)
+      .where("emergencyContactsNotified", "==", true)
+      .get();
+    for (const other of recent.docs) {
+      if (other.id === doc.id) continue;
+      const at = other.data().emergencyContactsNotifiedAt?.toDate?.();
+      if (at && (now - at.getTime()) / 60000 < EMERGENCY_CONTACT_COOLDOWN_MIN) {
+        await doc.ref.update({
+          emergencyContactsNotified: true,
+          emergencyContactsNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          emergencyContactsNotifyReason: ecReason,
+          emergencyContactsSkippedDuplicateOf: other.id,
+        });
+        await doc.ref.collection("audit_trail").doc().set({
+          type: "emergency_contact_skipped",
+          message: `Contacts already texted for event ${other.id} within the last 24h`,
+          reason: ecReason,
+          loggedBy: "system",
+          loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }).catch(() => {});
+        console.log(`[Escalation] Emergency contacts for ${participantId} already texted (event ${other.id}); skipping`);
+        return;
+      }
+    }
+  } catch (err) {
+    // A failed dedupe lookup must not block a legitimate notification.
+    console.warn(`[Escalation] Cooldown lookup failed for ${participantId}: ${err.message}`);
+  }
+
+  // Claim first.
+  await doc.ref.update({
+    emergencyContactsNotified: true,
+    emergencyContactsNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    emergencyContactsNotifyReason: ecReason,
+  });
+
+  try {
+    const info = await getParticipantInfo(participantId);
+    if ((info.emergencyContacts || []).length === 0) {
+      console.warn(`[Escalation] No emergency contacts on file for ${participantId}`);
+      await doc.ref.collection("audit_trail").doc().set({
+        type: "emergency_contact_skipped",
+        message: "No emergency contacts on file",
+        reason: ecReason,
+        loggedBy: "system",
+        loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return;
+    }
+    const results = await notifyEmergencyContacts(client, participantId, info, fromNumber, doc.ref, ecReason);
+    await doc.ref.update({ emergencyContactResults: results });
+    console.log(`[Escalation] Emergency contacts texted for ${participantId} (${ecReason})`);
+  } catch (err) {
+    console.error(`[Escalation] Emergency contact notify failed for ${participantId}: ${err.message}`);
+    await doc.ref.collection("audit_trail").doc().set({
+      type: "emergency_contact_failed",
+      error: err.message,
+      reason: ecReason,
+      loggedBy: "system",
+      loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }).catch(() => {});
+  }
+}
+
 const escalationFnName = ENVIRONMENT === "dev" ? "dev_checkEscalation" : "checkEscalation";
 exports[escalationFnName] = onSchedule(
   {
@@ -995,11 +1004,20 @@ exports[escalationFnName] = onSchedule(
         .where("escalationStopped", "==", false)
         .get();
 
-      if (eventsSnapshot.empty) return;
+      // Events that affirmed a crisis by asking for 988 and then had the bridge
+      // connect are no longer "unresolved" and fall out of the query above —
+      // but a participant on the phone with 988 is exactly who the PI wants
+      // their contacts told about. Sweep them separately.
+      const affirmedSnapshot = await admin.firestore()
+        .collection(col("safety_events"))
+        .where("notifyEmergencyContacts", "==", true)
+        .get();
+
+      if (eventsSnapshot.empty && affirmedSnapshot.empty) return;
 
       const roster = await getOnCallRoster();
       const client = getTwilioClient();
-      const fromNumber = twilioFromNumber.value();
+      const fromNumber = secretValue(twilioFromNumber);
 
       for (const doc of eventsSnapshot.docs) {
         const eventData = doc.data();
@@ -1014,17 +1032,14 @@ exports[escalationFnName] = onSchedule(
         // Don't act on stale events (on-call was long since paged or it's abandoned)
         if (minutesSinceCreation > ESCALATION_MAX_AGE_MIN) continue;
 
-        // Confirmed-danger alerts skip the initial page (automated participant
-        // outreach + 988 triage runs first), so the ladder starts at the
-        // response window: primary at +5, backup +15, PI +30. Non-confirmed
-        // alerts (walk-away/fallback) were already paged to ALL on-call at
-        // creation, so we only escalate backup/PI if still unacknowledged.
-        const isConfirmedDanger = (eventData.alertType || "confirmed_danger") === "confirmed_danger";
-
         // Place the automated triage IVR call ~10 min in, if the participant
-        // hasn't already self-resolved via text/push. (Confirmed-danger only;
-        // non-confirmed alerts don't get the triage-call flow.)
-        if (isConfirmedDanger && !eventData.participantCallPlaced &&
+        // hasn't already self-resolved via text/push.
+        //
+        // This used to be confirmed-danger only, so a participant who gave
+        // concerning answers and then went silent — the case with the LEAST
+        // information about their safety — was never called at all. Per PI
+        // direction every safety alert now runs the same participant triage.
+        if (!eventData.participantCallPlaced &&
             minutesSinceCreation >= IVR_CALL_DELAY_MIN && eventData.participantPhone) {
           const phone = eventData.participantPhone.startsWith("+")
             ? eventData.participantPhone : `+1${eventData.participantPhone}`;
@@ -1059,9 +1074,17 @@ exports[escalationFnName] = onSchedule(
           });
         }
 
+        await maybeNotifyEmergencyContacts(doc, eventData, minutesSinceCreation, client, fromNumber);
+
         if (!acknowledged) {
           const due = [];
-          if (isConfirmedDanger) {
+          {
+            // One ladder for every alert type now: participant triage runs
+            // first, then primary at +PRIMARY_PAGE_MIN, backup +BACKUP_AFTER_MIN
+            // after that, PI +PI_AFTER_MIN after that. Walk-away and
+            // incomplete alerts used to page ALL on-call instantly instead,
+            // which is what the PI asked be removed — the participant gets the
+            // chance to self-resolve before the team is pulled in.
             if (minutesSinceCreation >= PRIMARY_PAGE_MIN && !eventData.primaryPaged) {
               due.push(["primary", roster.primary, "primaryPaged"]);
             }
@@ -1069,14 +1092,6 @@ exports[escalationFnName] = onSchedule(
               due.push(["backup", roster.backup, "backupEscalated"]);
             }
             if (minutesSinceCreation >= PRIMARY_PAGE_MIN + BACKUP_AFTER_MIN + PI_AFTER_MIN && !eventData.piEscalated) {
-              due.push(["pi", roster.pi, "piEscalated"]);
-            }
-          } else {
-            // Already paged everyone at creation — re-escalate if unacknowledged.
-            if (minutesSinceCreation >= BACKUP_AFTER_MIN && !eventData.backupEscalated) {
-              due.push(["backup", roster.backup, "backupEscalated"]);
-            }
-            if (minutesSinceCreation >= BACKUP_AFTER_MIN + PI_AFTER_MIN && !eventData.piEscalated) {
               due.push(["pi", roster.pi, "piEscalated"]);
             }
           }
@@ -1132,8 +1147,8 @@ exports[escalationFnName] = onSchedule(
             if (minsSinceReminder >= ACK_REMINDER_THROTTLE_MIN) {
               try {
                 await sendEmail({
-                  senderEmail: alertSenderEmail.value(),
-                  to: slackChannelEmail.value(),
+                  senderEmail: secretValue(alertSenderEmail),
+                  to: secretValue(slackChannelEmail),
                   subject: `[SocialScope] Disposition still needed — participant ${eventData.participantId}`,
                   body: `A safety event for participant ${eventData.participantId} was acknowledged by ` +
                         `on-call ${Math.round(minutesSinceCreation)} min ago but has no final disposition yet.\n\n` +
@@ -1154,6 +1169,16 @@ exports[escalationFnName] = onSchedule(
             }
           }
         }
+      }
+
+      for (const doc of affirmedSnapshot.docs) {
+        const eventData = doc.data();
+        if (eventData.emergencyContactsNotified === true) continue;
+        if (eventData.escalationStopped === false) continue; // handled in the main loop
+        const createdAt = eventData.createdAt?.toDate?.() || new Date();
+        const minutesSinceCreation = (now.getTime() - createdAt.getTime()) / (60 * 1000);
+        if (minutesSinceCreation > ESCALATION_MAX_AGE_MIN) continue;
+        await maybeNotifyEmergencyContacts(doc, eventData, minutesSinceCreation, client, fromNumber);
       }
     } catch (err) {
       console.error("Escalation check error:", err);
@@ -1251,7 +1276,7 @@ exports[escalationFnName] = onSchedule(
             if (pInfo.email) {
               try {
                 await sendEmail({
-                  senderEmail: alertSenderEmail.value(),
+                  senderEmail: secretValue(alertSenderEmail),
                   to: pInfo.email,
                   subject: PARTICIPANT_FOLLOWUP_SUBJECT,
                   body,
@@ -1274,136 +1299,12 @@ exports[escalationFnName] = onSchedule(
           }
         }
 
-        // ─── TEXT emergency contacts once on-call escalation begins ───
-        // Aligned with PRIMARY_PAGE_MIN so family is contacted only after the
-        // participant's own text/push window AND the automated triage call have
-        // had a chance — not before we've even tried calling the participant.
-        if (minutesSinceCreation >= PRIMARY_PAGE_MIN && !eventData.emergencyContactAutoTextSent) {
-          console.log(`[EmergencyContactAuto] escalation reached for ${eventData.participantId}, texting emergency contacts`);
-
-          // Get participant info for emergency contacts
-          const participantInfo = await getParticipantInfo(eventData.participantId);
-
-          if (participantInfo.emergencyContacts && participantInfo.emergencyContacts.length > 0) {
-            const client = getTwilioClient();
-            const fromNumber = twilioFromNumber.value();
-            const participantName = participantInfo.name || `Study participant ${eventData.participantId}`;
-            // Contacts are independent — send in parallel so retry backoff on
-            // one slow contact can't push the run past its timeout (which would
-            // re-send duplicate crisis texts on the next run).
-            const textResults = await Promise.all(participantInfo.emergencyContacts
-              .filter((c) => c.phone)
-              .map(async (contact) => {
-              const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
-              const contactName = contact.name || "emergency contact";
-
-              try {
-                const smsResult = await twilioWithRetry("messages.create", () => client.messages.create({
-                  body: `This is the SocialScope research study team at Dartmouth College. ` +
-                        `${participantName} has designated you (${contactName}) as an emergency contact ` +
-                        `and has reported that they are currently experiencing a mental health crisis to our study team. ` +
-                        `We encourage you to reach out to ${participantName} to try to check in on them and provide support. ` +
-                        `If you believe they are in immediate danger, please call 911. ` +
-                        `You can also encourage them to call 988 (Suicide & Crisis Lifeline). ` +
-                        `Thank you for your help.`,
-                  from: fromNumber,
-                  to: contactPhone,
-                }));
-                console.log(`[EmergencyContactAuto] Text sent to ${contactName} (${contact.phone}): ${smsResult.sid}`);
-                return { name: contactName, phone: contact.phone, sid: smsResult.sid };
-              } catch (err) {
-                console.error(`[EmergencyContactAuto] Text failed to ${contactName}: ${err.message}`);
-                return { name: contactName, phone: contact.phone, error: err.message };
-              }
-            }));
-
-            // Mark as sent so we don't repeat
-            await doc.ref.update({
-              emergencyContactAutoTextSent: true,
-              emergencyContactAutoTextSentAt: admin.firestore.FieldValue.serverTimestamp(),
-              emergencyContactAutoTextResults: textResults,
-            });
-
-            await doc.ref.collection("audit_trail").doc().set({
-              type: "emergency_contact_auto_text",
-              reason: "participant_no_reply_5min",
-              minutesSinceAlert: Math.round(minutesSinceCreation),
-              contactsNotified: textResults.length,
-              results: textResults,
-              loggedBy: "system",
-              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-          } else {
-            console.log(`[EmergencyContactAuto] No emergency contacts found for ${eventData.participantId}`);
-            await doc.ref.update({ emergencyContactAutoTextSent: true, emergencyContactAutoTextSkipped: "no_contacts" });
-          }
-        }
-
-        // ─── CALL emergency contacts ~3 min after texting them ───
-        if (minutesSinceCreation >= PRIMARY_PAGE_MIN + 3 && eventData.emergencyContactAutoTextSent && !eventData.emergencyContactAutoCallSent) {
-          console.log(`[EmergencyContactAuto] calling emergency contacts for ${eventData.participantId}`);
-
-          const participantInfo = await getParticipantInfo(eventData.participantId);
-
-          if (participantInfo.emergencyContacts && participantInfo.emergencyContacts.length > 0) {
-            const client = getTwilioClient();
-            const fromNumber = twilioFromNumber.value();
-            const participantName = participantInfo.name || `Study participant ${eventData.participantId}`;
-            // Parallel for the same reason as the text branch above
-            const callResults = await Promise.all(participantInfo.emergencyContacts
-              .filter((c) => c.phone)
-              .map(async (contact) => {
-              const contactPhone = contact.phone.startsWith("+") ? contact.phone : `+1${contact.phone}`;
-              const contactName = contact.name || "emergency contact";
-
-              try {
-                const callResult = await twilioWithRetry("calls.create", () => client.calls.create({
-                  twiml: `<Response>` +
-                    `<Pause length="2"/>` +
-                    `<Say voice="Polly.Joanna">Hello ${contactName}. This is the SocialScope research study team at Dartmouth College.</Say>` +
-                    `<Pause length="1"/>` +
-                    `<Say voice="Polly.Joanna">${participantName} has designated you as an emergency contact for our study, ` +
-                    `and has reported that they are currently experiencing a mental health crisis to our study team.</Say>` +
-                    `<Pause length="1"/>` +
-                    `<Say voice="Polly.Joanna">We encourage you to reach out to ${participantName} to try to check in on them and provide support.</Say>` +
-                    `<Pause length="1"/>` +
-                    `<Say voice="Polly.Joanna">If you believe they are in immediate danger, please call 911. ` +
-                    `You can also encourage them to call 988, the Suicide and Crisis Lifeline.</Say>` +
-                    `<Pause length="1"/>` +
-                    `<Say voice="Polly.Joanna">Thank you for your help. Goodbye.</Say>` +
-                    `</Response>`,
-                  from: fromNumber,
-                  to: contactPhone,
-                  timeout: 60,
-                }));
-                console.log(`[EmergencyContactAuto] Call placed to ${contactName} (${contact.phone}): ${callResult.sid}`);
-                return { name: contactName, phone: contact.phone, sid: callResult.sid };
-              } catch (err) {
-                console.error(`[EmergencyContactAuto] Call failed to ${contactName}: ${err.message}`);
-                return { name: contactName, phone: contact.phone, error: err.message };
-              }
-            }));
-
-            // Mark as sent
-            await doc.ref.update({
-              emergencyContactAutoCallSent: true,
-              emergencyContactAutoCallSentAt: admin.firestore.FieldValue.serverTimestamp(),
-              emergencyContactAutoCallResults: callResults,
-            });
-
-            await doc.ref.collection("audit_trail").doc().set({
-              type: "emergency_contact_auto_call",
-              reason: "participant_no_reply_8min",
-              minutesSinceAlert: Math.round(minutesSinceCreation),
-              contactsCalled: callResults.length,
-              results: callResults,
-              loggedBy: "system",
-              loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-          } else {
-            await doc.ref.update({ emergencyContactAutoCallSent: true, emergencyContactAutoCallSkipped: "no_contacts" });
-          }
-        }
+        // Emergency contacts are NOT notified from this loop. They are handled
+        // once, with tested rules, by maybeNotifyEmergencyContacts() above.
+        // The old +15 text / +18 call that lived here was dormant since June
+        // (gated on participantPhone, which was never written) and would have
+        // woken up alongside the new path the moment that field was fixed —
+        // double-texting contacts and placing calls the PI ruled out.
       }
     } catch (err) {
       console.error("Emergency contact auto-notification error:", err);
@@ -1484,7 +1385,6 @@ exports[escalationFnName] = onSchedule(
     }
   }
 );
-
 
 // ============================================================================
 // Lossless Screenshot Optimizer
@@ -1576,7 +1476,6 @@ exports.optimizeScreenshot = onObjectFinalized(
   }
 );
 
-
 // ============================================================================
 // Daily Firestore Backup
 //
@@ -1607,7 +1506,6 @@ exports.dailyFirestoreBackup = onSchedule(
     console.log(`[FirestoreBackup] Export started -> ${outputUriPrefix} (operation: ${res.data.name})`);
   }
 );
-
 
 // ============================================================================
 // HTML Brotli Transcode (hourly)
@@ -1750,7 +1648,6 @@ exports.htmlBrotliTranscode = onSchedule(
     console.log(`[HtmlBrotli] converted=${converted} skipped=${skipped} failed=${failed}`);
   }
 );
-
 
 // ============================================================================
 // HTML Solid Compaction (daily)
@@ -1926,7 +1823,6 @@ exports.compactOldHtml = onSchedule(
     console.log(`[HtmlCompact] processed ${processed} participant-day groups`);
   }
 );
-
 
 // ============================================================================
 // Screenshot JXL Conversion (hourly)
