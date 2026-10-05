@@ -89,6 +89,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _initializeAll();
   }
 
+  /// Deep-link to this app's notification switch (Android). The resume hook in
+  /// CheckinService re-reads the permission when the participant comes back,
+  /// which is what clears the banner.
+  Future<void> _openNotificationSettings() async {
+    try {
+      await const MethodChannel('com.smerb/ocr').invokeMethod('openNotificationSettings');
+    } catch (e) {
+      print('[Browser] Could not open notification settings: $e');
+    }
+  }
+
   Future<void> _initializeAll() async {
     // Detect emulator BEFORE building the WebView
     if (Platform.isAndroid) {
@@ -389,6 +400,51 @@ class _BrowserScreenState extends State<BrowserScreen> {
       ),
       body: Column(
         children: [
+          // Notifications blocked by the OS: the one reminder failure the app
+          // cannot fix on its own. Shown only while the permission is denied;
+          // clears automatically once the participant enables it and returns.
+          ValueListenableBuilder<bool?>(
+            valueListenable: _checkinService.notificationsEnabled,
+            builder: (context, enabled, _) {
+              if (enabled != false) return const SizedBox.shrink();
+              return Material(
+                color: const Color(0xFFFFF3E0),
+                child: SafeArea(
+                  top: false,
+                  bottom: false,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.notifications_off_outlined,
+                            color: Color(0xFFE65100), size: 22),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text(
+                            'Check-in reminders are off because notifications are '
+                            'disabled for this app. Tap Enable, switch them on, '
+                            'then come back.',
+                            style: TextStyle(fontSize: 13, color: Color(0xFF5D4037), height: 1.25),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        TextButton(
+                          onPressed: _openNotificationSettings,
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.white,
+                            backgroundColor: const Color(0xFFE65100),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('Enable', style: TextStyle(fontWeight: FontWeight.w600)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
           // Loading indicator
           if (_isLoading)
             const LinearProgressIndicator(

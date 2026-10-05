@@ -140,6 +140,9 @@ class CheckinService with WidgetsBindingObserver {
     _generateWindows();
     _checkWindows();
     scheduleNotifications();
+    // The participant may have just come back from Settings after enabling
+    // notifications — re-read so the in-app prompt clears immediately.
+    refreshNotificationStatus();
   }
 
   /// Pin tz.local to the device's IANA zone (e.g. America/New_York).
@@ -257,6 +260,40 @@ class CheckinService with WidgetsBindingObserver {
           'platform': 'android',
         });
       }
+    }
+
+    await refreshNotificationStatus();
+  }
+
+  /// Whether the OS will actually DISPLAY this app's notifications.
+  /// null = unknown/unsupported (iOS, or not yet checked). Published so the UI
+  /// can prompt the participant: a denied permission is the one failure the
+  /// app cannot repair itself — only the participant can flip that switch.
+  final ValueNotifier<bool?> notificationsEnabled = ValueNotifier<bool?>(null);
+  bool? _lastLoggedEnabled;
+
+  /// Re-read the OS permission state. Cheap; called on init and every resume so
+  /// the in-app prompt disappears the moment the participant enables them.
+  Future<void> refreshNotificationStatus() async {
+    try {
+      final androidImpl = _notifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl == null) return; // iOS: no reliable blocked-state API here
+      final enabled = await androidImpl
+          .areNotificationsEnabled()
+          .timeout(const Duration(seconds: 5));
+      notificationsEnabled.value = enabled;
+      // Log transitions only, not every resume.
+      if (enabled != null && enabled != _lastLoggedEnabled) {
+        _lastLoggedEnabled = enabled;
+        _logEmaNotificationEvent(
+          enabled ? 'ema_notifications_os_enabled' : 'ema_notifications_os_blocked',
+          {'platform': 'android'},
+        );
+      }
+      print('[CheckIn] OS notifications enabled: $enabled');
+    } catch (e) {
+      print('[CheckIn] Could not read notification status: $e');
     }
   }
 

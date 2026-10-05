@@ -23,6 +23,32 @@ class MainActivity : FlutterActivity() {
                     return@setMethodCallHandler
                 }
                 extractText(imagePath, result)
+            } else if (call.method == "openNotificationSettings") {
+                // Deep-link to THIS app's notification switch. A denied
+                // POST_NOTIFICATIONS permission is the one failure the app cannot
+                // repair itself; the in-app prompt sends the participant here.
+                try {
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                    ).apply {
+                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                    result.success(true)
+                } catch (e: Exception) {
+                    // Fall back to the app's details page, which also exposes the switch.
+                    try {
+                        val fallback = android.content.Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:$packageName")
+                        ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
+                        startActivity(fallback)
+                        result.success(true)
+                    } catch (e2: Exception) {
+                        result.error("SETTINGS_UNAVAILABLE", e2.message, null)
+                    }
+                }
             } else {
                 result.notImplemented()
             }
