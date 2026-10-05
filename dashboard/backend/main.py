@@ -811,20 +811,7 @@ def debug_collections():
 # Participant Helpers
 # ============================================================================
 
-def _merge_participant_docs(base: dict, overlay: dict) -> dict:
-    """Merge a participant's two documents.
-
-    17 participants exist in both `participants` and `valid_participants`.
-    Researcher edits (studyStartDate, manualActiveStatus) are written by
-    whichever collection the write path finds first, and that path checks
-    `valid_participants` first — so reads must give the same document
-    precedence or the edit silently disappears.
-    """
-    merged = dict(base or {})
-    for key, value in (overlay or {}).items():
-        if value is not None:
-            merged[key] = value
-    return merged
+from participant_utils import merge_participant_docs as _merge_participant_docs  # noqa: E402
 
 
 def _is_enrolled(data: dict) -> bool:
@@ -973,53 +960,20 @@ def _latest_build_number():
     return None
 
 
-def resolve_study_start(participant_data: Optional[dict], fallback=None) -> Optional[datetime]:
-    """Resolve a participant's study start date.
-
-    A researcher-set `studyStartDate` always wins over the enrollment
-    timestamp. Every read path must go through this helper: the dashboard cache
-    used to derive the date from `enrolledAt` alone, so a manually edited date
-    silently reverted on the next hourly cache rebuild.
-    """
-    data = participant_data or {}
-    for value in (data.get("studyStartDate"),
-                  data.get("enrolledAt"),
-                  data.get("lastEnrolledAt"),
-                  fallback,
-                  data.get("createdAt"),
-                  data.get("created_at")):
-        if not value:
-            continue
-        if hasattr(value, "timestamp"):
-            return datetime.fromtimestamp(value.timestamp())
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            try:
-                return datetime.strptime(value[:10], "%Y-%m-%d")
-            except ValueError:
-                continue
-    return None
+# resolve_study_start now lives in participant_utils (pure, unit tested) so
+# compliance_notifications can share it without importing this module.
+from participant_utils import resolve_study_start, fetch_merged_participant  # noqa: E402
 
 
 def get_participant_data(participant_id: str) -> Optional[dict]:
-    """Get participant data merged across both collections.
+    """Participant merged across both collections; `valid_participants` wins.
 
-    A participant can have a document in each collection holding different
-    fields. Returning only the first one found meant the detail screen read a
-    `participants` document with no studyStartDate and no enrolment timestamp,
-    then fell back to `now() - 30 days` — which is why an edited date appeared
-    to "revert to 5 August" and would have silently crept forward each day.
-
-    `valid_participants` wins, matching the write path in
-    update_study_start_date / update_active_status.
+    Thin wrapper over participant_utils.fetch_merged_participant so existing
+    call sites are unchanged. See that module for why precedence matters.
     """
-    merged = None
-    for collection_name in (config.col("participants"), config.col("valid_participants")):
-        doc = db.collection(collection_name).document(participant_id).get()
-        if doc.exists:
-            merged = _merge_participant_docs(merged, doc.to_dict() or {})
-    return merged
+    return fetch_merged_participant(
+        db, participant_id,
+        (config.col("participants"), config.col("valid_participants")))
 
 
 def get_participant_ref(participant_id: str):
@@ -1732,6 +1686,34 @@ def get_cache_status(request: Request, user: dict = Depends(verify_firebase_toke
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/internal/safety-alert/{participant_id}/risk-pdf")
+def internal_safety_alert_risk_pdf(
+    participant_id: str,
+    secret: str = Query(..., description="Shared service secret (same as scheduler)"),
+):
+    """Called by the onSafetyAlert Cloud Function for EVERY safety alert.
+
+    Generates the Risk Assessment PDF — which carries the participant's
+    crisis/safety plan — and emails it to the Slack channel. This is the
+    attachment-capable path (graph_email + risk_assessment); the function's own
+    email helper is text-only. Service-to-service, so it authenticates with the
+    scheduler secret rather than a dashboard user. force=True: the alert is the
+    trigger, independent of the computed risk level.
+    """
+    if not config.SCHEDULER_SECRET or secret != config.SCHEDULER_SECRET:
+        logger.warning("[RiskAssessment] Invalid secret on internal risk-pdf trigger")
+        raise HTTPException(status_code=403, detail="Invalid secret")
+    try:
+        from risk_assessment import auto_send_risk_pdf_if_needed
+        sent = auto_send_risk_pdf_if_needed(participant_id, db, config, logger, force=True)
+        if not sent:
+            logger.error(f"[RiskAssessment] Crisis plan NOT sent for {participant_id} (see earlier error)")
+        return {"participant_id": participant_id, "sent": bool(sent)}
+    except Exception as e:
+        logger.error(f"[RiskAssessment] Internal risk-pdf trigger failed for {participant_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/scheduler/refresh-cache")
 def scheduler_refresh_cache(secret: str = Query(..., description="Scheduler secret key")):
     """
@@ -2294,9 +2276,15 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
         except Exception as e:
             logger.debug(f"Silently handled exception: {e}")
 
-        # Convert to list sorted by date
+        # Convert to list sorted by date. Days BEFORE the study start are
+        # setup/testing (installing the app, browsing during onboarding), not
+        # missed check-ins — they rendered as "0/3" in red and were reported as
+        # non-compliance for a participant whose study had not yet begun.
+        study_start_str = study_start.strftime("%Y-%m-%d")
         summary_list = []
         for date_str, data in sorted(daily_summaries.items()):
+            if date_str < study_start_str:
+                continue
             summary_list.append({
                 "pid": participant_id,
                 "date": date_str,

@@ -609,10 +609,17 @@ def email_pdf_to_slack(pdf_path, assessment, generated_by, logger):
 # Auto-send PDF on high risk (called from cssrs_sync or safety alert pipeline)
 # ---------------------------------------------------------------------------
 
-def auto_send_risk_pdf_if_needed(participant_id, db, config, logger):
+def auto_send_risk_pdf_if_needed(participant_id, db, config, logger, force=False):
     """
-    Check risk level for a participant and auto-send PDF to Slack if HIGH or IMMINENT.
-    Called after C-SSRS sync or EMA safety alert trigger.
+    Generate the Risk Assessment PDF (with the crisis/safety plan) and email it
+    to the Slack channel. Returns True if it was sent.
+
+    Called after a C-SSRS sync (sends only if the computed risk is HIGH or
+    IMMINENT) and — via the internal safety-alert endpoint — on every EMA
+    safety alert with force=True, because there the alert itself is the
+    trigger. Until that endpoint existed this was only ever called from the
+    C-SSRS path, so an EMA safety alert never produced the crisis plan the
+    protocol expects.
     """
     try:
         p_ref = db.collection(config.col("participants")).document(participant_id)
@@ -626,8 +633,8 @@ def auto_send_risk_pdf_if_needed(participant_id, db, config, logger):
         imminent = ema_imminent or screen_sev >= 4 or ped_sev >= 4
         risk_level = determine_risk_level(ema_score, cssrs_severity, imminent)
 
-        if risk_level not in ("HIGH", "IMMINENT"):
-            return
+        if not force and risk_level not in ("HIGH", "IMMINENT"):
+            return False
 
         logger.info(f"[RiskAssessment] Auto-generating PDF for {participant_id} — {risk_level} risk")
 
@@ -661,10 +668,11 @@ def auto_send_risk_pdf_if_needed(participant_id, db, config, logger):
         pdf_path = f"/tmp/risk_assessment_{participant_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
         build_risk_assessment_pdf(assessment, pdf_path, "auto_alert")
 
-        email_pdf_to_slack(pdf_path, assessment, "auto_alert", logger)
+        return bool(email_pdf_to_slack(pdf_path, assessment, "auto_alert", logger))
 
     except Exception as e:
         logger.error(f"[RiskAssessment] Auto-send PDF failed for {participant_id}: {e}", exc_info=True)
+        return False
 
 
 # ---------------------------------------------------------------------------

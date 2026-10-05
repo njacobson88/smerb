@@ -17,6 +17,7 @@ import firebase_admin
 from firebase_admin import firestore
 
 from graph_email import send_graph_email, GRAPH_SENDER
+from participant_utils import fetch_merged_participant, resolve_study_start
 
 import config
 
@@ -265,21 +266,15 @@ def calculate_participant_compliance(participant_id: str, db, days: int = 3) -> 
     # day 1 could answer every prompt and still show 33%.
     effective_days = days
     try:
-        start_val = None
-        for coll in (config.col("valid_participants"), config.col("participants")):
-            doc = db.collection(coll).document(participant_id).get()
-            if doc.exists:
-                d = doc.to_dict() or {}
-                start_val = (d.get("studyStartDate") or d.get("enrolledAt")
-                             or d.get("createdAt") or d.get("created_at") or start_val)
-        study_start = None
-        if start_val is not None:
-            if hasattr(start_val, "timestamp"):
-                study_start = datetime.utcfromtimestamp(start_val.timestamp())
-            elif isinstance(start_val, datetime):
-                study_start = start_val
-            elif isinstance(start_val, str):
-                study_start = datetime.strptime(start_val[:10], "%Y-%m-%d")
+        # One shared resolver, with valid_participants given precedence. The
+        # loop this replaced went valid_participants THEN participants and let
+        # `participants.createdAt` overwrite the researcher-set studyStartDate —
+        # on a participant's first study day that doubled the expected
+        # check-ins and reported the day before enrollment as missed.
+        merged = fetch_merged_participant(
+            db, participant_id,
+            (config.col("participants"), config.col("valid_participants")))
+        study_start = resolve_study_start(merged)
         if study_start:
             enrolled_days = (now - study_start).days + 1  # day 1 is the start date
             effective_days = max(1, min(days, enrolled_days))
