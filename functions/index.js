@@ -35,6 +35,7 @@ const twilioFromNumber = defineSecret("TWILIO_FROM_NUMBER");
 const slackChannelEmail = defineSecret("SLACK_CHANNEL_EMAIL");
 const alertSenderEmail = defineSecret("ALERT_SENDER_EMAIL"); // the study mailbox
 const msgraphClientSecret = defineSecret("MSGRAPH_CLIENT_SECRET");
+const schedulerSecret = defineSecret("SCHEDULER_SECRET"); // backend service-to-service (risk-pdf trigger)
 const MSGRAPH_TENANT_ID = "995b0936-48d6-40e5-a31e-bf689ec9446f";
 const MSGRAPH_CLIENT_ID = "6fa0910d-2e09-41e2-ba41-0357213d2517";
 
@@ -510,6 +511,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
     secrets: [
       twilioAccountSid, twilioAuthToken, twilioFromNumber,
       msgraphClientSecret, slackChannelEmail, alertSenderEmail,
+      schedulerSecret,
     ],
   },
   async (event) => {
@@ -585,6 +587,45 @@ exports[safetyAlertFnName] = onDocumentCreated(
         slackError = err.message;
         console.error(`Slack notification failed:`, err.message);
       }
+    }
+
+    // ================================================================
+    // Step 3: Crisis plan to Slack — the Risk Assessment PDF, via the backend.
+    //
+    // The backend owns PDF generation and attachment-capable Graph email; this
+    // function's sendEmail() is text-only. auto_send_risk_pdf_if_needed was only
+    // ever called from the C-SSRS sync, so an EMA safety alert never produced
+    // the crisis plan the protocol expects. Best-effort: a failure here must not
+    // stop participant outreach below.
+    // ================================================================
+    let riskPdfResult = null;
+    const internalSecret = secretValue(schedulerSecret);
+    if (!internalSecret) {
+      riskPdfResult = { error: "SCHEDULER_SECRET not configured for functions" };
+      console.error("[RiskPdf] SCHEDULER_SECRET missing — crisis plan NOT sent");
+    } else {
+      try {
+        const resp = await fetch(
+          `${BACKEND_URL}/api/internal/safety-alert/${encodeURIComponent(participantId)}/risk-pdf` +
+          `?secret=${encodeURIComponent(internalSecret)}`,
+          { method: "POST" });
+        const text = await resp.text();
+        let sent = false;
+        try { sent = resp.ok && JSON.parse(text).sent === true; } catch (_) { /* non-JSON body */ }
+        riskPdfResult = sent ? { sent: true } : { error: `HTTP ${resp.status}: ${text.slice(0, 200)}` };
+        if (!sent) console.error(`[RiskPdf] crisis plan not sent (${resp.status}): ${text.slice(0, 200)}`);
+      } catch (err) {
+        riskPdfResult = { error: err.message };
+        console.error(`[RiskPdf] trigger failed: ${err.message}`);
+      }
+    }
+    if (safetyEventRef) {
+      await safetyEventRef.collection("audit_trail").doc().set({
+        type: riskPdfResult && riskPdfResult.sent ? "crisis_plan_sent" : "crisis_plan_failed",
+        result: riskPdfResult,
+        loggedBy: "system",
+        loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(() => {});
     }
 
     // NOTE: there is deliberately no immediate page to on-call here.
@@ -775,6 +816,7 @@ exports[safetyAlertFnName] = onDocumentCreated(
       smsErrors: null,
       slackResult,
       slackError,
+      riskPdfResult,
       participantSmsResult,
       participantCallResult,
       emergencyContactResults,
