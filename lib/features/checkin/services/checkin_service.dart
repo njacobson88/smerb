@@ -37,6 +37,8 @@ class CheckinService with WidgetsBindingObserver {
 
   // State
   bool _initialized = false;
+  bool _initializing = false;
+  bool _observerRegistered = false;
   Timer? _windowCheckTimer;
   final List<CheckinWindow> _todayWindows = [];
   bool _checkinAvailable = false;
@@ -50,32 +52,60 @@ class CheckinService with WidgetsBindingObserver {
   List<CheckinWindow> get todayWindows => List.unmodifiable(_todayWindows);
 
   Future<void> initialize() async {
-    if (_initialized) return;
-
-    // Load schedule config
-    await _loadConfig();
-
-    // Initialize timezone DB and pin tz.local to the DEVICE's zone. Without this
-    // tz.local defaults to UTC, which makes daily-repeating reminders
-    // (matchDateTimeComponents) fire at the wrong local time.
-    tzdata.initializeTimeZones();
-    await _configureLocalTimeZone();
-
-    // Initialize notifications + request OS permission (incl. Android 13+).
-    await _initializeNotifications();
-
-    // Generate today's windows (used for availability gating + reminder times).
-    _generateWindows();
-
-    // Schedule the recurring reminders. THIS is what was missing — previously
-    // notifications were only ever scheduled if the participant opened Settings.
-    await scheduleNotifications();
+    if (_initialized || _initializing) return;
+    _initializing = true;
 
     // Self-healing: re-verify + reschedule every time the app returns to the
     // foreground. If ANY path loses the pending schedule (OS eviction, an
     // errant cancel, app update, force-quit on Android clearing exact alarms),
     // it heals on the next app open instead of staying dead until Settings.
-    WidgetsBinding.instance.addObserver(this);
+    //
+    // Registered FIRST, before any await. It used to be registered after
+    // notification setup, so when that setup stalled the observer was never
+    // added at all and the app could not even observe a resume to heal itself.
+    if (!_observerRegistered) {
+      WidgetsBinding.instance.addObserver(this);
+      _observerRegistered = true;
+    }
+
+    try {
+      // Load schedule config
+      await _loadConfig();
+
+      // Initialize timezone DB and pin tz.local to the DEVICE's zone. Without this
+      // tz.local defaults to UTC, which makes daily-repeating reminders
+      // (matchDateTimeComponents) fire at the wrong local time.
+      tzdata.initializeTimeZones();
+      await _configureLocalTimeZone();
+
+      // Initialize notifications + request OS permission (incl. Android 13+).
+      // Must never abort the rest of initialization — see _initializeNotifications.
+      try {
+        await _initializeNotifications();
+      } catch (e) {
+        print('[CheckIn] Notification setup failed (continuing): $e');
+        _logEmaNotificationEvent('ema_notification_init_failed', {
+          'stage': 'initializeNotifications',
+          'error': e.toString(),
+        });
+      }
+
+      // Generate today's windows (used for availability gating + reminder times).
+      _generateWindows();
+
+      // Schedule the recurring reminders. THIS is what was missing — previously
+      // notifications were only ever scheduled if the participant opened Settings.
+      await scheduleNotifications();
+    } catch (e) {
+      // Reaching here means the service is only partly configured. Say so
+      // server-side rather than failing silently, and still finish wiring up
+      // the timer + mark initialized so the resume path can retry scheduling.
+      print('[CheckIn] Initialization error (continuing degraded): $e');
+      _logEmaNotificationEvent('ema_notification_init_failed', {
+        'stage': 'initialize',
+        'error': e.toString(),
+      });
+    }
 
     // Start periodic window check
     _windowCheckTimer = Timer.periodic(
@@ -87,19 +117,29 @@ class CheckinService with WidgetsBindingObserver {
     _checkWindows();
 
     _initialized = true;
+    _initializing = false;
     print('[CheckIn] Service initialized. Windows: ${_todayWindows.length}, '
         'always_available: $alwaysAvailable, tz: ${tz.local.name}');
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _initialized) {
-      // Day may have rolled over while backgrounded; rebuild windows, then
-      // reschedule (idempotent — same IDs replace their pending versions).
-      _generateWindows();
-      _checkWindows();
-      scheduleNotifications();
+    if (state != AppLifecycleState.resumed) return;
+
+    // A previous initialize() that never finished must not leave the service
+    // dead forever: retry it. This used to be gated on `_initialized`, which is
+    // set on the LAST line of initialize() — so any stall meant the self-heal
+    // could never run on this or any future launch.
+    if (!_initialized) {
+      initialize();
+      return;
     }
+
+    // Day may have rolled over while backgrounded; rebuild windows, then
+    // reschedule (idempotent — same IDs replace their pending versions).
+    _generateWindows();
+    _checkWindows();
+    scheduleNotifications();
   }
 
   /// Pin tz.local to the device's IANA zone (e.g. America/New_York).
@@ -184,8 +224,39 @@ class CheckinService with WidgetsBindingObserver {
         description: 'Reminders to complete your Social Media Wellness check-in',
         importance: Importance.high,
       ));
-      final granted = await androidImpl.requestNotificationsPermission();
+      // NEVER await this unguarded. On Android 13+ the plugin does not always
+      // complete this Future when the participant denies or dismisses the
+      // system dialog — verified on an API 34 emulator, where the await never
+      // returned and every line after it (including scheduleNotifications)
+      // simply never ran. Five live Android participants had zero reminders
+      // scheduled, and zero telemetry explaining why, because of this.
+      //
+      // Scheduling is still the right thing to do when permission is refused:
+      // the reminders sit in the OS ready to fire, and start displaying the
+      // moment the participant enables notifications in system settings.
+      bool? granted;
+      try {
+        granted = await androidImpl
+            .requestNotificationsPermission()
+            .timeout(const Duration(seconds: 15));
+      } on TimeoutException {
+        print('[CheckIn] Notification permission request never returned '
+            '(denied or dismissed) — continuing without it');
+        _logEmaNotificationEvent('ema_notification_permission_stalled', {
+          'platform': 'android',
+          'timeoutSeconds': 15,
+        });
+      } catch (e) {
+        print('[CheckIn] Notification permission request failed: $e');
+      }
       print('[CheckIn] Android notification permission granted: $granted');
+      if (granted == false) {
+        // Visible server-side so the dashboard can tell "participant refused
+        // notifications" apart from "scheduling is broken on this device".
+        _logEmaNotificationEvent('ema_notification_permission_denied', {
+          'platform': 'android',
+        });
+      }
     }
   }
 
@@ -284,7 +355,14 @@ class CheckinService with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     final enabled = prefs.getBool('checkin_notifications_enabled') ?? true;
     if (!enabled) {
+      // Log it. This return used to be silent, which left no way to tell a
+      // participant who switched reminders off apart from a device where
+      // scheduling never ran at all — the exact ambiguity that made the
+      // Android stall take so long to find.
       print('[CheckIn] Reminders disabled by participant — none scheduled');
+      _logEmaNotificationEvent('ema_notifications_disabled_by_participant', {
+        'expectedCount': _todayWindows.length,
+      });
       return;
     }
 
