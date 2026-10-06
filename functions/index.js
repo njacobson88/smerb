@@ -576,7 +576,17 @@ exports[safetyAlertFnName] = onDocumentCreated(
             `Alert Type: ${alertType}\n` +
             (alertData.confirmationNumber ? `Confirmation #: ${alertData.confirmationNumber}\n` : "") +
             (alertData.triggerQuestion ? `Trigger Question: ${alertData.triggerQuestion}\n` : "") +
-            `\nA participant endorsed imminent self-harm risk during check-in.\n\n` +
+            // Say what actually happened. One generic "endorsed imminent risk"
+            // line went out for every type; on a walk-away it told the team a
+            // confirmed crisis was open when nothing had been confirmed.
+            (isConfirmedDanger
+              ? `\nParticipant CONFIRMED they are in immediate danger.\n`
+              : isWalkAway
+                ? `\nPOTENTIAL RISK — NOT confirmed. Participant gave concerning responses, then left the check-in before answering the safety question.\n`
+                : isFallback
+                  ? `\nPOTENTIAL RISK — NOT confirmed. High-risk responses; participant exited before the safety question.\n`
+                  : `\nA participant endorsed imminent self-harm risk during check-in.\n`) +
+            `Automated outreach (text, push, email) has been sent to the participant; the triage call follows at ~10 min and on-call is paged at +15 if still unresolved.\n\n` +
             `View dashboard: ${DASHBOARD_URL}\n` +
             `Alert ID: ${alertId}`,
         });
