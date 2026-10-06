@@ -211,6 +211,13 @@ async def dartmouth_ip_whitelist(request: Request, call_next):
     ):
         return await call_next(request)
 
+    # Service-to-service endpoints called by Cloud Functions (Google IPs, never
+    # the Dartmouth network). Each authenticates with the shared service secret.
+    # Without this the crisis-plan trigger got the middleware's 403 on the first
+    # real alert after it shipped (2026-10-05 19:48 ET) and no PDF went to Slack.
+    if request.url.path.startswith("/api/internal/"):
+        return await call_next(request)
+
     # Get client IP (handle proxies)
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
