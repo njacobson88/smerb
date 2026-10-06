@@ -609,17 +609,52 @@ def email_pdf_to_slack(pdf_path, assessment, generated_by, logger):
 # Auto-send PDF on high risk (called from cssrs_sync or safety alert pipeline)
 # ---------------------------------------------------------------------------
 
+def build_risk_pdf(participant_id, db, config, logger, generated_by="auto_alert"):
+    """Build the Risk Assessment PDF (carries the crisis/safety plan).
+
+    Returns (pdf_path, assessment). Raises on failure — callers decide whether
+    a missing PDF is fatal. Used by the C-SSRS auto-send below and by
+    team_alerts.send_team_alert, which ATTACHES it to the one Slack email the
+    team gets when an event is still unresolved at the first page.
+    """
+    p_ref = db.collection(config.col("participants")).document(participant_id)
+    latest_ema, ema_score, ema_imminent = _fetch_latest_ema(p_ref)
+    cssrs_screen, screen_sev = _fetch_latest_cssrs(p_ref, "latest_screen")
+    cssrs_pediatric, ped_sev = _fetch_latest_cssrs(p_ref, "latest_pediatric")
+    safety_plan = _fetch_safety_plan(p_ref)
+    alerts = _fetch_alert_history(p_ref, limit=10)
+
+    cssrs_severity = max(screen_sev, ped_sev)
+    imminent = ema_imminent or screen_sev >= 4 or ped_sev >= 4
+    risk_level = determine_risk_level(ema_score, cssrs_severity, imminent)
+
+    assessment = {
+        "participantId": participant_id,
+        "generatedAt": datetime.utcnow().isoformat(),
+        "riskLevel": risk_level,
+        "imminentRisk": imminent,
+        "emaScore": ema_score,
+        "cssrsSeverity": cssrs_severity,
+        "latestEma": latest_ema,
+        "cssrsScreen": cssrs_screen,
+        "cssrsPediatric": cssrs_pediatric,
+        "safetyPlan": safety_plan,
+        "alertHistory": alerts,
+    }
+    pdf_path = f"/tmp/risk_assessment_{participant_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    build_risk_assessment_pdf(assessment, pdf_path, generated_by)
+    return pdf_path, assessment
+
+
 def auto_send_risk_pdf_if_needed(participant_id, db, config, logger, force=False):
     """
-    Generate the Risk Assessment PDF (with the crisis/safety plan) and email it
-    to the Slack channel. Returns True if it was sent.
+    After a C-SSRS sync: if the computed risk is HIGH or IMMINENT (or force=True),
+    build the Risk Assessment PDF and email it to Slack on its own. Returns True
+    if sent.
 
-    Called after a C-SSRS sync (sends only if the computed risk is HIGH or
-    IMMINENT) and — via the internal safety-alert endpoint — on every EMA
-    safety alert with force=True, because there the alert itself is the
-    trigger. Until that endpoint existed this was only ever called from the
-    C-SSRS path, so an EMA safety alert never produced the crisis plan the
-    protocol expects.
+    EMA safety alerts no longer use this: for those the PDF is attached to the
+    team alert that team_alerts.send_team_alert sends when the event is still
+    unresolved at the first on-call page.
     """
     try:
         p_ref = db.collection(config.col("participants")).document(participant_id)
@@ -627,8 +662,6 @@ def auto_send_risk_pdf_if_needed(participant_id, db, config, logger, force=False
         latest_ema, ema_score, ema_imminent = _fetch_latest_ema(p_ref)
         _, screen_sev = _fetch_latest_cssrs(p_ref, "latest_screen")
         _, ped_sev = _fetch_latest_cssrs(p_ref, "latest_pediatric")
-        safety_plan = _fetch_safety_plan(p_ref)
-
         cssrs_severity = max(screen_sev, ped_sev)
         imminent = ema_imminent or screen_sev >= 4 or ped_sev >= 4
         risk_level = determine_risk_level(ema_score, cssrs_severity, imminent)
@@ -637,37 +670,7 @@ def auto_send_risk_pdf_if_needed(participant_id, db, config, logger, force=False
             return False
 
         logger.info(f"[RiskAssessment] Auto-generating PDF for {participant_id} — {risk_level} risk")
-
-        # Build a minimal assessment dict for the PDF
-        cssrs_screen, _ = _fetch_latest_cssrs(p_ref, "latest_screen")
-        cssrs_pediatric, _ = _fetch_latest_cssrs(p_ref, "latest_pediatric")
-        alerts = _fetch_alert_history(p_ref, limit=10)
-
-        participant_data = {}
-        try:
-            p_doc = p_ref.get()
-            if p_doc.exists:
-                participant_data = p_doc.to_dict()
-        except Exception:
-            pass
-
-        assessment = {
-            "participantId": participant_id,
-            "generatedAt": datetime.utcnow().isoformat(),
-            "riskLevel": risk_level,
-            "imminentRisk": imminent,
-            "emaScore": ema_score,
-            "cssrsSeverity": cssrs_severity,
-            "latestEma": latest_ema,
-            "cssrsScreen": cssrs_screen,
-            "cssrsPediatric": cssrs_pediatric,
-            "safetyPlan": safety_plan,
-            "alertHistory": alerts,
-        }
-
-        pdf_path = f"/tmp/risk_assessment_{participant_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
-        build_risk_assessment_pdf(assessment, pdf_path, "auto_alert")
-
+        pdf_path, assessment = build_risk_pdf(participant_id, db, config, logger, "auto_alert")
         return bool(email_pdf_to_slack(pdf_path, assessment, "auto_alert", logger))
 
     except Exception as e:

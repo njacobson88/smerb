@@ -546,97 +546,17 @@ exports[safetyAlertFnName] = onDocumentCreated(
     }
 
     // ================================================================
-    // Step 2: Notify Slack channel (via email)
+    // Steps 2/3 (Slack email + crisis-plan PDF) are deliberately NOT here.
+    //
+    // PI rule (2026-10-05): the team hears about an event only when the
+    // automated sequence has failed to resolve it — the same moment on-call is
+    // first paged. checkEscalation calls the backend's team-alert endpoint at
+    // that point, and the backend sends ONE Slack email with the PDF attached.
+    // A walk-away the participant clears by replying ERROR never reaches Slack.
     // ================================================================
     let slackResult = null;
     let slackError = null;
-
-    const slackEmail = secretValue(slackChannelEmail);
-    const senderEmailVal = secretValue(alertSenderEmail);
-    const emailReady = graphEmailConfigured();
-
-    if (slackEmail && senderEmailVal && emailReady) {
-      try {
-        const alertLabel = isConfirmedDanger
-          ? "CONFIRMED DANGER"
-          : isWalkAway
-            ? "POTENTIAL RISK — Participant walked away from check-in"
-            : isFallback
-              ? "INCOMPLETE CHECK-IN (high-risk responses)"
-              : "SAFETY ALERT";
-
-        await sendEmail({
-          senderEmail: senderEmailVal,
-          to: slackEmail,
-          subject: `[${alertLabel}] Participant ${participantId}`,
-          body:
-            `[SocialScope ${alertLabel}]\n\n` +
-            `Participant: ${participantId}\n` +
-            `Time: ${timestamp}\n` +
-            `Alert Type: ${alertType}\n` +
-            (alertData.confirmationNumber ? `Confirmation #: ${alertData.confirmationNumber}\n` : "") +
-            (alertData.triggerQuestion ? `Trigger Question: ${alertData.triggerQuestion}\n` : "") +
-            // Say what actually happened. One generic "endorsed imminent risk"
-            // line went out for every type; on a walk-away it told the team a
-            // confirmed crisis was open when nothing had been confirmed.
-            (isConfirmedDanger
-              ? `\nParticipant CONFIRMED they are in immediate danger.\n`
-              : isWalkAway
-                ? `\nPOTENTIAL RISK — NOT confirmed. Participant gave concerning responses, then left the check-in before answering the safety question.\n`
-                : isFallback
-                  ? `\nPOTENTIAL RISK — NOT confirmed. High-risk responses; participant exited before the safety question.\n`
-                  : `\nA participant endorsed imminent self-harm risk during check-in.\n`) +
-            `Automated outreach (text, push, email) has been sent to the participant; the triage call follows at ~10 min and on-call is paged at +15 if still unresolved.\n\n` +
-            `View dashboard: ${DASHBOARD_URL}\n` +
-            `Alert ID: ${alertId}`,
-        });
-
-        slackResult = "sent";
-        console.log(`Slack notification sent for alert ${alertId}`);
-      } catch (err) {
-        slackError = err.message;
-        console.error(`Slack notification failed:`, err.message);
-      }
-    }
-
-    // ================================================================
-    // Step 3: Crisis plan to Slack — the Risk Assessment PDF, via the backend.
-    //
-    // The backend owns PDF generation and attachment-capable Graph email; this
-    // function's sendEmail() is text-only. auto_send_risk_pdf_if_needed was only
-    // ever called from the C-SSRS sync, so an EMA safety alert never produced
-    // the crisis plan the protocol expects. Best-effort: a failure here must not
-    // stop participant outreach below.
-    // ================================================================
     let riskPdfResult = null;
-    const internalSecret = secretValue(schedulerSecret);
-    if (!internalSecret) {
-      riskPdfResult = { error: "SCHEDULER_SECRET not configured for functions" };
-      console.error("[RiskPdf] SCHEDULER_SECRET missing — crisis plan NOT sent");
-    } else {
-      try {
-        const resp = await fetch(
-          `${BACKEND_URL}/api/internal/safety-alert/${encodeURIComponent(participantId)}/risk-pdf` +
-          `?secret=${encodeURIComponent(internalSecret)}`,
-          { method: "POST" });
-        const text = await resp.text();
-        let sent = false;
-        try { sent = resp.ok && JSON.parse(text).sent === true; } catch (_) { /* non-JSON body */ }
-        riskPdfResult = sent ? { sent: true } : { error: `HTTP ${resp.status}: ${text.slice(0, 200)}` };
-        if (!sent) console.error(`[RiskPdf] crisis plan not sent (${resp.status}): ${text.slice(0, 200)}`);
-      } catch (err) {
-        riskPdfResult = { error: err.message };
-        console.error(`[RiskPdf] trigger failed: ${err.message}`);
-      }
-    }
-    if (safetyEventRef) {
-      await safetyEventRef.collection("audit_trail").doc().set({
-        type: riskPdfResult && riskPdfResult.sent ? "crisis_plan_sent" : "crisis_plan_failed",
-        result: riskPdfResult,
-        loggedBy: "system",
-        loggedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }).catch(() => {});
-    }
 
     // NOTE: there is deliberately no immediate page to on-call here.
     // Walk-away and incomplete alerts used to blast every on-call researcher
@@ -857,7 +777,10 @@ exports[safetyAlertFnName] = onDocumentCreated(
 // ============================================================================
 const safetyResponseFnName = ENVIRONMENT === "dev" ? "dev_onParticipantSafetyResponse" : "onParticipantSafetyResponse";
 exports[safetyResponseFnName] = onDocumentCreated(
-  `${col("participants")}/{participantId}/safety_responses/{alertId}`,
+  {
+    document: `${col("participants")}/{participantId}/safety_responses/{alertId}`,
+    secrets: [schedulerSecret], // backend resolution notice
+  },
   async (event) => {
     const snapshot = event.data;
     if (!snapshot) return;
@@ -891,6 +814,7 @@ exports[safetyResponseFnName] = onDocumentCreated(
         });
       }
       console.log(`[SafetyResponse] ${participantId} marked alert ${alertId} an error — escalation stopped`);
+      await notifyBackendResolution(alertId, "app_push_error");
     } else if (response === "confirmed") {
       // Confirmed they could use support — DO NOT stop escalation; record the
       // acknowledgement so on-call sees the participant engaged.
@@ -1038,12 +962,67 @@ async function maybeNotifyEmergencyContacts(doc, eventData, minutesSinceCreation
   }
 }
 
+// ============================================================================
+// Team alert (Slack email + Risk Assessment PDF) via the backend — once per
+// event, at the first on-call page. The backend is idempotent as well.
+// ============================================================================
+async function sendTeamAlert(doc, eventData, minutesSinceCreation, pagedTo) {
+  const secret = secretValue(schedulerSecret);
+  let result;
+  if (!secret) {
+    result = { sent: false, error: "SCHEDULER_SECRET not configured for functions" };
+  } else {
+    try {
+      const url = `${BACKEND_URL}/api/internal/safety-alert/${encodeURIComponent(doc.id)}/team-alert` +
+                  `?secret=${encodeURIComponent(secret)}${pagedTo ? `&paged_to=${encodeURIComponent(pagedTo)}` : ""}`;
+      const resp = await fetch(url, { method: "POST" });
+      const text = await resp.text();
+      try { result = JSON.parse(text); } catch (_) { result = { sent: false, error: `HTTP ${resp.status}: ${text.slice(0,200)}` }; }
+      if (!resp.ok) result = { sent: false, error: `HTTP ${resp.status}: ${text.slice(0,200)}` };
+    } catch (err) {
+      result = { sent: false, error: err.message };
+    }
+  }
+  // The backend sets teamAlertSent itself on success; mirror the outcome here
+  // so the next tick does not retry forever on a hard failure, but DO retry
+  // once if the backend was unreachable (sent:false with an error).
+  const update = { teamAlertAttemptedAt: admin.firestore.FieldValue.serverTimestamp(), teamAlertResult: result };
+  if (result && result.sent === false && result.error && (eventData.teamAlertAttempts || 0) >= 1) {
+    update.teamAlertSent = true; // give up after two attempts; failure is audited
+  }
+  update.teamAlertAttempts = (eventData.teamAlertAttempts || 0) + 1;
+  await doc.ref.update(update).catch(() => {});
+  if (!(result && result.sent)) {
+    console.error(`[TeamAlert] not sent for ${eventData.participantId}: ${JSON.stringify(result)}`);
+    await doc.ref.collection("audit_trail").doc().set({
+      type: "team_alert_failed", result, loggedBy: "system",
+      loggedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }).catch(() => {});
+  } else {
+    console.log(`[TeamAlert] Slack alerted for ${eventData.participantId} (pdf=${result.pdfAttached})`);
+  }
+}
+
+async function notifyBackendResolution(eventId, via, detail) {
+  const secret = secretValue(schedulerSecret);
+  if (!secret) { console.error("[TeamAlert] SCHEDULER_SECRET missing — resolution notice skipped"); return; }
+  try {
+    const url = `${BACKEND_URL}/api/internal/safety-alert/${encodeURIComponent(eventId)}/resolution` +
+                `?secret=${encodeURIComponent(secret)}&via=${encodeURIComponent(via)}${detail ? `&detail=${encodeURIComponent(detail)}` : ""}`;
+    const resp = await fetch(url, { method: "POST" });
+    if (!resp.ok) console.error(`[TeamAlert] resolution notice HTTP ${resp.status}`);
+  } catch (err) {
+    console.error(`[TeamAlert] resolution notice failed: ${err.message}`);
+  }
+}
+
 const escalationFnName = ENVIRONMENT === "dev" ? "dev_checkEscalation" : "checkEscalation";
 exports[escalationFnName] = onSchedule(
   {
     schedule: "every 5 minutes",
     secrets: [twilioAccountSid, twilioAuthToken, twilioFromNumber,
-              msgraphClientSecret, slackChannelEmail, alertSenderEmail],
+              msgraphClientSecret, slackChannelEmail, alertSenderEmail,
+              schedulerSecret], // backend team-alert endpoint
     timeZone: "America/New_York",
   },
   async () => {
@@ -1146,6 +1125,14 @@ exports[escalationFnName] = onSchedule(
             if (minutesSinceCreation >= PRIMARY_PAGE_MIN + BACKUP_AFTER_MIN + PI_AFTER_MIN && !eventData.piEscalated) {
               due.push(["pi", roster.pi, "piEscalated"]);
             }
+          }
+
+          // Slack + crisis-plan PDF go out at the FIRST on-call page, and only
+          // then. Independent of the Twilio page below: a roster gap or an SMS
+          // failure must not also silence Slack.
+          if (due.some(d => d[0] === "primary") && !eventData.teamAlertSent) {
+            await sendTeamAlert(doc, eventData, minutesSinceCreation,
+              roster.primary ? (roster.primary.name || "primary on-call") : null);
           }
 
           for (const [level, target, flag] of due) {

@@ -1693,32 +1693,43 @@ def get_cache_status(request: Request, user: dict = Depends(verify_firebase_toke
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/internal/safety-alert/{participant_id}/risk-pdf")
-def internal_safety_alert_risk_pdf(
-    participant_id: str,
-    secret: str = Query(..., description="Shared service secret (same as scheduler)"),
-):
-    """Called by the onSafetyAlert Cloud Function for EVERY safety alert.
-
-    Generates the Risk Assessment PDF — which carries the participant's
-    crisis/safety plan — and emails it to the Slack channel. This is the
-    attachment-capable path (graph_email + risk_assessment); the function's own
-    email helper is text-only. Service-to-service, so it authenticates with the
-    scheduler secret rather than a dashboard user. force=True: the alert is the
-    trigger, independent of the computed risk level.
-    """
+def _require_service_secret(secret: str):
     if not config.SCHEDULER_SECRET or secret != config.SCHEDULER_SECRET:
-        logger.warning("[RiskAssessment] Invalid secret on internal risk-pdf trigger")
+        logger.warning("[TeamAlert] Invalid service secret on internal endpoint")
         raise HTTPException(status_code=403, detail="Invalid secret")
+
+
+@app.post("/api/internal/safety-alert/{event_id}/team-alert")
+def internal_team_alert(
+    event_id: str,
+    secret: str = Query(..., description="Shared service secret (same as scheduler)"),
+    paged_to: Optional[str] = Query(None, description="Who was paged, for the email body"),
+):
+    """Called by checkEscalation when an event is still unresolved at the first
+    on-call page (PI rule: Slack hears about an event only then). Sends ONE
+    email to the Slack channel with the Risk Assessment PDF attached.
+    Idempotent — a second call is a no-op."""
+    _require_service_secret(secret)
+    from team_alerts import send_team_alert
     try:
-        from risk_assessment import auto_send_risk_pdf_if_needed
-        sent = auto_send_risk_pdf_if_needed(participant_id, db, config, logger, force=True)
-        if not sent:
-            logger.error(f"[RiskAssessment] Crisis plan NOT sent for {participant_id} (see earlier error)")
-        return {"participant_id": participant_id, "sent": bool(sent)}
+        return send_team_alert(event_id, db, config, paged_to=paged_to)
     except Exception as e:
-        logger.error(f"[RiskAssessment] Internal risk-pdf trigger failed for {participant_id}: {e}", exc_info=True)
+        logger.error(f"[TeamAlert] internal team-alert failed for {event_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/internal/safety-alert/{event_id}/resolution")
+def internal_resolution_notice(
+    event_id: str,
+    secret: str = Query(..., description="Shared service secret (same as scheduler)"),
+    via: str = Query(..., description="How it resolved, e.g. app_push_error"),
+    detail: Optional[str] = Query(None),
+):
+    """Called by the Cloud Function for resolutions it handles (app push).
+    Backend-side resolutions call notify_slack_resolution directly."""
+    _require_service_secret(secret)
+    from team_alerts import notify_slack_resolution
+    return notify_slack_resolution(event_id, db, config, via, detail)
 
 
 @app.post("/api/scheduler/refresh-cache")
@@ -4610,6 +4621,8 @@ def log_disposition(
         else:
             status_update["escalationStopped"] = True
         event_ref.update(status_update)
+        from team_alerts import notify_slack_resolution
+        notify_slack_resolution(event_ref, db, config, f"dashboard:{body.disposition}", user.get("email"))
 
         # Calculate time-to-human-contact if this is the first disposition
         if not event_doc.exists or not event_doc.to_dict().get("firstResponseAt"):
@@ -5433,7 +5446,11 @@ async def twilio_call_response(
                         "loggedBy": "system",
                         "loggedAt": datetime.utcnow(),
                     })
-            threading.Thread(target=update_event_press1_error, daemon=True).start()
+            def _update_event_press1_error_then_notify():
+                update_event_press1_error()
+                from team_alerts import notify_slack_resolution
+                notify_slack_resolution(_get_event_ref(), db, config, "ivr_press1_error")
+            threading.Thread(target=_update_event_press1_error_then_notify, daemon=True).start()
 
         elif digits == "3":
             # Press 3: Was in crisis but already received support
@@ -5467,7 +5484,11 @@ async def twilio_call_response(
                         "loggedBy": "system",
                         "loggedAt": datetime.utcnow(),
                     })
-            threading.Thread(target=update_event_press3, daemon=True).start()
+            def _update_event_press3_then_notify():
+                update_event_press3()
+                from team_alerts import notify_slack_resolution
+                notify_slack_resolution(_get_event_ref(), db, config, "ivr_press3_resolved")
+            threading.Thread(target=_update_event_press3_then_notify, daemon=True).start()
 
         else:
             # Unrecognized input — replay options once more
@@ -5592,6 +5613,8 @@ async def twilio_join_conference(
                 "loggedBy": "system",
                 "loggedAt": datetime.utcnow(),
             })
+            from team_alerts import notify_slack_resolution
+            notify_slack_resolution(events[0].reference, db, config, "bridge_988")
     except Exception as e:
         logger.error(f"[Conference] Failed to log bridge join: {e}")
 
@@ -5879,6 +5902,8 @@ async def twilio_sms_reply(request: Request):
                                 "loggedAt": datetime.utcnow(),
                             })
                             logger.info(f"[SMS Reply] Participant {participant_id} replied ERROR — escalation stopped")
+                            from team_alerts import notify_slack_resolution
+                            notify_slack_resolution(event_ref, db, config, "sms")
                     except Exception as e:
                         logger.error(f"[SMS Reply] Failed to stop escalation for {participant_id}: {e}")
 
@@ -6063,6 +6088,8 @@ async def twilio_sms_reply(request: Request):
 
         _log_inbound_sms(from_number, body, "oncall", f"oncall_disposition:{disposition}",
                          participant_id=participant_id, responder_name=responder_name)
+        from team_alerts import notify_slack_resolution
+        notify_slack_resolution(event_doc.reference, db, config, f"oncall_sms:{disposition}", responder_name)
 
         return Response(
             content=f'<Response><Message>{reply_msg}</Message></Response>',
