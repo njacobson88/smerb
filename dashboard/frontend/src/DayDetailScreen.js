@@ -11,6 +11,33 @@ import {
 } from 'recharts';
 import { API_BASE_URL, authFetch } from './SocialScope';
 
+// Study-time rendering of a UTC ISO instant; '' when absent/unparseable.
+const fmtEt = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+};
+
+const RESOLVED_VIA = {
+  sms: 'ERROR by text',
+  ivr_press1_error: 'pressed 1 on call (error)',
+  ivr_press3_resolved: 'pressed 3 on call (already supported)',
+  app_push_error: 'error in app',
+};
+
+const DISPOSITION_LABEL = {
+  contacted_safe: 'Safe',
+  contacted_needs_support: 'Needs support',
+  unable_to_reach: 'Unable to reach',
+  false_alarm: 'False alarm',
+  escalated_988: 'Escalated to 988',
+  escalated_er: 'Escalated to ER',
+  crisis_resolved_with_support: 'Resolved with support',
+  acknowledged: 'Acknowledged',
+  ongoing: 'Ongoing',
+};
+
 // Color constants
 const COLORS = {
   green: "#006164",
@@ -487,21 +514,76 @@ const DayDetailScreen = ({
 
                   return (
                     <div key={idx} className="bg-white border border-red-200 rounded p-4 shadow-sm">
-                      <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-start justify-between mb-3 gap-3 flex-wrap">
                         <div className="text-sm font-medium text-gray-700">
                           <Clock size={14} className="inline mr-1" />
-                          {alert.time}
+                          {/* Render from the UTC instant in study time. `alert.time` is a
+                              bare server-clock string and showed 11:48 PM for a 7:48 PM alert. */}
+                          {fmtEt(alert.triggeredAt) || alert.time}
+                          {alert.alertType && (
+                            <span className="ml-2 text-xs font-normal text-gray-500">
+                              {alert.alertType === 'confirmed_danger' ? 'confirmed danger'
+                                : alert.alertType === 'unresolved_walkaway' ? 'walked away (not confirmed)'
+                                : alert.alertType === 'incomplete_checkin_fallback' ? 'incomplete check-in (not confirmed)'
+                                : alert.alertType}
+                            </span>
+                          )}
                         </div>
-                        {alert.handled && (
-                          <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded font-medium">
-                            {alert.confirmedDanger ? 'Alert Sent — Confirmed Danger' : 'SMS Sent'}
-                          </span>
-                        )}
-                        {alert.confirmedDanger === false && !alert.handled && (
-                          <span className="px-2 py-1 bg-yellow-100 text-yellow-700 text-xs rounded font-medium">
-                            Threshold Exceeded — Denied Danger
-                          </span>
-                        )}
+                        {/* One chip per fact, each saying WHO. Replaces a single
+                            "SMS Sent" badge that could mean any of three things. */}
+                        <div className="flex flex-wrap gap-1 justify-end">
+                          {alert.participantSmsSent && (
+                            <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded font-medium">
+                              Texted participant
+                            </span>
+                          )}
+                          {alert.participantSmsSkipped && (
+                            <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded font-medium">
+                              Participant not texted (opted out)
+                            </span>
+                          )}
+                          {alert.participantCallPlaced && (
+                            <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded font-medium">
+                              Called participant {fmtEt(alert.participantCallPlacedAt)}
+                            </span>
+                          )}
+                          {alert.participantResolved && (
+                            <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded font-medium">
+                              Participant replied: {RESOLVED_VIA[alert.participantResolvedVia] || alert.participantResolvedVia}
+                              {fmtEt(alert.participantResolvedAt) ? ` · ${fmtEt(alert.participantResolvedAt)}` : ''}
+                            </span>
+                          )}
+                          {alert.teamAlertSent && (
+                            <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded font-medium">
+                              Team alerted (Slack + page{alert.teamAlertPagedTo ? ` to ${alert.teamAlertPagedTo}` : ''}) {fmtEt(alert.teamAlertSentAt)}
+                            </span>
+                          )}
+                          {!alert.teamAlertSent && alert.primaryPaged && (
+                            <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded font-medium">
+                              On-call paged {fmtEt(alert.primaryPagedAt)}
+                            </span>
+                          )}
+                          {alert.emergencyContactsNotified && (
+                            <span className="px-2 py-1 bg-orange-100 text-orange-800 text-xs rounded font-medium">
+                              Emergency contacts texted
+                            </span>
+                          )}
+                          {alert.currentDisposition && !alert.participantResolved && (
+                            <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded font-medium">
+                              Staff outcome: {DISPOSITION_LABEL[alert.currentDisposition] || alert.currentDisposition}
+                            </span>
+                          )}
+                          {!alert.participantResolved && !alert.currentDisposition && alert.escalationStopped === false && (
+                            <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded font-medium">
+                              Unresolved
+                            </span>
+                          )}
+                          {alert.confirmedDanger === false && !alert.handled && (
+                            <span className="px-2 py-1 bg-yellow-100 text-yellow-700 text-xs rounded font-medium">
+                              Threshold exceeded — participant denied danger in app
+                            </span>
+                          )}
+                        </div>
                       </div>
                       {/* Display ONLY SI-related responses */}
                       {siResponses.length > 0 ? (

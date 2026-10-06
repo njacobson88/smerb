@@ -1269,6 +1269,21 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                                 "acknowledged": se.get("acknowledged", False),
                                 "lastRespondedBy": se.get("lastRespondedBy") or se.get("acknowledgedBy"),
                                 "lastRespondedAt": lr,
+                                # Explicit outreach/resolution facts so the dashboard
+                                # can say WHO was texted and WHO replied, instead of a
+                                # single ambiguous "SMS Sent" badge.
+                                "participantResolved": se.get("participantResolved") is True,
+                                "participantResolvedVia": se.get("participantResolvedVia"),
+                                "participantResolvedAt": iso_utc(se.get("participantResolvedAt")),
+                                "participantCallPlaced": se.get("participantCallPlaced") is True,
+                                "participantCallPlacedAt": iso_utc(se.get("participantCallPlacedAt")),
+                                "primaryPaged": se.get("primaryPaged") is True,
+                                "primaryPagedAt": iso_utc(se.get("primaryPagedAt")),
+                                "teamAlertSent": se.get("teamAlertSent") is True,
+                                "teamAlertSentAt": iso_utc(se.get("teamAlertSentAt")),
+                                "teamAlertPagedTo": se.get("teamAlertPagedTo"),
+                                "emergencyContactsNotified": se.get("emergencyContactsNotified") is True,
+                                "resolutionNoticeSent": se.get("resolutionNoticeSent") is True,
                             }
                     except Exception:
                         pass
@@ -1289,6 +1304,7 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                         "responses": merged_responses,
                         "notificationSent": alert.get("notificationSent", False),
                         # New confirmation-based alert fields
+                        "alertType": alert.get("alertType"),
                         "handled": alert.get("handled", False),
                         "confirmedDanger": alert.get("confirmedDanger"),
                         "confirmationNumber": alert.get("confirmationNumber"),
@@ -1296,6 +1312,10 @@ def fetch_live_safety_alerts() -> List[Dict[str, Any]]:
                         # Notification results
                         "slackResult": alert.get("slackResult"),
                         "smsResults": alert.get("smsResults"),
+                        # Participant outreach from the alert handler
+                        "participantSmsSent": bool((alert.get("participantSmsResult") or {}).get("sid")),
+                        "participantSmsSkipped": (alert.get("participantSmsResult") or {}).get("skipped"),
+                        "participantSmsError": (alert.get("participantSmsResult") or {}).get("error"),
                     })
                 except Exception as alert_err:
                     logger.warning(f"Error processing alert {alert_doc.id} for {pid}: {alert_err}")
@@ -2803,13 +2823,48 @@ def get_day_detail(request: Request, participant_id: str, date: str, user: dict 
                 # Merge: use full EMA responses, but fall back to alert responses if not in EMA
                 merged_responses = {**alert_responses, **full_responses}
 
+                # Resolution / outreach facts live on the safety event (same id).
+                # Joined here so the day view can say WHO was texted and WHO
+                # replied instead of one ambiguous "SMS Sent" badge.
+                se = {}
+                try:
+                    se_doc = db.collection(SAFETY_EVENTS_COLLECTION).document(alert_doc.id).get()
+                    if se_doc.exists:
+                        se = se_doc.to_dict() or {}
+                except Exception as se_err:
+                    logger.debug(f"safety_event join failed for {alert_doc.id}: {se_err}")
+                psr = alert.get("participantSmsResult") or {}
+
                 safety_alerts.append({
                     "id": alert_doc.id,
                     "timestamp": ts.isoformat() if ts else None,
+                    # Bare server-clock string (UTC on Cloud Run) — kept for
+                    # compatibility; the dashboard renders triggeredAt instead.
                     "time": ts.strftime("%I:%M %p") if ts else None,
+                    # Explicit UTC instant so the browser can show study time.
+                    "triggeredAt": iso_utc(triggered_at),
+                    "alertType": alert.get("alertType"),
+                    "confirmedDanger": alert.get("confirmedDanger"),
                     "handled": alert.get("handled", False),
                     "responses": merged_responses,
                     "sessionId": session_id,
+                    "participantSmsSent": bool(psr.get("sid")),
+                    "participantSmsSkipped": psr.get("skipped"),
+                    "participantSmsError": psr.get("error"),
+                    "participantCallPlaced": se.get("participantCallPlaced") is True,
+                    "participantCallPlacedAt": iso_utc(se.get("participantCallPlacedAt")),
+                    "participantResolved": se.get("participantResolved") is True,
+                    "participantResolvedVia": se.get("participantResolvedVia"),
+                    "participantResolvedAt": iso_utc(se.get("participantResolvedAt")),
+                    "primaryPaged": se.get("primaryPaged") is True,
+                    "primaryPagedAt": iso_utc(se.get("primaryPagedAt")),
+                    "teamAlertSent": se.get("teamAlertSent") is True,
+                    "teamAlertSentAt": iso_utc(se.get("teamAlertSentAt")),
+                    "teamAlertPagedTo": se.get("teamAlertPagedTo"),
+                    "emergencyContactsNotified": se.get("emergencyContactsNotified") is True,
+                    "currentDisposition": se.get("currentDisposition"),
+                    "escalationStopped": se.get("escalationStopped"),
+                    "acknowledged": se.get("acknowledged") is True,
                 })
         except Exception as e:
             logger.warning(f"Error fetching safety alerts for day: {e}")

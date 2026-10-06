@@ -795,16 +795,24 @@ exports[safetyResponseFnName] = onDocumentCreated(
     }
 
     if (response === "error") {
-      // Stop escalation — same disposition the SMS ERROR / IVR press-1 paths set
+      // Stop escalation — same disposition the SMS ERROR / IVR press-1 paths set.
+      // First resolution wins: on 2026-10-05 the participant replied ERROR by
+      // text at +18s and tapped "error" in the app 8 min later; this update
+      // overwrote participantResolvedVia/At with the later one, misstating how
+      // and when it was actually resolved. Keep the earliest record intact.
       if (eventSnap.exists) {
-        await eventRef.update({
+        const already = eventSnap.data() || {};
+        const update = {
           currentDisposition: "false_alarm",
           escalationStopped: true,
           participantResolved: true,
-          participantResolvedAt: admin.firestore.FieldValue.serverTimestamp(),
-          participantResolvedVia: "app_push_error",
           lastRespondedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+        };
+        if (already.participantResolved !== true) {
+          update.participantResolvedAt = admin.firestore.FieldValue.serverTimestamp();
+          update.participantResolvedVia = "app_push_error";
+        }
+        await eventRef.update(update);
         await eventRef.collection("audit_trail").doc().set({
           type: "participant_app_response",
           response: "error_not_in_crisis",
