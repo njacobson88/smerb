@@ -172,6 +172,34 @@ class _CheckinScreenState extends State<CheckinScreen>
 
     if (!evaluateSafety) return;
 
+    // A corrected answer. The participant went back and lowered a safety item
+    // so that NOTHING is above threshold any more: the pending confirmation is
+    // closed as a correction and the walk-away follow-ups are cancelled. This
+    // is the only path that cancels them without a Yes/No — and it cannot run
+    // while any safety item is still high. State is reset so that exceeding a
+    // threshold again creates a fresh pending confirmation (and new timers).
+    //
+    // Why: two participants in three days slid a safety item wrong and had no
+    // way back; one walked away from the prompt rather than answer it, which
+    // produced a full walk-away alert ("i clicked wrong and there wasn't an
+    // option to go back").
+    if (_pendingConfirmationDocId != null &&
+        !_confirmationResolved &&
+        !_safetyCheckDone &&
+        !_anyTriggerExceeded()) {
+      final correctedDocId = _pendingConfirmationDocId;
+      _resolvePendingConfirmation('corrected_answer');
+      _confirmationResolved = false;
+      _pendingConfirmationDocId = null;
+      _firstThresholdExceededAt = null;
+      _nudgeTimer?.cancel();
+      _logNotificationEvent('safety_answer_corrected', {
+        'questionId': questionId,
+        'pendingConfirmationId': correctedDocId,
+      });
+      return;
+    }
+
     // Track when a threshold is first exceeded
     // Start the 5-minute completion nudge timer + write pending confirmation
     if (_firstThresholdExceededAt == null && _anyTriggerExceeded()) {
@@ -377,6 +405,33 @@ class _CheckinScreenState extends State<CheckinScreen>
     if (_currentIndex > 0) {
       _swiperController.previous();
     }
+  }
+
+  /// From the safety prompt: let the participant return to the safety item
+  /// they answered by mistake. Deliberately does NOT resolve the pending
+  /// confirmation or cancel the walk-away follow-ups — those only clear once
+  /// the corrected answer is actually below threshold (see _onResponseChanged).
+  /// If they leave it high and reach the end again, the prompt shows again.
+  void _goBackFromSafetyPrompt() {
+    int target = _currentIndex;
+    for (var i = 0; i < _visibleQuestions.length; i++) {
+      if (_isQuestionAboveThreshold(_visibleQuestions[i])) {
+        target = i;
+        break;
+      }
+    }
+    setState(() {
+      _safetyConfirmationShowing = false;
+      _currentIndex = target;
+    });
+    // Swiper is built fresh when the prompt is hidden; move it after layout.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _swiperController.move(target, animation: false);
+    });
+    _logNotificationEvent('safety_prompt_go_back', {
+      'returnedToIndex': target,
+      'questionId': target < _visibleQuestions.length ? _visibleQuestions[target].id : null,
+    });
   }
 
   void _goForwardIfAllowed() {
@@ -720,12 +775,55 @@ class _CheckinScreenState extends State<CheckinScreen>
               minHeight: 4,
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 6),
-              child: Text(
-                '${_currentIndex + 1} of ${_visibleQuestions.length}',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Colors.grey[600],
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 2),
+              child: Row(
+                children: [
+                  // Back used to exist only as an undocumented right-swipe on a
+                  // non-scrollable swiper — participants could not find it.
+                  SizedBox(
+                    width: 88,
+                    child: _currentIndex > 0
+                        ? TextButton.icon(
+                            onPressed: _goToPrevious,
+                            icon: const Icon(Icons.arrow_back, size: 16),
+                            label: const Text('Back'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.grey[700],
+                              visualDensity: VisualDensity.compact,
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                  Expanded(
+                    child: Text(
+                      '${_currentIndex + 1} of ${_visibleQuestions.length}',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: Colors.grey[600],
+                          ),
                     ),
+                  ),
+                  // Forward, while reviewing. Cards being reviewed deliberately do
+                  // not auto-advance when answered (so a reviewer isn't yanked
+                  // forward), which left anyone who went back to fix a safety
+                  // answer with no visible way to continue — forward existed only
+                  // as an undocumented left-swipe. Caught on the emulator.
+                  SizedBox(
+                    width: 88,
+                    child: _currentIndex < _maxReachedIndex
+                        ? TextButton.icon(
+                            onPressed: _goForwardIfAllowed,
+                            icon: const Icon(Icons.arrow_forward, size: 16),
+                            label: const Text('Next'),
+                            iconAlignment: IconAlignment.end,
+                            style: TextButton.styleFrom(
+                              foregroundColor: const Color(0xFF4A6CF7),
+                              visualDensity: VisualDensity.compact,
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ],
               ),
             ),
             Expanded(
@@ -1032,13 +1130,15 @@ class _CheckinScreenState extends State<CheckinScreen>
         automaticallyImplyLeading: false,
       ),
       body: SafeArea(
-        child: Padding(
+        // Scrollable so the crisis resources at the bottom can never be clipped
+        // on a small screen — this page must always show 988 and Crisis Text Line.
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24.0),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.health_and_safety, size: 64, color: Colors.red[700]),
-              const SizedBox(height: 24),
+              Icon(Icons.health_and_safety, size: 56, color: Colors.red[700]),
+              const SizedBox(height: 16),
               Text(
                 'Thank you for completing your check-in. Based on some of your responses, we want to make sure you\'re okay.',
                 textAlign: TextAlign.center,
@@ -1111,7 +1211,22 @@ class _CheckinScreenState extends State<CheckinScreen>
                 ),
               ),
 
-              const SizedBox(height: 32),
+              const SizedBox(height: 6),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton.icon(
+                  onPressed: _goBackFromSafetyPrompt,
+                  icon: const Icon(Icons.arrow_back, size: 18),
+                  label: const Text(
+                    'I made a mistake — go back and change my answer',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  style: TextButton.styleFrom(foregroundColor: Colors.grey[800]),
+                ),
+              ),
+
+              const SizedBox(height: 12),
               const Divider(),
               const SizedBox(height: 16),
               Text(
