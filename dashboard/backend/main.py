@@ -6261,6 +6261,45 @@ def weekly_survey_status(participant_id: str, use_cache: bool = True) -> dict:
     return result
 
 
+def app_update_template_vars(participant_id: str) -> dict:
+    """Placeholders for the app-update notification: the participant's recorded
+    version/platform, the newest published release, and platform-specific
+    install steps. Never raises — a missing field renders as a readable word,
+    not a template error."""
+    from compliance_notifications import app_update_steps
+    current_version = "an older version"
+    platform = None
+    try:
+        p = get_participant_data(participant_id) or {}
+        v = p.get("appVersion")
+        b = p.get("appBuildNumber")
+        if v:
+            current_version = f"{v} (build {b})" if b else str(v)
+        platform = p.get("appPlatform") or p.get("deviceType")
+    except Exception as e:
+        logger.debug(f"[AppUpdate] participant read failed for {participant_id}: {e}")
+    latest_version, release_notes = "the newest version", "bug fixes and improvements"
+    try:
+        doc = db.collection(config.col("app_config")).document("latest_version").get()
+        if doc.exists:
+            d = doc.to_dict() or {}
+            if d.get("version"):
+                latest_version = f"{d['version']} (build {d['buildNumber']})" if d.get("buildNumber") else str(d["version"])
+            if d.get("releaseNotes"):
+                release_notes = str(d["releaseNotes"]).strip()
+    except Exception as e:
+        logger.debug(f"[AppUpdate] latest_version read failed: {e}")
+    label = {"ios": "iPhone", "android": "Android"}.get(str(platform or "").lower(), "your phone")
+    return {
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "platform_label": label,
+        "update_steps": app_update_steps(platform),
+        "release_notes": release_notes,
+        "install_url": "https://socialscope-dashboard.web.app/install",
+    }
+
+
 def weekly_survey_template_vars(participant_id: str) -> dict:
     """Just the `{weekly_survey_*}` placeholders the email templates reference."""
     summary = weekly_survey_status(participant_id)
@@ -6365,6 +6404,7 @@ def preview_notification(
             **compliance,
             **weekly,
             **weekly_survey_template_vars(body.participant_id),
+            **app_update_template_vars(body.participant_id),
         }
 
         if body.custom_subject and body.custom_body:
@@ -6417,6 +6457,7 @@ def send_compliance_notification(
             **compliance,
             **weekly,
             **weekly_survey_template_vars(body.participant_id),
+            **app_update_template_vars(body.participant_id),
         }
 
         # Select or use custom template

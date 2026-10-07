@@ -953,6 +953,7 @@ const ParticipantDetailScreen = ({
                     <option value="ema">EMA Low Compliance</option>
                     <option value="screenshots">Screenshot Low Compliance</option>
                     <option value="weekly">Weekly Report</option>
+                    <option value="app_update">App Update (with install steps)</option>
                   </select>
                 </div>
                 <div>
@@ -1067,8 +1068,8 @@ const ParticipantDetailScreen = ({
                 ) : (
                   <div className="space-y-2 max-h-60 overflow-y-auto">
                     {complianceData.notificationHistory.map((notif, idx) => {
-                      const categoryLabels = { ema: 'EMA Compliance', screenshots: 'Screenshot Compliance', weekly: 'Weekly Report' };
-                      const categoryColors = { ema: 'bg-blue-100 text-blue-700', screenshots: 'bg-orange-100 text-orange-700', weekly: 'bg-green-100 text-green-700' };
+                      const categoryLabels = { ema: 'EMA Compliance', screenshots: 'Screenshot Compliance', weekly: 'Weekly Report', app_update: 'App Update' };
+                      const categoryColors = { ema: 'bg-blue-100 text-blue-700', screenshots: 'bg-orange-100 text-orange-700', weekly: 'bg-green-100 text-green-700', app_update: 'bg-purple-100 text-purple-700' };
                       const sentDate = notif.sentAt && !Number.isNaN(new Date(notif.sentAt).getTime())
                         ? new Date(notif.sentAt) : null;
                       // Calendar days in study time, not 24-hour blocks: something

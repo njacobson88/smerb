@@ -65,6 +65,61 @@ LOW_COMPLIANCE_TEMPLATES = {
 }
 
 # ============================================================================
+# App Update Templates
+#
+# Sent from the participant page when a participant is on an old build. The
+# install steps are the same ones on the public /install page, per platform;
+# {update_steps} is filled by the backend from the participant's recorded
+# platform. The app is named the way participants see it: "the study app
+# (the SocialScope icon on your phone)".
+# ============================================================================
+
+INSTALL_URL = "https://socialscope-dashboard.web.app/install"
+
+APP_UPDATE_STEPS = {
+    "ios": (
+        "1. On your iPhone, open this link: {install_url} and tap the iPhone download button. "
+        "When your browser asks, tap \"Install\".\n"
+        "2. If the app will not open afterwards, trust the certificate once: Settings > General > "
+        "VPN & Device Management > \"Dartmouth College\" > Trust.\n"
+        "3. Open the study app (the SocialScope icon). You are already signed in — nothing to re-enter."
+    ),
+    "android": (
+        "1. On your phone, open this link: {install_url} and tap the Android download button.\n"
+        "2. Open the downloaded file. If Android asks, tap \"Settings\", turn on \"Allow from this "
+        "source\", go back and tap \"Install\". (This is only because the app is not from the Play Store.)\n"
+        "3. Open the study app (the SocialScope icon). You are already signed in — nothing to re-enter."
+    ),
+    "unknown": (
+        "1. On your phone, open this link: {install_url} and tap the download button for your phone type.\n"
+        "2. Follow the on-screen prompts to install (on iPhone you may need to trust the \"Dartmouth College\" "
+        "certificate under Settings > General > VPN & Device Management; on Android you may need to allow "
+        "installs from this source).\n"
+        "3. Open the study app (the SocialScope icon). You are already signed in — nothing to re-enter."
+    ),
+}
+
+
+def app_update_steps(platform) -> str:
+    """Install steps for the participant's platform, with the install URL filled in."""
+    key = str(platform or "").lower()
+    key = "ios" if key in ("ios", "iphone", "ipad") else "android" if key == "android" else "unknown"
+    return APP_UPDATE_STEPS[key].format(install_url=INSTALL_URL)
+
+
+LOW_COMPLIANCE_TEMPLATES["app_update"] = [
+    {
+        "subject": "Please update your Social Media Wellness study app",
+        "body": "Hi {name},\n\nA new version of the study app is available (version {latest_version}; your phone is on {current_version}). Updating takes about two minutes and keeps your check-ins and reminders working properly.\n\n{update_steps}\n\nWhat changed: {release_notes}\n\nIf anything does not work, just reply to this email and we will help.\n\nThank you,\nThe Social Media Wellness Study Team\nDartmouth College",
+    },
+    {
+        "subject": "Quick app update for the Social Media Wellness study",
+        "body": "Hi {name},\n\nWe have released an update to the study app ({latest_version}) and your phone is still on {current_version}. Please install it when you have a couple of minutes:\n\n{update_steps}\n\nThis update: {release_notes}\n\nYou will stay signed in and nothing you have completed is affected. Reply to this email if you run into any trouble.\n\nThe Social Media Wellness Research Team",
+    },
+]
+
+
+# ============================================================================
 # Weekly Report Templates — Gamified with Compliance Levels
 # ============================================================================
 
