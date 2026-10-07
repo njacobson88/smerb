@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Download, Loader2, Camera, FileText, AlertTriangle, RefreshCw, Clock, CheckCircle, XCircle, Pencil, Save, X } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
 import ParticipantNotesPanel from './ParticipantNotesPanel';
+import { TrendingUp, DollarSign } from 'lucide-react';
 
 // Color constants
 const COLORS = {
@@ -35,6 +36,8 @@ const ParticipantDetailScreen = ({
   goToParticipantView,
   goToDayView,
   goToRiskAssessment,
+  goToSiTrend,
+  goToComplianceReport,
 }) => {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1349,6 +1352,32 @@ const ParticipantDetailScreen = ({
         </div>
         <ChevronRight size={20} className="text-gray-400" />
       </button>
+
+      {/* SI trend (non-crisis) + compliance / compensation — both read-only subpages */}
+      <div className="grid gap-3 md:grid-cols-2">
+        <button onClick={() => goToSiTrend && goToSiTrend(currentParticipantId)}
+          className="bg-white rounded-lg shadow p-4 hover:bg-orange-50 hover:border-orange-300 border-2 border-transparent transition-colors flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <TrendingUp size={22} className="text-orange-600" />
+            <div className="text-left">
+              <div className="font-semibold text-gray-800">SI Trend</div>
+              <div className="text-xs text-gray-500">14-day SI composite; flags a statistical uptick. Non-crisis.</div>
+            </div>
+          </div>
+          <ChevronRight size={20} className="text-gray-400" />
+        </button>
+        <button onClick={() => goToComplianceReport && goToComplianceReport(currentParticipantId)}
+          className="bg-white rounded-lg shadow p-4 hover:bg-green-50 hover:border-green-300 border-2 border-transparent transition-colors flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <DollarSign size={22} className="text-green-700" />
+            <div className="text-left">
+              <div className="font-semibold text-gray-800">Compliance &amp; Compensation</div>
+              <div className="text-xs text-gray-500">EMAs within window, weekly app use, REDCap completions, $ earned. CSV export.</div>
+            </div>
+          </div>
+          <ChevronRight size={20} className="text-gray-400" />
+        </button>
+      </div>
 
       {/* Study-personnel notes + REDCap contact reminders */}
       <ParticipantNotesPanel participantId={currentParticipantId} />

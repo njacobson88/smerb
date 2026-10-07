@@ -1911,6 +1911,8 @@ def get_overall_status(
                 "is_test_participant": bool((p_data or {}).get("isTestParticipant")),
                 "app_version": (p_data or {}).get("appVersion"),
                 "app_build_number": (p_data or {}).get("appBuildNumber"),
+                    # Non-crisis SI trend (staff-only signal; see si_trend.py).
+                    "si_trend": _si_trend_compact(pid),
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
                     "weeklyCheckins": total_checkins,
@@ -2043,6 +2045,7 @@ def get_overall_status(
                 "is_test_participant": bool((p_info.get("data") or {}).get("isTestParticipant")),
                 "app_version": (p_info.get("data") or {}).get("appVersion"),
                 "app_build_number": (p_info.get("data") or {}).get("appBuildNumber"),
+                "si_trend": _si_trend_compact(pid),
             })
 
         # Same exclusion as the cached path above.
@@ -7530,6 +7533,69 @@ from staff_notes import register_staff_notes_routes
 
 register_staff_notes_routes(app, db, limiter, verify_firebase_token, config, logger,
                             redcap_record_id_for_participant)
+
+
+# ============================================================================
+# SI trend (non-crisis) + study-wide compliance / compensation report
+# Read-only: nothing below writes to any participant record.
+# ============================================================================
+
+from si_trend import compute_si_trend, compact as _si_compact
+from compliance_report import build_compliance_report, report_to_csv
+
+
+def _si_trend_compact(participant_id: str) -> dict:
+    """Overview-table fields only; never raises (a trend must not break the page)."""
+    try:
+        return _si_compact(compute_si_trend(participant_id, db, config))
+    except Exception as e:
+        logger.debug(f"[SITrend] compact failed for {participant_id}: {e}")
+        return {"status": "insufficient"}
+
+
+@app.get("/api/participant/{participant_id}/si-trend")
+@limiter.limit("60/minute")
+def get_si_trend(request: Request, participant_id: str, user: dict = Depends(verify_firebase_token)):
+    """14-day SI composite series + the approved rising/stable/insufficient rule."""
+    return compute_si_trend(participant_id, db, config)
+
+
+def _compliance_report_for(participant_id: str) -> dict:
+    merged = get_participant_data(participant_id)
+    start = resolve_study_start(merged)
+    return build_compliance_report(
+        participant_id, db, config,
+        study_start=start.date() if start else None,
+        record_id_resolver=redcap_record_id_for_participant,
+    )
+
+
+@app.get("/api/participant/{participant_id}/compliance-report")
+@limiter.limit("30/minute")
+def get_compliance_report(request: Request, participant_id: str, user: dict = Depends(verify_firebase_token)):
+    """EMAs credited within 4 h of their prompt, weekly app use, REDCap
+    completions, and the compensation each line earns. Read-only."""
+    try:
+        return _compliance_report_for(participant_id)
+    except Exception as e:
+        logger.error(f"[Compliance] report failed for {participant_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/participant/{participant_id}/compliance-report.csv")
+@limiter.limit("30/minute")
+def get_compliance_report_csv(request: Request, participant_id: str, user: dict = Depends(verify_firebase_token)):
+    try:
+        report = _compliance_report_for(participant_id)
+        if not report.get("available"):
+            raise HTTPException(status_code=404, detail=report.get("error") or "No report")
+        return Response(content=report_to_csv(report), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="compliance_{participant_id}.csv"'})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Compliance] CSV failed for {participant_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

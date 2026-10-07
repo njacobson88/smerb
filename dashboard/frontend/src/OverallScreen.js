@@ -6,6 +6,7 @@ import {
   ChevronLeft, ChevronRight, Loader2, ArrowUpDown
 } from 'lucide-react';
 import { API_BASE_URL, authFetch } from './SocialScope';
+import { SiTrendBadge } from './SiTrendScreen';
 
 // Color constants for status indicators
 const COLORS = {
@@ -116,7 +117,7 @@ const CompliancePill = ({ value }) => {
 };
 
 
-const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList }) => {
+const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, goToSiTrend }) => {
   const [weekOffset, setWeekOffset] = useState(0);
   const [participants, setParticipants] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -568,6 +569,9 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList })
                             >
                               v{participant.app_version}
                             </span>
+                          )}
+                          {!isTest && (
+                            <SiTrendBadge trend={participant.si_trend} onClick={() => goToSiTrend && goToSiTrend(participant.id)} />
                           )}
                           {!participant.app_version && !isTest && (
                             <span

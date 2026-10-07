@@ -9,6 +9,8 @@ import Login, { auth, signOut, onAuthStateChanged, getIdToken } from './Login';
 import UserManagement from './UserManagement';
 import InstallPage from './InstallPage';
 import RiskAssessmentScreen from './RiskAssessmentScreen';
+import SiTrendScreen from './SiTrendScreen';
+import ComplianceReportScreen from './ComplianceReportScreen';
 
 // API Configuration
 // In production, REACT_APP_API_URL should point to the Cloud Run service
@@ -185,6 +187,16 @@ const SocialScopeDashboard = () => {
     setActiveTab('risk-assessment');
   };
 
+  const goToSiTrend = (participantId) => {
+    setSelectedParticipant(participantId);
+    setActiveTab('si-trend');
+  };
+
+  const goToComplianceReport = (participantId) => {
+    setSelectedParticipant(participantId);
+    setActiveTab('compliance-report');
+  };
+
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Dev Environment Banner */}
@@ -264,6 +276,7 @@ const SocialScopeDashboard = () => {
           <OverallScreen
             goToParticipantView={goToParticipantView}
             goToDayView={goToDayView}
+            goToSiTrend={goToSiTrend}
             setParticipantList={setParticipantList}
           />
         )}
@@ -276,6 +289,23 @@ const SocialScopeDashboard = () => {
             goToParticipantView={goToParticipantView}
             goToDayView={goToDayView}
             goToRiskAssessment={goToRiskAssessment}
+            goToSiTrend={goToSiTrend}
+            goToComplianceReport={goToComplianceReport}
+          />
+        )}
+
+        {activeTab === 'si-trend' && selectedParticipant && (
+          <SiTrendScreen
+            participantId={selectedParticipant}
+            goToParticipantView={goToParticipantView}
+          />
+        )}
+
+        {activeTab === 'compliance-report' && selectedParticipant && (
+          <ComplianceReportScreen
+            participantId={selectedParticipant}
+            goToParticipantView={goToParticipantView}
+            goToDayView={goToDayView}
           />
         )}
 
