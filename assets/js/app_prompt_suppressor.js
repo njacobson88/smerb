@@ -42,6 +42,11 @@
       '#app-upsell-blocking-bottom-sheet-direct',
       '[id*="app-upsell"]',
       'xpromo-nsfw-blocking-modal, xpromo-app-selector, xpromo-bottom-bar',
+      // Reddit's current prompt system (found in its JS bundles, 2026-10):
+      // a banner, and a modal that renders as a bottom sheet or full-screen
+      // block; the NSFW gate is a separate container with a "view in app" slot.
+      'configured-xpromo-banner, configured-xpromo-modal, xpromo-nsfw-blocking-container',
+      '[class*="configured-xpromo"]',
       '[class*="XPromo"], [class*="xpromo"]',       // legacy mobile-web classes
       'shreddit-app-banner, shreddit-xpromo-banner',
     ],
@@ -58,7 +63,10 @@
   // Store pages: a prompt only inside an upsell sheet (a post may legitimately link to one).
   var STORE_LINK = /play\.google\.com\/store\/apps|apps\.apple\.com|itunes\.apple\.com/i;
   var UPSELL_TEXT = /\b(open|get|view|continue|use|try|download|install|see)\b[^.]{0,40}\bapp\b|\bin the app\b|\bapp store\b|\bgoogle play\b|keep using reddit/i;
-  var SHEET = 'faceplate-bottom-sheet, rpl-bottom-sheet, rpl-modal-card, faceplate-modal, shreddit-interstitial, [role="dialog"], [data-testid="sheetDialog"]';
+  var SHEET = 'faceplate-bottom-sheet, rpl-bottom-sheet, .rpl-bottom-sheet, rpl-modal-card, faceplate-modal, shreddit-interstitial, [role="dialog"], [data-testid="sheetDialog"]';
+  // Classes Reddit puts on <body> to freeze the page behind a blocking sheet
+  // (re-added dynamically, so they are stripped on every scan while we hold).
+  var LOCK_CLASSES = ['rpl-scroll-lock', 'scroll-is-blocked'];
   var MAX_SHEET_TEXT = 320;   // app-upsell sheets are terse; real content isn't
 
   // --- Hiding ---------------------------------------------------------------
@@ -68,7 +76,10 @@
   style.textContent =
     KNOWN[platform].join(',\n') + ', [' + HIDE_ATTR + '] { display: none !important; visibility: hidden !important; pointer-events: none !important; }\n' +
     // Applied only while a hidden sheet is holding the page's scroll lock.
-    'html.smerb-unlock-scroll, html.smerb-unlock-scroll body { overflow-y: auto !important; position: static !important; }';
+    // Reddit freezes the page with body.scroll-is-blocked {touch-action:none;
+    // overflow:hidden} and body.rpl-scroll-lock {overflow:hidden!important};
+    // this out-specifies both.
+    'html.smerb-unlock-scroll, html.smerb-unlock-scroll body { overflow-y: auto !important; position: static !important; touch-action: auto !important; overscroll-behavior: auto !important; }';
   (document.head || document.documentElement).appendChild(style);
 
   var reported = new Set();
@@ -102,6 +113,12 @@
         var closer = el.querySelector('button[aria-label*="close" i], button[aria-label*="dismiss" i], [slot="close"], button[data-testid*="close" i]');
         if (closer) closer.click();
         if (el.hasAttribute('open')) el.removeAttribute('open');
+        // Reddit's configured-xpromo components listen for this to tear
+        // themselves down (and release the scroll lock) exactly as if the
+        // participant had tapped their own dismiss control.
+        if (/xpromo/i.test(el.localName + ' ' + el.className)) {
+          el.dispatchEvent(new CustomEvent('dismiss-configured-xpromo', { bubbles: true, composed: true }));
+        }
       } catch (e) { /* ignore */ }
     }
     report(el, rule, text);
@@ -168,18 +185,29 @@
     }
   }
 
+  var holding = false;
   function unlockScrollIfHeld() {
     if (!document.body) return;   // document-start run, before <body> exists
     // Only intervene when something we hid is still holding the lock.
     var hiddenSheet = document.querySelector('[' + HIDE_ATTR + ']');
-    var bodyCs = getComputedStyle(document.body);
-    var locked = bodyCs.overflowY === 'hidden' || bodyCs.position === 'fixed';
+    var body = document.body, bodyCs = getComputedStyle(body);
+    var classLocked = LOCK_CLASSES.some(function (c) { return body.classList.contains(c); });
+    var locked = classLocked || bodyCs.overflowY === 'hidden' || bodyCs.position === 'fixed';
     var visibleDialog = Array.prototype.some.call(document.querySelectorAll(SHEET), function (d) {
       if (d.hasAttribute(HIDE_ATTR)) return false;
-      var r = d.getBoundingClientRect(); return r.width > 0 && r.height > 0;
+      var r = d.getBoundingClientRect(), cs = getComputedStyle(d);
+      return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth
+        && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0';
     });
-    document.documentElement.classList.toggle('smerb-unlock-scroll', !!hiddenSheet && locked && !visibleDialog);
+    holding = !!hiddenSheet && locked && !visibleDialog;
+    document.documentElement.classList.toggle('smerb-unlock-scroll', holding);
+    if (holding && classLocked) LOCK_CLASSES.forEach(function (c) { body.classList.remove(c); });
   }
+  // While holding the page open behind a hidden blocking sheet, keep Reddit's
+  // touchmove handlers (which preventDefault to freeze scrolling) from running.
+  window.addEventListener('touchmove', function (e) {
+    if (holding) e.stopImmediatePropagation();
+  }, { capture: true, passive: true });
 
   var scheduled = false, lastScan = 0, lastScanMs = 0;
   function scan() {
