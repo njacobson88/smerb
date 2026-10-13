@@ -36,8 +36,9 @@
     reddit: [
       '#xpromo-bottom-sheet',                        // "View in Reddit App" bar (seen in-app 2026-10)
       'faceplate-bottom-sheet[id*="xpromo"]',
-      '#sticky-community-header-open-app-cta',       // red "Open App" pill in the community header
-      '[id*="open-app-cta"]',
+      '#sticky-community-header-open-app-cta',       // red "Open App" pill in the community header (logged in)
+      '#xpromo-small-header, #open-app-header-cta',  // "Open App" in the global header (logged out, seen 2026-10)
+      '[id*="open-app-cta"], [id*="open-app-header"], [id*="xpromo"]',
       '#app-upsell-blocking-bottom-sheet-seo',       // "Get the app to keep using Reddit" (blocking)
       '#app-upsell-blocking-bottom-sheet-direct',
       '[id*="app-upsell"]',
