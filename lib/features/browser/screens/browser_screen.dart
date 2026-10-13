@@ -1,8 +1,13 @@
+import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:gal/gal.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import '../../../core/config/environment_config.dart';
 import '../../../features/capture/services/capture_service.dart';
 import '../../../features/capture/services/screenshot_service.dart';
@@ -80,6 +85,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
   bool _isEmulator = false;
   bool _ready = false;
 
+  // Page scripts injected at document start on every load (and re-run from
+  // onLoadStop as a fallback; both are idempotent):
+  //  - app_prompt_suppressor.js hides Reddit/X "open the app" prompts, which
+  //    are dead ends inside this WebView, and restores scrolling if one of
+  //    them had locked it.
+  //  - media_picker.js resolves what image/video sits under a long-press so
+  //    the Save-media sheet can offer it.
+  String _suppressorJs = '';
+  String _mediaPickerJs = '';
+  bool _savingMedia = false;
+
   @override
   void initState() {
     super.initState();
@@ -109,6 +125,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         print('[Browser] Running on emulator - HW acceleration disabled');
       }
     }
+    await _loadPageScripts();
     _initializeCookies();
     _loadLoginStatus();
     if (mounted) setState(() => _ready = true);
@@ -197,6 +214,196 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   /// Inject the appropriate platform observer JavaScript
+  Future<void> _loadPageScripts() async {
+    try {
+      _suppressorJs = await rootBundle.loadString('assets/js/app_prompt_suppressor.js');
+      _mediaPickerJs = await rootBundle.loadString('assets/js/media_picker.js');
+    } catch (e) {
+      // Browsing must never depend on these; the page still works without them.
+      print('[Browser] Could not load page scripts: $e');
+    }
+  }
+
+  /// Links that try to hand the participant off to the native Reddit/X app
+  /// or an app store. None of them can succeed from inside this WebView.
+  static bool _isNativeAppHandoff(WebUri url) {
+    const schemes = {'intent', 'reddit', 'twitter', 'market', 'itms-apps', 'itms-appss'};
+    if (schemes.contains(url.scheme.toLowerCase())) return true;
+    final host = url.host.toLowerCase();
+    if (host.endsWith('onelink.me') || host.endsWith('app.link')) return true;
+    if (host == 'play.google.com' && url.path.startsWith('/store/apps')) return true;
+    if (host == 'apps.apple.com' || host == 'itunes.apple.com') return true;
+    return false;
+  }
+
+  /// Records a browser-level event alongside the page-captured ones.
+  void _logBrowserEvent(String type, Map<String, dynamic> data) {
+    try {
+      widget.captureService.processJavaScriptEvent(jsonEncode({
+        'type': type,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'url': _currentUrl,
+        'platform': _currentPlatform,
+        'data': data,
+      }));
+    } catch (e) {
+      print('[Browser] Could not log $type: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Save media (long-press on an image or video)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _onLongPress(InAppWebViewController controller, InAppWebViewHitTestResult hit) async {
+    if (_savingMedia || !mounted) return;
+    Map<String, dynamic>? media;
+    try {
+      final raw = await controller.evaluateJavascript(
+          source: 'window.__smerbMediaAtLastTouch ? window.__smerbMediaAtLastTouch() : null');
+      if (raw is Map) media = Map<String, dynamic>.from(raw);
+    } catch (e) {
+      print('[Browser] media lookup failed: $e');
+    }
+    // Fallback to the native hit test (plain <img> outside shadow DOM).
+    if (media == null &&
+        (hit.type == InAppWebViewHitTestResultType.IMAGE_TYPE ||
+            hit.type == InAppWebViewHitTestResultType.SRC_IMAGE_ANCHOR_TYPE) &&
+        (hit.extra ?? '').startsWith('http')) {
+      media = {'kind': 'image', 'url': hit.extra, 'supported': true};
+    }
+    if (media == null || !mounted) return; // text selection etc. — nothing to offer
+
+    final kind = media['kind'] == 'video' ? 'video' : 'image';
+    final url = media['url'] as String?;
+    final supported = media['supported'] == true && url != null;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(kind == 'video' ? Icons.videocam_outlined : Icons.image_outlined),
+              title: Text(supported
+                  ? (kind == 'video' ? 'Save video to your phone' : 'Save image to your phone')
+                  : 'This video can\'t be saved from here'),
+              subtitle: supported
+                  ? Text(Platform.isIOS ? 'Adds it to Photos' : 'Adds it to your Gallery')
+                  : const Text('It streams in pieces rather than as a single file.'),
+              enabled: supported,
+              onTap: supported
+                  ? () {
+                      Navigator.of(sheetContext).pop();
+                      _saveMedia(kind: kind, url: url);
+                    }
+                  : null,
+            ),
+            ListTile(
+              leading: const Icon(Icons.close),
+              title: const Text('Cancel'),
+              onTap: () => Navigator.of(sheetContext).pop(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveMedia({required String kind, required String url}) async {
+    if (_savingMedia) return;
+    _savingMedia = true;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.showSnackBar(SnackBar(content: Text('Saving $kind…'), duration: const Duration(seconds: 2)));
+    bool ok = false;
+    String? error;
+    try {
+      if (!await Gal.hasAccess() && !await Gal.requestAccess()) {
+        throw _PhotoAccessDenied();
+      }
+
+      // Fetch as the page would: same user agent, referer and cookies, so
+      // login-gated media (e.g. NSFW-flagged Reddit images) still resolves.
+      final uri = Uri.parse(url);
+      final headers = <String, String>{
+        'User-Agent': _mobileUserAgent,
+        'Referer': _currentUrl,
+        'Accept': kind == 'video' ? 'video/*,*/*;q=0.8' : 'image/*,*/*;q=0.8',
+      };
+      try {
+        final cookies = await _cookieManager.getCookies(url: WebUri(url));
+        if (cookies.isNotEmpty) {
+          headers['Cookie'] = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+        }
+      } catch (_) {/* cookies are optional for public media */}
+
+      // Saves exactly what the page is showing. (Reddit's full-size
+      // i.redd.it originals answer 403 to anything but the site itself, so
+      // the rendered preview is the best copy available; opening the image
+      // in Reddit's lightbox first gives a larger one.)
+      final res = await http.get(uri, headers: headers).timeout(const Duration(seconds: 60));
+      if (res.statusCode != 200 || res.bodyBytes.isEmpty) {
+        throw Exception('HTTP ${res.statusCode}');
+      }
+      final contentType = (res.headers['content-type'] ?? '').toLowerCase();
+      final ext = _extensionFor(contentType, uri, kind);
+      final baseName = 'socialscope_${DateTime.now().millisecondsSinceEpoch}';
+
+      if (kind == 'video') {
+        final dir = await getTemporaryDirectory();
+        final file = File('${dir.path}/$baseName$ext');
+        await file.writeAsBytes(res.bodyBytes, flush: true);
+        try {
+          await Gal.putVideo(file.path);
+        } finally {
+          try { await file.delete(); } catch (_) {}
+        }
+      } else {
+        // gal appends the extension itself.
+        await Gal.putImageBytes(Uint8List.fromList(res.bodyBytes), name: baseName);
+      }
+      ok = true;
+    } on _PhotoAccessDenied {
+      error = 'Photo access was denied. You can allow it in your phone\'s Settings.';
+    } on GalException catch (e) {
+      error = e.type == GalExceptionType.accessDenied
+          ? 'Photo access was denied. You can allow it in your phone\'s Settings.'
+          : e.type == GalExceptionType.notEnoughSpace
+              ? 'Not enough storage space on this phone.'
+              : e.type == GalExceptionType.notSupportedFormat
+                  ? 'This file type isn\'t supported by your Gallery.'
+                  : 'Couldn\'t save this $kind.';
+      print('[Browser] Gal error: ${e.type} ${e.platformException}');
+    } catch (e) {
+      error = 'Couldn\'t save this $kind.';
+      print('[Browser] Save $kind failed: $e');
+    } finally {
+      _savingMedia = false;
+    }
+
+    _logBrowserEvent('media_saved', {'kind': kind, 'mediaUrl': url, 'ok': ok, if (error != null) 'error': error});
+    if (!mounted) return;
+    messenger?.hideCurrentSnackBar();
+    messenger?.showSnackBar(SnackBar(
+      content: Text(ok
+          ? (kind == 'video' ? 'Video saved' : 'Image saved') + (Platform.isIOS ? ' to Photos' : ' to Gallery')
+          : error!),
+      duration: const Duration(seconds: 3),
+    ));
+  }
+
+  static String _extensionFor(String contentType, Uri uri, String kind) {
+    if (contentType.contains('jpeg') || contentType.contains('jpg')) return '.jpg';
+    if (contentType.contains('png')) return '.png';
+    if (contentType.contains('gif')) return '.gif';
+    if (contentType.contains('webp')) return '.webp';
+    if (contentType.contains('mp4')) return '.mp4';
+    final m = RegExp(r'\.(jpe?g|png|gif|webp|mp4)$', caseSensitive: false).firstMatch(uri.path);
+    if (m != null) return '.${m.group(1)!.toLowerCase().replaceFirst('jpeg', 'jpg')}';
+    return kind == 'video' ? '.mp4' : '.jpg';
+  }
+
   Future<void> _injectJavaScript() async {
     if (_controller == null) return;
 
@@ -223,6 +430,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
       // Update screenshot service platform
       _screenshotService?.updatePlatform(platform);
+
+      // Page scripts first (normally already running from document start;
+      // this is the fallback if the user-script path missed a load).
+      if (_suppressorJs.isNotEmpty) {
+        await _controller!.evaluateJavascript(source: _suppressorJs);
+      }
+      if (_mediaPickerJs.isNotEmpty) {
+        await _controller!.evaluateJavascript(source: _mediaPickerJs);
+      }
 
       // Load JavaScript from assets
       final jsCode = await rootBundle.loadString(observerFile);
@@ -465,11 +681,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
               initialUrlRequest: URLRequest(
                 url: WebUri(_currentUrl),
               ),
+              initialUserScripts: UnmodifiableListView<UserScript>([
+                for (final src in [_suppressorJs, _mediaPickerJs])
+                  if (src.isNotEmpty)
+                    UserScript(
+                      source: src,
+                      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                      forMainFrameOnly: true,
+                    ),
+              ]),
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 javaScriptCanOpenWindowsAutomatically: true,
                 supportMultipleWindows: true, // CRITICAL for OAuth popups
-                useShouldOverrideUrlLoading: false,
+                // Needed for shouldOverrideUrlLoading (native-app hand-off block).
+                useShouldOverrideUrlLoading: true,
+                // The app's own Save-media sheet replaces iOS's link/image
+                // preview menu, so the two don't stack.
+                allowsLinkPreview: false,
                 mediaPlaybackRequiresUserGesture: false,
                 allowsInlineMediaPlayback: true,
                 // Use hybrid composition on emulator to avoid Chromium GPU crash
@@ -593,6 +822,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onReceivedError: (controller, request, error) {
                 print('[Browser] Error: ${error.description}');
               },
+              shouldOverrideUrlLoading: (controller, action) async {
+                final url = action.request.url;
+                if (url != null && _isNativeAppHandoff(url)) {
+                  // "Open in app" / store deep links: there is nowhere for
+                  // them to go from inside the study browser. Swallow them
+                  // instead of showing a Play Store / "page not available"
+                  // dead end.
+                  print('[Browser] Blocked native-app hand-off: $url');
+                  _logBrowserEvent('app_handoff_blocked', {'target': url.toString()});
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
+              onLongPressHitTestResult: (controller, hit) =>
+                  _onLongPress(controller, hit),
             ),
           ),
 
@@ -722,3 +966,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 }
+
+/// Thrown when the participant declines Photos/Gallery access for a save.
+class _PhotoAccessDenied implements Exception {}

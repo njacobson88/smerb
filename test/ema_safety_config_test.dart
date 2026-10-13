@@ -60,15 +60,20 @@ void main() {
     }
   });
 
-  test('ability_safe is INVERTED — low ability to stay safe = danger', () {
+  test('ability_safe is NOT inverted — the slider runs Completely(0) → Not at all(100), so high = danger', () {
+    // Reversed in 10d7122 so every SI slider reads the same way (higher = riskier).
+    // Older responses carry __ability_safe_scale=low_is_risk and are re-read by
+    // the backend; the live config must stay on the high-is-risk scale.
     final q = byId['ability_safe']!;
     expect(q.safetyTrigger!['threshold'], 30);
-    expect(q.safetyTrigger!['inverted'], isTrue,
-        reason: 'CRITICAL: ability_safe MUST be inverted or low-safety answers miss');
-    expect(isAboveThreshold(q, 10.0), isTrue, reason: 'ability_safe=10 (unsafe) should trigger');
-    expect(isAboveThreshold(q, 29.0), isTrue, reason: 'ability_safe=29 should trigger');
-    expect(isAboveThreshold(q, 30.0), isFalse, reason: 'ability_safe=30 is not < 30');
-    expect(isAboveThreshold(q, 80.0), isFalse, reason: 'ability_safe=80 (safe) should not trigger');
+    expect(q.safetyTrigger!['inverted'], isFalse,
+        reason: 'CRITICAL: anchors are Completely→Not at all; an inverted trigger would miss unsafe answers');
+    expect(q.minLabel, 'Completely');
+    expect(q.maxLabel, 'Not at all');
+    expect(isAboveThreshold(q, 80.0), isTrue, reason: 'ability_safe=80 (not able to stay safe) should trigger');
+    expect(isAboveThreshold(q, 31.0), isTrue, reason: 'ability_safe=31 should trigger');
+    expect(isAboveThreshold(q, 30.0), isFalse, reason: 'ability_safe=30 is not > 30');
+    expect(isAboveThreshold(q, 10.0), isFalse, reason: 'ability_safe=10 (able to stay safe) should not trigger');
   });
 
   test('slider min/max parse as doubles (the type the trigger check requires)', () {
