@@ -90,7 +90,11 @@
       return { kind: 'video', url: url || null, poster: player.getAttribute('poster') || null, supported: !!url };
     }
 
-    var video = closestAcrossShadow(el, 'video') || (el.querySelector && el.querySelector('video'));
+    // X (and some Reddit galleries) put a transparent control layer over the
+    // media, so the touched element is a sibling of the <video>/<img>, not an
+    // ancestor or descendant. Look inside the nearest media container too.
+    var container = closestAcrossShadow(el, '[data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"], [data-testid="swipe-to-dismiss"], shreddit-aspect-ratio, gallery-carousel, figure');
+    var video = closestAcrossShadow(el, 'video') || (el.querySelector && el.querySelector('video')) || (container && container.querySelector('video'));
     if (video) {
       var vs = video.currentSrc || video.src || '';
       var srcEl = video.querySelector('source[src]');
@@ -99,7 +103,7 @@
       return { kind: 'video', url: ok ? vs : null, poster: video.poster || null, supported: ok };
     }
 
-    var img = el.tagName === 'IMG' ? el : (closestAcrossShadow(el, 'img') || (el.querySelector && el.querySelector('img')));
+    var img = el.tagName === 'IMG' ? el : (closestAcrossShadow(el, 'img') || (el.querySelector && el.querySelector('img')) || (container && container.querySelector('img')));
     if (!img) {
       // CSS background images (some galleries / X media cards).
       var n = el;
