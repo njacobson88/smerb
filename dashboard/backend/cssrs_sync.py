@@ -21,9 +21,15 @@ CSSRS_INSTRUMENTS = (CSSRS_SCREEN_INSTRUMENT, CSSRS_WEEKLY_INSTRUMENT, CSSRS_PED
 
 # Per-form field maps: item key -> REDCap field name. Reading a missing field
 # yields None (safe); we fetch the whole form so an unknown field never 400s.
+# "behavior" = every behavior item (display + severity). "recent_behavior" = the
+# subset that reflects CURRENT risk and can trigger a crisis alert. PI decision
+# 2026-10-15: a LIFETIME-only endorsement (cssrs_scr_6a / weekly item 6) is
+# history, not an emergency — it is shown on the Risk Assessment Summary but
+# does not page anyone or text the participant. Past-3-months behavior does.
 SCREEN_FIELDS = {
     "ideation": ["cssrs_scr_1", "cssrs_scr_2", "cssrs_scr_3", "cssrs_scr_4", "cssrs_scr_5"],
     "behavior": ["cssrs_scr_6a", "cssrs_scr_6b"],
+    "recent_behavior": ["cssrs_scr_6b"],
     "score": "cssrs_scr_risk_score",
     "risk_level": "cssrs_scr_risk_level",
 }
@@ -31,12 +37,16 @@ WEEKLY_FIELDS = {
     "ideation": ["cssrs_scr_1cssrs_wkly", "cssrs_scr_2cssrs_wkly", "cssrs_scr_3cssrs_wkly",
                  "cssrs_scr_4cssrs_wkly", "cssrs_scr_5cssrs_wkly"],
     "behavior": ["cssrs_scr_6cssrs_wkly", "cssrs_scr_6_last3mcssrs_wkly"],
+    "recent_behavior": ["cssrs_scr_6_last3mcssrs_wkly"],
     "score": "cssrs_weekly_score",
     "risk_level": "cssrs_wkly_risk_level",
 }
 PEDIATRIC_FIELDS = {
     "ideation": ["cssrs_ped_1", "cssrs_ped_2", "cssrs_ped_3", "cssrs_ped_4", "cssrs_ped_5"],
     "behavior": ["cssrs_ped_6a", "cssrs_ped_6b", "cssrs_ped_6c", "cssrs_ped_6d"],
+    # The pediatric/interview form has no lifetime-vs-recent split in REDCap;
+    # its behavior items keep triggering (unchanged).
+    "recent_behavior": ["cssrs_ped_6a", "cssrs_ped_6b", "cssrs_ped_6c", "cssrs_ped_6d"],
     "score": "cssrs_ped_risk_score",
     "risk_level": "cssrs_ped_risk_level",
 }
@@ -188,19 +198,22 @@ def _transform_cssrs(redcap_data, instrument):
     behavior_endorsed = any(_yn(redcap_data.get(f, "")) is True for f in fmap["behavior"])
     if behavior_endorsed:
         severity = 6
+    recent_behavior_fields = [f for f in fmap["recent_behavior"] if _yn(redcap_data.get(f, "")) is True]
+    recent_behavior_endorsed = bool(recent_behavior_fields)
 
-    # Crisis = active ideation with intent (item 4) or plan (item 5),
-    # OR any suicidal behavior. (Standard C-SSRS high-risk criterion.)
+    # Crisis = active ideation with intent (item 4) or plan (item 5), OR
+    # RECENT suicidal behavior. Lifetime-only behavior is displayed (severity 6)
+    # but never alerts — see the note on SCREEN_FIELDS.
     intent = _yn(redcap_data.get(fmap["ideation"][3], "")) is True   # item 4
     plan = _yn(redcap_data.get(fmap["ideation"][4], "")) is True     # item 5
-    crisis_triggered = intent or plan or behavior_endorsed
+    crisis_triggered = intent or plan or recent_behavior_endorsed
 
     trigger_fields = []
     if intent:
         trigger_fields.append(fmap["ideation"][3])
     if plan:
         trigger_fields.append(fmap["ideation"][4])
-    trigger_fields += [f for f in fmap["behavior"] if _yn(redcap_data.get(f, "")) is True]
+    trigger_fields += recent_behavior_fields
 
     score_raw = redcap_data.get(fmap["score"], "")
     try:
@@ -215,6 +228,7 @@ def _transform_cssrs(redcap_data, instrument):
         "behavior": ped_behavior,               # pediatric display (named keys)
         "severity": severity,
         "behaviorEndorsed": behavior_endorsed,
+        "recentBehaviorEndorsed": recent_behavior_endorsed,
         "riskScore": score,
         "riskLevel": _nonempty(redcap_data.get(fmap["risk_level"], "")),
         "crisisTriggered": crisis_triggered,

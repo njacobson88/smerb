@@ -64,20 +64,37 @@ class TestFieldMapsAreRealRedcapFields(unittest.TestCase):
 
 
 class TestCrisisTriggerFires(unittest.TestCase):
-    """Crisis MUST trigger on intent (item 4), plan (item 5), or any behavior."""
+    """Crisis MUST trigger on intent (item 4), plan (item 5), or RECENT behavior — never on lifetime-only behavior."""
     def test_screener_intent(self):
         self.assertTrue(c._transform_cssrs({"cssrs_scr_4": "1"}, "cssrs_screener")["crisisTriggered"])
 
     def test_screener_plan(self):
         self.assertTrue(c._transform_cssrs({"cssrs_scr_5": "1"}, "cssrs_screener")["crisisTriggered"])
 
-    def test_screener_behavior_lifetime_and_recent(self):
-        self.assertTrue(c._transform_cssrs({"cssrs_scr_6a": "1"}, "cssrs_screener")["crisisTriggered"])
+    def test_screener_recent_behavior_triggers_lifetime_alone_does_not(self):
+        # PI decision 2026-10-15: lifetime-only behavior (6a) is history, not an
+        # emergency — displayed, never alerted. Past-3-months (6b) still triggers.
+        life = c._transform_cssrs({"cssrs_scr_6a": "1", "cssrs_scr_6b": "0"}, "cssrs_screener")
+        self.assertFalse(life["crisisTriggered"])
+        self.assertEqual(life["crisisTriggerFields"], [])
+        self.assertEqual(life["severity"], 6)            # still shown as behavior endorsed
+        self.assertTrue(life["behaviorEndorsed"])
+        self.assertFalse(life["recentBehaviorEndorsed"])
+        recent = c._transform_cssrs({"cssrs_scr_6a": "1", "cssrs_scr_6b": "1"}, "cssrs_screener")
+        self.assertTrue(recent["crisisTriggered"])
+        self.assertEqual(recent["crisisTriggerFields"], ["cssrs_scr_6b"])
         self.assertTrue(c._transform_cssrs({"cssrs_scr_6b": "1"}, "cssrs_screener")["crisisTriggered"])
+
+    def test_lifetime_behavior_plus_intent_still_triggers_on_intent(self):
+        r = c._transform_cssrs({"cssrs_scr_4": "1", "cssrs_scr_6a": "1"}, "cssrs_screener")
+        self.assertTrue(r["crisisTriggered"])
+        self.assertEqual(r["crisisTriggerFields"], ["cssrs_scr_4"])
 
     def test_weekly_plan_and_behavior(self):
         self.assertTrue(c._transform_cssrs({"cssrs_scr_5cssrs_wkly": "1"}, "cssrs_weekly")["crisisTriggered"])
-        self.assertTrue(c._transform_cssrs({"cssrs_scr_6cssrs_wkly": "1"}, "cssrs_weekly")["crisisTriggered"])
+        # weekly item 6 is lifetime; only the past-3-months item alerts
+        self.assertFalse(c._transform_cssrs({"cssrs_scr_6cssrs_wkly": "1"}, "cssrs_weekly")["crisisTriggered"])
+        self.assertTrue(c._transform_cssrs({"cssrs_scr_6_last3mcssrs_wkly": "1"}, "cssrs_weekly")["crisisTriggered"])
 
     def test_pediatric_intent_and_each_behavior(self):
         self.assertTrue(c._transform_cssrs({"cssrs_ped_4": "1"}, "cssrs_pediatrics")["crisisTriggered"])
