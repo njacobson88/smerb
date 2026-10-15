@@ -6663,13 +6663,26 @@ def generate_and_assign_app_id(redcap_record_id: str, event_name: str = None) ->
     # Check if this REDCap record already has an app ID (idempotent)
     mapping_ref = db.collection(REDCAP_MAPPINGS_COLLECTION).document(redcap_record_id)
     mapping_doc = mapping_ref.get()
-    if mapping_doc.exists:
-        existing = mapping_doc.to_dict()
-        app_id = existing["app_participant_id"]
-        # SELF-HEAL: the DET only calls this when REDCap's app-id field is empty,
-        # yet a Firestore mapping already exists — i.e. a prior write-back failed
-        # (e.g. the REDCap API token was missing). Re-write it so the ID is
-        # actually visible in REDCap instead of stranded in Firestore.
+    existing = mapping_doc.to_dict() if mapping_doc.exists else None
+    # SELF-HEAL: the DET only calls this when REDCap's app-id field is empty,
+    # yet a Firestore mapping may already exist — i.e. a prior write-back failed
+    # (e.g. the REDCap API token was missing). Reuse it ONLY if the mapped
+    # participant's app id is not already carried by a different REDCap record:
+    # after a rename, REDCap reuses the freed number for the next respondent,
+    # and handing them the previous participant's id would merge two people.
+    app_id = None
+    if existing:
+        live_record = _live_redcap_record_id(existing.get("app_participant_id") or "")
+        app_id = mapping_reusable_at_qualify(existing, redcap_record_id, live_record)
+        if not app_id:
+            logger.error(
+                f"[REDCap] STALE MAPPING at qualify: record {redcap_record_id!r} -> "
+                f"{existing.get('app_participant_id')} (live record for that id: {live_record!r}). "
+                f"Marking superseded and generating a fresh id.")
+            mapping_ref.set({"superseded_at": datetime.utcnow(),
+                             "superseded_reason": f"qualify on reused record; live record is {live_record!r}",
+                             "superseded_app_participant_id": existing.get("app_participant_id")}, merge=True)
+    if app_id:
         redcap_written = write_id_to_redcap(redcap_record_id, app_id, event_name)
         logger.info(f"[REDCap] Record {redcap_record_id} already mapped to {app_id}; "
                     f"re-wrote to REDCap (write: {redcap_written})")
@@ -7290,26 +7303,48 @@ def redcap_record_id_for_participant(participant_id: str, use_cache: bool = True
     return record_id
 
 
+def _fetch_redcap_record_app_id(record_id: str) -> str:
+    """The record's own `socialscope_app_id` ('' if empty). Searched across ALL
+    events — the DET for a screener save names the consent event, but the app id
+    is written on the interview event. Raises on transport/API failure."""
+    resp = http_requests.post(config.REDCAP_API_URL, data={
+        "token": config.REDCAP_API_TOKEN,
+        "content": "record",
+        "format": "json",
+        "records[0]": record_id,
+        "fields[0]": config.REDCAP_APP_ID_FIELD,
+        "returnFormat": "json",
+    }, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"REDCap app-id lookup HTTP {resp.status_code}")
+    rows = resp.json()
+    if isinstance(rows, dict):  # REDCap error payload
+        raise RuntimeError(f"REDCap app-id lookup error: {rows}")
+    for row in rows:
+        v = str(row.get(config.REDCAP_APP_ID_FIELD) or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def _resolve_participant_for_record(record_id: str, event_name: str = None):
-    """Resolve the app participant ID for a REDCap record, tolerating renames.
+    """Resolve the app participant ID for a REDCap record.
 
-    Mappings are keyed by REDCap record_id. Coordinators rename records to match
-    the generated app ID once it exists (e.g. "56.BM" -> "194203310.BM"), which
-    orphaned the mapping: the DET then arrived with a record_id we had never
-    seen, logged "no app ID mapping", and DROPPED the save with no retry. That
-    silently cost three live participants their entire safety plan — county, ER
-    hospital, ER phone and emergency contact were all missing from the Risk
-    Assessment Summary while sitting complete in REDCap.
-
-    So: fall back to the record's own socialscope_app_id, which survives renames,
-    and repair the stored mapping so the next save resolves directly.
-    Returns the participant id, or None if it genuinely cannot be resolved.
+    The stored mapping is only a cache. It is verified against the record's own
+    `socialscope_app_id` on EVERY call: coordinators rename records after
+    qualification, REDCap auto-numbering reuses the freed number for the next
+    survey respondent, and on 2026-10-14 a stale mapping routed a stranger's
+    screener — and its crisis SMS — to a staff member. See redcap_resolution.py.
+    Returns the participant id, or None if it cannot be resolved safely.
     """
-    mapping_doc = db.collection(REDCAP_MAPPINGS_COLLECTION).document(record_id).get()
-    if mapping_doc.exists:
-        pid = mapping_doc.to_dict().get("app_participant_id")
-        if pid:
-            return pid
+    if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
+        logger.error("[REDCap DET] REDCap API not configured — refusing to resolve from cache alone")
+        return None
+    return resolve_participant_for_record(
+        record_id, db=db, mappings_collection=REDCAP_MAPPINGS_COLLECTION,
+        participants_collection=config.col("participants"),
+        fetch_record_app_id=_fetch_redcap_record_app_id, logger=logger,
+        event_name=event_name or config.REDCAP_TRIGGER_EVENT)
 
     if not config.REDCAP_API_URL or not config.REDCAP_API_TOKEN:
         return None
@@ -7554,6 +7589,7 @@ def sync_all_safety_plans(
 # C-SSRS Sync & Risk Assessment (modular — see cssrs_sync.py, risk_assessment.py)
 # ============================================================================
 
+from redcap_resolution import resolve_participant_for_record, mapping_reusable_at_qualify  # noqa: E402
 from cssrs_sync import (
     sync_cssrs_from_redcap, CSSRS_INSTRUMENTS,
     CSSRS_SCREEN_INSTRUMENT, CSSRS_WEEKLY_INSTRUMENT, CSSRS_PEDIATRIC_INSTRUMENT,
