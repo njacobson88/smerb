@@ -240,13 +240,18 @@ def build_cssrs_safety_alert(*, participant_id, instrument, label, severity,
                              crisis_trigger_fields, record_id, event_name, now):
     """Build the safety_alert doc for a C-SSRS crisis.
 
-    ONLY the WEEKLY C-SSRS runs the full app confirmed-danger protocol (participant
-    SMS/push confirm -> automated triage call -> page study team -> follow-up):
-    confirmedDanger=True drives onSafetyAlert's participant outreach, and
-    alertType="confirmed_danger" drives checkEscalation's triage call + paging +
-    post-call follow-up. The screener and pediatric versions keep the lesser
-    "cssrs_crisis" alert (on-call is notified, but no automated participant
-    outreach / triage call)."""
+    The WEEKLY C-SSRS is written as a confirmed_danger alert (the participant
+    answered a current-risk instrument affirmatively): confirmedDanger=True and
+    alertType="confirmed_danger" also drive emergency-contact notification.
+
+    The screener and pediatric versions are "cssrs_crisis". Since 7bfcce2
+    (2026-10-05) EVERY alert type gets the automated participant sequence —
+    SMS/push/email, triage call, then the on-call ladder if unresolved — and the
+    PI confirmed on 2026-10-15 that this is the intended behavior for
+    cssrs_crisis too (an earlier version of this docstring said screener alerts
+    were on-call-only; that is no longer the design). What cssrs_crisis does NOT
+    do is notify emergency contacts on its own: that still requires the
+    participant to affirm a crisis or go unreachable (escalation_rules.js)."""
     doc = {
         "participantId": participant_id,
         "triggeredAt": now,
