@@ -1599,6 +1599,7 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
         # Surfaces a dashboard warning when a device's local capture is
         # paused on a full cache (data-loss risk; usually a long offline gap).
         "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
+        "captureDiskUsageMb": (p_info.get("data") or {}).get("captureDiskUsageMb"),
     }
 
 
@@ -1920,6 +1921,7 @@ def get_overall_status(
                     "weeklyTwitter": total_twitter,
                     "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
                     "captureDiskPaused": p_data.get("captureDiskPaused", False),
+                    "captureDiskUsageMb": p_data.get("captureDiskUsageMb"),
                     # True until the next cache rebuild picks this participant up.
                     "awaitingStats": pid not in cached_by_id,
                 })
@@ -2042,6 +2044,7 @@ def get_overall_status(
                 # Surfaces a dashboard warning when a device's local capture is
                 # paused on a full cache (data-loss risk; usually a long offline gap).
                 "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
+                "captureDiskUsageMb": (p_info.get("data") or {}).get("captureDiskUsageMb"),
                 "is_test_participant": bool((p_info.get("data") or {}).get("isTestParticipant")),
                 "app_version": (p_info.get("data") or {}).get("appVersion"),
                 "app_build_number": (p_info.get("data") or {}).get("appBuildNumber"),

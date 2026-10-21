@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import '../../storage/database/database.dart';
+import '../../storage/services/local_media_retention.dart';
 import '../../ocr/services/ocr_service.dart';
 import '../../settings/services/pause_service.dart';
 import 'upload_service.dart';
@@ -18,6 +21,7 @@ class BackgroundSyncService {
   bool _isRunning = false;
   bool _userPaused = false;
   int _syncCycleCount = 0;
+  bool _sweptSinceLaunch = false;
 
   // Sync interval
   static const Duration syncInterval = Duration(seconds: 30);
@@ -117,8 +121,15 @@ class BackgroundSyncService {
       // Step 0: Check network connectivity before attempting uploads
       final hasNetwork = await _hasNetworkConnectivity();
 
-      // Step 1: Process any pending OCR (runs async, non-blocking)
-      // OCR is local-only, doesn't need network
+      // Step 0b: First cycle after launch — free local media we no longer
+      // need BEFORE anything slow runs, so a device stuck at the cache cap
+      // recovers within seconds of opening the app.
+      if (!_sweptSinceLaunch) {
+        _sweptSinceLaunch = true;
+        await _sweepLocalMedia();
+      }
+
+      // Step 1: Process any pending OCR (bounded; local-only, no network)
       await _processOcrInBackground();
 
       // Step 2: Sync to Firebase (only if online)
@@ -128,7 +139,9 @@ class BackgroundSyncService {
         await _syncToFirebase();
       }
 
-      // Step 3: Periodically prune old synced data (~hourly)
+      // Step 3: Periodically prune old synced data (~hourly), then free the
+      // local media files nothing needs any more (same cadence: a few
+      // thousand stat() calls). Also runs once at launch, see Step 0b.
       _syncCycleCount++;
       if (_syncCycleCount >= _retentionInterval) {
         _syncCycleCount = 0;
@@ -136,6 +149,7 @@ class BackgroundSyncService {
         if (pruned > 0) {
           print('[BackgroundSync] Pruned $pruned old synced rows');
         }
+        await _sweepLocalMedia();
       }
 
       // Update status
@@ -158,6 +172,69 @@ class BackgroundSyncService {
     }
   }
 
+  /// Delete screenshot files that are uploaded and either OCR'd or past the
+  /// OCR grace period, plus orphans no event row references (rows pruned at
+  /// 30 days used to leave their files behind forever — see
+  /// LocalMediaRetention). Never touches a file whose event is not uploaded.
+  Future<void> _sweepLocalMedia() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final dir = Directory('${docs.path}/screenshots');
+      if (!await dir.exists()) return;
+
+      final now = DateTime.now();
+      final onDisk = <String, double>{};
+      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        DateTime modified;
+        try {
+          modified = await entity.lastModified();
+        } catch (_) {
+          continue;
+        }
+        onDisk[entity.path] = now.difference(modified).inMinutes / 1440.0;
+      }
+      if (onDisk.isEmpty) return;
+
+      final referenced = await database.getReferencedScreenshotFiles();
+      final doomed = LocalMediaRetention.filesToDelete(
+          filesOnDisk: onDisk, referencedFiles: referenced);
+
+      int deleted = 0, bytes = 0;
+      for (final path in doomed) {
+        try {
+          final f = File(path);
+          bytes += await f.length();
+          await f.delete();
+          deleted++;
+        } catch (e) {
+          print('[BackgroundSync] sweep could not delete $path: $e');
+        }
+      }
+      if (deleted > 0) {
+        print('[BackgroundSync] Swept $deleted local screenshot files '
+            '(${(bytes / 1048576).toStringAsFixed(0)} MB); '
+            '${onDisk.length - deleted} remain, ${onDisk.length - referenced.length} were orphans');
+      }
+
+      // HTML snapshots are deleted right after upload, so the only thing that
+      // can accumulate is a file no html_captures row points at any more.
+      final htmlDir = Directory('${docs.path}/html');
+      if (await htmlDir.exists()) {
+        final htmlRefs = await database.getReferencedHtmlFiles();
+        int htmlDeleted = 0;
+        await for (final entity in htmlDir.list(recursive: true, followLinks: false)) {
+          if (entity is File && !htmlRefs.contains(entity.path)) {
+            try { await entity.delete(); htmlDeleted++; } catch (_) {}
+          }
+        }
+        if (htmlDeleted > 0) print('[BackgroundSync] Swept $htmlDeleted orphan HTML files');
+      }
+    } catch (e) {
+      print('[BackgroundSync] local media sweep error: $e');
+    }
+  }
+
   /// Process OCR in background (non-blocking)
   Future<void> _processOcrInBackground() async {
     if (_isProcessingOcr) return;
@@ -172,7 +249,9 @@ class BackgroundSyncService {
         print('[BackgroundSync] Processing $pendingCount pending OCR items');
 
         // Process in small batches to avoid blocking the main isolate.
-        final processed = await ocrService.processPendingScreenshots(batchSize: 5);
+        // Bounded per cycle so upload + the media sweep still run every ~30s
+        // even with a large backlog (the loop used to drain it all first).
+        final processed = await ocrService.processPendingScreenshots(batchSize: 5, maxItems: 50);
 
         print('[BackgroundSync] Processed $processed OCR items');
       }

@@ -144,7 +144,12 @@ class OcrService {
 
   /// Process all pending screenshots (screenshots without OCR results)
   /// Returns the number of screenshots processed
-  Future<int> processPendingScreenshots({int batchSize = 10}) async {
+  ///
+  /// [maxItems] bounds one call. The background sync cycle used to drain the
+  /// whole backlog here before uploading or sweeping — on a device with
+  /// thousands of pending screenshots that is tens of minutes during which
+  /// nothing else in the cycle runs (2026-10-21).
+  Future<int> processPendingScreenshots({int batchSize = 10, int? maxItems}) async {
     if (_isProcessing) {
       print('[OcrService] Already processing, skipping');
       return 0;
@@ -171,7 +176,8 @@ class OcrService {
           await Future.delayed(const Duration(milliseconds: 100));
         }
 
-      } while (pendingScreenshots.length == batchSize);
+      } while (pendingScreenshots.length == batchSize &&
+          (maxItems == null || totalProcessed < maxItems));
 
       print('[OcrService] Completed processing. Total: $totalProcessed');
       return totalProcessed;

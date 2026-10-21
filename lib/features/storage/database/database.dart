@@ -407,6 +407,36 @@ class AppDatabase extends _$AppDatabase {
     return result.read(count) ?? 0;
   }
 
+  /// Every screenshot file path an event row still references, with whether
+  /// EVERY referencing event is synced and has an OCR result (deduped events
+  /// share one file, so the file is only done when all of them are). Used by
+  /// the local-media sweep; the file path lives in the event's JSON data.
+  Future<Map<String, ({bool synced, bool ocrDone})>> getReferencedScreenshotFiles() async {
+    final rows = await customSelect(
+      "SELECT json_extract(e.data, '\$.filePath') AS fp, "
+      '       MIN(e.synced) AS all_synced, '
+      '       MIN(CASE WHEN o.id IS NULL THEN 0 ELSE 1 END) AS all_ocr '
+      'FROM events e LEFT JOIN ocr_results o ON e.id = o.event_id '
+      "WHERE e.event_type = 'screenshot' AND json_extract(e.data, '\$.filePath') IS NOT NULL "
+      'GROUP BY fp',
+      readsFrom: {events, ocrResults},
+    ).get();
+    final out = <String, ({bool synced, bool ocrDone})>{};
+    for (final r in rows) {
+      final fp = r.data['fp'] as String?;
+      if (fp == null) continue;
+      out[fp] = (synced: (r.data['all_synced'] as int? ?? 0) == 1,
+                 ocrDone: (r.data['all_ocr'] as int? ?? 0) == 1);
+    }
+    return out;
+  }
+
+  /// Every HTML file path still referenced by an html_captures row.
+  Future<Set<String>> getReferencedHtmlFiles() async {
+    final rows = await customSelect('SELECT file_path FROM html_captures', readsFrom: {htmlCaptures}).get();
+    return rows.map((r) => r.data['file_path'] as String).toSet();
+  }
+
   /// Get pending OCR count (screenshot events without OCR results)
   Future<int> getPendingOcrCount() async {
     final result = await customSelect(

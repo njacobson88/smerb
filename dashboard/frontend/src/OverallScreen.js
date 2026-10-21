@@ -597,9 +597,9 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
                           {participant.captureDiskPaused && (
                             <span
                               className="ml-2 px-1.5 py-0.5 text-xs rounded bg-amber-100 text-amber-800 border border-amber-300"
-                              title="This device's local storage is full and capture is paused — possible data loss until it uploads/frees space."
+                              title={`Capture is paused: the study app's own cache on this phone hit its 2 GB cap${participant.captureDiskUsageMb ? ` (${participant.captureDiskUsageMb} MB)` : ''}. This is the app's cache, not the phone's storage. App 1.0.22+ frees it automatically on next launch; older builds stay paused.`}
                             >
-                              ⚠ capture paused (disk full)
+                              ⚠ capture paused (app cache full{participant.captureDiskUsageMb ? `, ${participant.captureDiskUsageMb} MB` : ''})
                             </span>
                           )}
                         </div>
