@@ -57,6 +57,14 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // Release builds are shrunk by R8. flutter_local_notifications
+            // persists its schedule with Gson, which needs generic signatures
+            // kept; without these rules every Android reminder died after its
+            // first firing (2026-10-21). See proguard-rules.pro.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
