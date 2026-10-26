@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
@@ -14,7 +15,46 @@ class OcrService {
 
   bool _isProcessing = false;
 
+  /// Upper bound for one native recognition call.
+  static const Duration ocrTimeout = Duration(seconds: 20);
+
+  /// Events that could not be processed this session (dedup original not
+  /// available yet, native call timed out, ...) with their attempt count.
+  /// They are skipped for the rest of the batch loop so they cannot sit at the
+  /// head of the oldest-first queue and starve everything behind them; after
+  /// [maxDeferrals] an empty result is recorded so the queue moves on for good.
+  final Map<String, int> _deferred = {};
+  static const int maxDeferrals = 3;
+
   OcrService({required this.database});
+
+  Future<void> _recordEmptyResult(Event event, String reason) async {
+    await database.insertOcrResult(OcrResultsCompanion(
+      id: Value(const Uuid().v4()),
+      eventId: Value(event.id),
+      participantId: Value(event.participantId),
+      sessionId: Value(event.sessionId),
+      extractedText: const Value(''),
+      wordCount: const Value(0),
+      processingTimeMs: const Value(-1),  // sentinel: not actually recognised
+      capturedAt: Value(event.timestamp),
+    ));
+    print('[OcrService] Recorded empty OCR for ${event.id}: $reason');
+  }
+
+  /// Returns null to mean "try again later"; bumps the deferral count and,
+  /// once exhausted, records an empty result instead so the queue advances.
+  Future<OcrResult?> _defer(Event event, String reason) async {
+    final n = (_deferred[event.id] ?? 0) + 1;
+    _deferred[event.id] = n;
+    if (n >= maxDeferrals) {
+      _deferred.remove(event.id);
+      await _recordEmptyResult(event, '$reason (gave up after $n attempts)');
+      return database.getOcrResultForEvent(event.id);
+    }
+    print('[OcrService] Deferring ${event.id} ($reason, attempt $n)');
+    return null;
+  }
 
   /// Process a single screenshot and extract text
   /// Returns the extracted text or null if processing failed
@@ -29,14 +69,20 @@ class OcrService {
       final stopwatch = Stopwatch()..start();
 
       // Use Apple Vision framework via method channel
+      // Hang guard: a native recognizer that never calls back would otherwise
+      // freeze this await — and with it the whole sync cycle — for the rest of
+      // the session.
       final text = await _channel.invokeMethod<String>('extractText', {
         'imagePath': imagePath,
-      });
+      }).timeout(ocrTimeout);
 
       stopwatch.stop();
       print('[OcrService] Extracted ${text?.length ?? 0} chars in ${stopwatch.elapsedMilliseconds}ms');
 
       return text?.trim();
+    } on TimeoutException {
+      print('[OcrService] OCR timed out after ${ocrTimeout.inSeconds}s: $imagePath');
+      rethrow; // caller defers the event rather than recording empty text
     } catch (e) {
       print('[OcrService] OCR extraction failed: $e');
       return null;
@@ -56,8 +102,10 @@ class OcrService {
       final filePath = eventData['filePath'] as String?;
 
       if (filePath == null) {
-        print('[OcrService] Screenshot event missing filePath');
-        return null;
+        // Nothing can ever be recognised for this row; do not let it sit at
+        // the head of the queue.
+        await _recordEmptyResult(event, 'event has no filePath');
+        return database.getOcrResultForEvent(event.id);
       }
 
       // Deduped screenshot: identical bytes → identical text. Copy the
@@ -85,8 +133,9 @@ class OcrService {
         // (uploaded + deleted), saving an empty result now would be permanent —
         // return null so this event is retried after the original's OCR lands.
         if (!File(filePath).existsSync()) {
-          print('[OcrService] Dedup original OCR pending and file gone — retry later');
-          return null;
+          // The original's text (if any) lives in Firestore under
+          // dedupOfEventId; the backend resolves it from there.
+          return _defer(event, 'dedup original OCR pending and file gone');
         }
       }
 
@@ -138,7 +187,7 @@ class OcrService {
       return database.getOcrResultForEvent(event.id);
     } catch (e) {
       print('[OcrService] Error processing screenshot: $e');
-      return null;
+      return _defer(event, 'error: $e');
     }
   }
 
@@ -162,7 +211,8 @@ class OcrService {
       List<Event> pendingScreenshots;
 
       do {
-        pendingScreenshots = await database.getScreenshotsPendingOcr(limit: batchSize);
+        pendingScreenshots = await database.getScreenshotsPendingOcr(
+            limit: batchSize, excludeIds: _deferred.keys.toList());
 
         if (pendingScreenshots.isEmpty) break;
 

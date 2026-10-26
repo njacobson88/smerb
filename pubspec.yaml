@@ -1,7 +1,7 @@
 name: smerb_app
 description: SocialScope - Social media research data collection app
 publish_to: 'none'
-version: 1.0.22+22
+version: 1.0.23+23
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

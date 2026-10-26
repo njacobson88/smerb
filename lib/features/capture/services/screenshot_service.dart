@@ -79,7 +79,13 @@ class ScreenshotService {
 
   // Disk space limits
   static const int maxLocalStorageMb = 2048; // 2GB cap
-  int _capturesSinceLastCheck = 0;
+  // Start at the interval so the FIRST capture runs the check and reports the
+  // real state. The report used to fire only on a pause/resume transition
+  // within one session, so after a restart (flag reset to false) a device
+  // that had freed its cache kept showing "capture paused" on the dashboard
+  // indefinitely (2026-10-23).
+  int _capturesSinceLastCheck = _diskCheckInterval;
+  bool _statusReportedThisSession = false;
   static const int _diskCheckInterval = 60; // Check every 60 captures (~1 min)
 
   ScreenshotService({
@@ -181,16 +187,21 @@ class ScreenshotService {
       _capturesSinceLastCheck = 0;
       final usageMb = await getLocalStorageMb();
       if (usageMb > 0 && usageMb >= maxLocalStorageMb) {
-        if (!_diskSpacePaused) {
+        if (!_diskSpacePaused || !_statusReportedThisSession) {
           _diskSpacePaused = true;
+          _statusReportedThisSession = true;
           print('[ScreenshotService] PAUSED: Local storage at ${usageMb.toStringAsFixed(0)}MB (limit: ${maxLocalStorageMb}MB)');
           _reportCaptureStatus(paused: true, usageMb: usageMb);
         }
         return;
-      } else if (_diskSpacePaused && usageMb >= 0 && usageMb < maxLocalStorageMb) {
-        // Space freed up — resume capture and clear the alert.
+      } else if (usageMb >= 0 && (_diskSpacePaused || !_statusReportedThisSession)) {
+        // Space is fine: clear the alert (on resume, or once per session so a
+        // stale "paused" flag from an earlier run is corrected).
+        if (_diskSpacePaused) {
+          print('[ScreenshotService] RESUMED: Local storage back to ${usageMb.toStringAsFixed(0)}MB');
+        }
         _diskSpacePaused = false;
-        print('[ScreenshotService] RESUMED: Local storage back to ${usageMb.toStringAsFixed(0)}MB');
+        _statusReportedThisSession = true;
         _reportCaptureStatus(paused: false, usageMb: usageMb);
       }
     }

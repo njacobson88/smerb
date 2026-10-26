@@ -528,14 +528,19 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// Get screenshot events pending OCR processing
-  Future<List<Event>> getScreenshotsPendingOcr({int? limit}) async {
+  Future<List<Event>> getScreenshotsPendingOcr({int? limit, List<String> excludeIds = const []}) async {
     final limitClause = limit != null ? 'LIMIT $limit' : '';
+    // Ids deferred this session are skipped so they cannot pin the head of
+    // the oldest-first queue (SQLite's variable limit is far above this list).
+    final ids = excludeIds.take(900).toList();
+    final excludeClause = ids.isEmpty ? '' : 'AND e.id NOT IN (${List.filled(ids.length, '?').join(',')}) ';
     final rows = await customSelect(
       'SELECT e.* FROM events e '
       'LEFT JOIN ocr_results o ON e.id = o.event_id '
       'WHERE e.event_type = ? AND o.id IS NULL '
+      '$excludeClause'
       'ORDER BY e.timestamp ASC $limitClause',
-      variables: [Variable.withString('screenshot')],
+      variables: [Variable.withString('screenshot'), ...ids.map(Variable.withString)],
       readsFrom: {events, ocrResults},
     ).get();
 

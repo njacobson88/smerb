@@ -136,13 +136,65 @@ class CheckinService with WidgetsBindingObserver {
     }
 
     // Day may have rolled over while backgrounded; rebuild windows, then
-    // reschedule (idempotent — same IDs replace their pending versions).
+    // reschedule ONLY if something is actually wrong. This used to reschedule
+    // on every resume: for a participant who switches apps constantly that
+    // was 130+ cancel+reschedule rounds a day, each one dismissing any
+    // reminder still sitting in the notification shade (cancel() removes
+    // delivered notifications too) and writing four log rows (2026-10-21).
     _generateWindows();
     _checkWindows();
-    scheduleNotifications();
+    _rescheduleOnResumeIfNeeded();
     // The participant may have just come back from Settings after enabling
     // notifications — re-read so the in-app prompt clears immediately.
     refreshNotificationStatus();
+  }
+
+  /// Local calendar date (device zone) the reminders were last scheduled for.
+  String? _lastScheduledLocalDate;
+
+  String _localDateKey() {
+    final now = tz.TZDateTime.now(tz.local);
+    return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _rescheduleOnResumeIfNeeded() async {
+    try {
+      List<int> pendingIds = const [];
+      try {
+        final pending = await _notifications.pendingNotificationRequests();
+        pendingIds = pending.map((p) => p.id).where((id) => id < _reminderIdRangeEnd).toList();
+      } catch (_) {
+        pendingIds = const []; // unknown -> treat as missing, reschedule
+      }
+      final decision = resumeRescheduleDecision(
+        lastScheduledDate: _lastScheduledLocalDate,
+        todayDate: _localDateKey(),
+        pendingReminderIds: pendingIds,
+        expectedCount: _todayWindows.length,
+      );
+      if (decision == null) return; // healthy: nothing to do, nothing to log
+      print('[CheckIn] Rescheduling on resume: $decision');
+      await scheduleNotifications();
+    } catch (e) {
+      print('[CheckIn] resume reschedule check failed: $e');
+    }
+  }
+
+  /// Why a resume should reschedule, or null if the schedule is intact.
+  /// Pure so it can be unit-tested.
+  static String? resumeRescheduleDecision({
+    required String? lastScheduledDate,
+    required String todayDate,
+    required List<int> pendingReminderIds,
+    required int expectedCount,
+  }) {
+    if (lastScheduledDate == null) return 'never scheduled this session';
+    if (lastScheduledDate != todayDate) return 'date changed $lastScheduledDate -> $todayDate';
+    final ids = pendingReminderIds.toSet();
+    if (expectedCount > 0 && ids.length < expectedCount) {
+      return 'only ${ids.length}/$expectedCount reminders pending';
+    }
+    return null;
   }
 
   /// Pin tz.local to the device's IANA zone (e.g. America/New_York).
@@ -423,6 +475,7 @@ class CheckinService with WidgetsBindingObserver {
     for (final window in _todayWindows) {
       await _scheduleWindow(window, details);
     }
+    _lastScheduledLocalDate = _localDateKey();
 
     // Verify against the OS and log the ground truth — if a device ever shows
     // zero pending reminders server-side, we know scheduling is broken there.

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -8,6 +9,65 @@ import '../../../core/config/environment_config.dart';
 import '../../storage/database/database.dart';
 
 /// Service that syncs local data to Firebase
+/// A wall-clock budget for one sync stage.
+///
+/// Every stage drains its queue with `do { batch } while (batch was full)`.
+/// Without a budget, a stage whose queue refills as fast as it drains (a
+/// screenshot every 3 s vs. ~3 s per upload on a slow network) never exits:
+/// the cycle never finishes, the stages after it never run, and the next
+/// cycle never starts. Seen in the field 2026-10-21: OCR stopped minutes into
+/// every session, HTML snapshots never synced, and completed check-ins took a
+/// median 14 h to reach Firestore (the EMA stage only runs at cycle start).
+class StageBudget {
+  StageBudget(Duration limit) : _deadline = DateTime.now().add(limit);
+  StageBudget.unlimited() : _deadline = null;
+  final DateTime? _deadline;
+  bool exceeded = false;
+  /// True while the stage may start another batch.
+  bool get hasTime {
+    if (_deadline == null) return true;
+    if (DateTime.now().isBefore(_deadline!)) return true;
+    exceeded = true;
+    return false;
+  }
+}
+
+/// Bound a single network call. Firestore writes have no built-in timeout and
+/// on a poor link the SDK waits indefinitely for an ack — which no stage budget
+/// can interrupt (2026-10-21: a cycle sat in its first batch for 5+ minutes).
+/// A timed-out write is treated as a failure and retried on a later cycle;
+/// Firestore keeps the queued write locally, so a late success is harmless
+/// (doc ids are stable, sets are idempotent).
+const Duration _netTimeout = Duration(seconds: 20);
+Future<T> _net<T>(Future<T> f, String what) =>
+    f.timeout(_netTimeout, onTimeout: () => throw TimeoutException('$what timed out after ${_netTimeout.inSeconds}s'));
+
+/// Firestore offline persistence is ON (SDK default on iOS/Android): a write
+/// is appended to the durable local queue BEFORE the network attempt, and
+/// `commit()`/`set()` only complete on the server ack. A write that merely
+/// timed out is therefore already guaranteed delivery; re-sending it would
+/// only duplicate it in that queue (and on a slow link grow the queue without
+/// bound). Storage uploads are different — their timeout cancels the transfer.
+bool _isQueuedFirestoreTimeout(Object e) => e is TimeoutException;
+
+/// Commit a batch, bounded by [_netTimeout]. True when the writes are
+/// guaranteed to land (server ack, or timeout = durably queued); false on a
+/// real failure (rules rejection, serialization, ...), which the caller
+/// retries later.
+Future<bool> _commitQueued(WriteBatch batch, String what) async {
+  try {
+    await _net(batch.commit(), what);
+    return true;
+  } catch (e) {
+    if (_isQueuedFirestoreTimeout(e)) {
+      print('[UploadService] $what timed out — queued by the SDK, treated as synced');
+      return true;
+    }
+    print('[UploadService] $what failed: $e');
+    return false;
+  }
+}
+
 class UploadService {
   final AppDatabase database;
   final FirebaseFirestore _firestore;
@@ -70,7 +130,7 @@ class UploadService {
 
   /// Sync all unsynced events to Firebase
   /// Returns the number of events synced
-  Future<int> syncEvents({int batchSize = 50}) async {
+  Future<int> syncEvents({int batchSize = 50, StageBudget? budget}) async {
     if (_isSyncing) {
       print('[UploadService] Sync already in progress, skipping');
       return 0;
@@ -101,6 +161,7 @@ class UploadService {
         if (otherEvents.isNotEmpty) {
           WriteBatch? batch;
           int batchCount = 0;
+          final chunkIds = <String>[];
           const maxBatch = 450;
 
           for (final event in otherEvents) {
@@ -133,12 +194,20 @@ class UploadService {
               });
 
               syncedIds.add(event.id);
+
+              chunkIds.add(event.id);
               batchCount++;
 
               if (batchCount >= maxBatch) {
-                await batch.commit();
+                final committing = batch;
+                final committingIds = List<String>.from(chunkIds);
                 batch = null;
                 batchCount = 0;
+                chunkIds.clear();
+                if (!await _commitQueued(committing, 'event batch commit')) {
+                  syncedIds.removeWhere(committingIds.contains);
+                  failedIds.addAll(committingIds);
+                }
               }
             } catch (e) {
               print('[UploadService] Failed to batch event ${event.id}: $e');
@@ -147,19 +216,19 @@ class UploadService {
           }
 
           if (batch != null && batchCount > 0) {
-            try {
-              await batch.commit();
-            } catch (e) {
-              print('[UploadService] Failed to commit event batch: $e');
-              // Move batch items from synced to failed
-              syncedIds.removeWhere((id) => otherEvents.any((ev) => ev.id == id));
-              failedIds.addAll(otherEvents.map((e) => e.id));
+            if (!await _commitQueued(batch, 'event batch commit')) {
+              syncedIds.removeWhere(chunkIds.contains);
+              failedIds.addAll(chunkIds);
             }
+            chunkIds.clear();
           }
         }
 
-        // Upload screenshot events individually (each needs a file upload)
+        // Upload screenshot events individually (each needs a file upload).
+        // Check the budget per file: on a slow link one 25-event batch can
+        // take over a minute, and anything not attempted simply stays queued.
         for (final event in screenshotEvents) {
+          if (budget != null && !budget.hasTime) break;
           try {
             await _uploadEvent(event);
             syncedIds.add(event.id);
@@ -183,7 +252,7 @@ class UploadService {
           print('[UploadService] Incremented retry count for ${failedIds.length} failed events');
         }
 
-      } while (unsyncedEvents.length == batchSize);
+      } while (unsyncedEvents.length == batchSize && (budget?.hasTime ?? true));
 
       print('[UploadService] Sync complete. Total synced: $totalSynced');
       return totalSynced;
@@ -263,12 +332,18 @@ class UploadService {
 
     // Upload to Firestore
     // Structure: participants/{participantId}/events/{eventId}
-    await _firestore
-        .collection(EnvConfig.col('participants'))
-        .doc(event.participantId)
-        .collection('events')
-        .doc(event.id)
-        .set(docData);
+    try {
+      await _net(_firestore
+          .collection(EnvConfig.col('participants'))
+          .doc(event.participantId)
+          .collection('events')
+          .doc(event.id)
+          .set(docData), 'event doc set');
+    } catch (e) {
+      // The file is already in Storage; the doc write is durably queued.
+      if (!_isQueuedFirestoreTimeout(e)) rethrow;
+      print('[UploadService] event doc set timed out for ${event.id} — queued by the SDK');
+    }
 
     // The event doc is durable, but the local screenshot file may still be
     // needed: on-device OCR reads it from disk. Delete it ONLY once OCR has run
@@ -364,7 +439,7 @@ class UploadService {
         },
       );
 
-      final downloadUrl = await snapshot.ref.getDownloadURL();
+      final downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'getDownloadURL');
       _totalBytesUploaded += snapshot.totalBytes;
       _cacheUploadUrl(storagePath, downloadUrl);
       _pendingLocalDeletes[filePath] = true;
@@ -380,7 +455,7 @@ class UploadService {
 
   /// Sync OCR results to Firebase (updates existing events with OCR data)
   /// Returns the number of OCR results synced
-  Future<int> syncOcrResults({int batchSize = 50}) async {
+  Future<int> syncOcrResults({int batchSize = 50, StageBudget? budget}) async {
     if (_isSyncingOcr) {
       print('[UploadService] OCR sync already in progress, skipping');
       return 0;
@@ -404,6 +479,7 @@ class UploadService {
         // Batch OCR updates (up to 500 per Firestore batch)
         WriteBatch? batch;
         int batchCount = 0;
+        final chunkIds = <String>[];
         const maxBatchSize = 450; // Leave margin below Firestore's 500 limit
 
         for (final result in unsyncedResults) {
@@ -427,13 +503,19 @@ class UploadService {
               'ocrSyncedAt': FieldValue.serverTimestamp(),
             }, SetOptions(merge: true));
             syncedIds.add(result.id);
+            chunkIds.add(result.id);
             batchCount++;
 
             // Commit batch when it reaches the limit
             if (batchCount >= maxBatchSize) {
-              await batch.commit();
+              final committing = batch;
+              final committingIds = List<String>.from(chunkIds);
               batch = null;
               batchCount = 0;
+              chunkIds.clear();
+              if (!await _commitQueued(committing, 'ocr batch commit')) {
+                syncedIds.removeWhere(committingIds.contains);
+              }
             }
           } catch (e) {
             print('[UploadService] Failed to add OCR result ${result.id} to batch: $e');
@@ -442,12 +524,10 @@ class UploadService {
 
         // Commit remaining batch
         if (batch != null && batchCount > 0) {
-          try {
-            await batch.commit();
-          } catch (e) {
-            print('[UploadService] Failed to commit OCR batch: $e');
-            syncedIds.clear(); // Don't mark as synced if batch failed
+          if (!await _commitQueued(batch, 'ocr batch commit')) {
+            syncedIds.removeWhere(chunkIds.contains);
           }
+          chunkIds.clear();
         }
 
         if (syncedIds.isNotEmpty) {
@@ -456,7 +536,7 @@ class UploadService {
           print('[UploadService] Batch-synced ${syncedIds.length} OCR results');
         }
 
-      } while (unsyncedResults.length == batchSize);
+      } while (unsyncedResults.length == batchSize && (budget?.hasTime ?? true));
 
       print('[UploadService] OCR sync complete. Total: $totalSynced');
       return totalSynced;
@@ -473,7 +553,7 @@ class UploadService {
 
   /// Sync HTML captures to Firebase (uploads HTML files and updates event docs)
   /// Returns the number of HTML captures synced
-  Future<int> syncHtmlCaptures({int batchSize = 50}) async {
+  Future<int> syncHtmlCaptures({int batchSize = 50, StageBudget? budget}) async {
     if (_isSyncingHtml) {
       print('[UploadService] HTML sync already in progress, skipping');
       return 0;
@@ -495,6 +575,7 @@ class UploadService {
         final syncedIds = <String>[];
 
         for (final capture in unsyncedCaptures) {
+          if (budget != null && !budget.hasTime) break; // per-file: each upload can take up to 30 s
           try {
             await _uploadHtmlCapture(capture);
             syncedIds.add(capture.id);
@@ -509,7 +590,7 @@ class UploadService {
           print('[UploadService] Marked ${syncedIds.length} HTML captures as synced');
         }
 
-      } while (unsyncedCaptures.length == batchSize);
+      } while (unsyncedCaptures.length == batchSize && (budget?.hasTime ?? true));
 
       print('[UploadService] HTML capture sync complete. Total: $totalSynced');
       return totalSynced;
@@ -558,11 +639,11 @@ class UploadService {
         throw Exception('HTML upload timed out after 30s');
       },
     );
-    final downloadUrl = await snapshot.ref.getDownloadURL();
+    final downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'html getDownloadURL');
 
     // Update the event document with HTML data using dot notation
     // to avoid overwriting fields set by status log sync
-    await _firestore
+    await _net(_firestore
         .collection(EnvConfig.col('participants'))
         .doc(capture.participantId)
         .collection('events')
@@ -579,7 +660,7 @@ class UploadService {
         'capturedAt': Timestamp.fromDate(capture.capturedAt),
       },
       'htmlSyncedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    }, SetOptions(merge: true)), 'html event set');
 
     print('[UploadService] Uploaded HTML capture: $storagePath');
 
@@ -593,7 +674,7 @@ class UploadService {
 
   /// Sync HTML status logs to Firebase (updates event docs with HTML status)
   /// Returns the number of status logs synced
-  Future<int> syncHtmlStatusLogs({int batchSize = 50}) async {
+  Future<int> syncHtmlStatusLogs({int batchSize = 50, StageBudget? budget}) async {
     int totalSynced = 0;
 
     try {
@@ -611,6 +692,7 @@ class UploadService {
         // Batch HTML status log updates
         WriteBatch? batch;
         int batchCount = 0;
+        final chunkIds = <String>[];
         const maxBatchSize = 450;
 
         for (final log in unsyncedLogs) {
@@ -635,12 +717,18 @@ class UploadService {
             // Use set/merge — event doc may have been pruned
             batch.set(docRef, updates, SetOptions(merge: true));
             syncedIds.add(log.id);
+            chunkIds.add(log.id);
             batchCount++;
 
             if (batchCount >= maxBatchSize) {
-              await batch.commit();
+              final committing = batch;
+              final committingIds = List<String>.from(chunkIds);
               batch = null;
               batchCount = 0;
+              chunkIds.clear();
+              if (!await _commitQueued(committing, 'html-log batch commit')) {
+                syncedIds.removeWhere(committingIds.contains);
+              }
             }
           } catch (e) {
             print('[UploadService] Failed to add HTML status log ${log.id} to batch: $e');
@@ -649,12 +737,10 @@ class UploadService {
 
         // Commit remaining batch
         if (batch != null && batchCount > 0) {
-          try {
-            await batch.commit();
-          } catch (e) {
-            print('[UploadService] Failed to commit HTML status log batch: $e');
-            syncedIds.clear();
+          if (!await _commitQueued(batch, 'html-log batch commit')) {
+            syncedIds.removeWhere(chunkIds.contains);
           }
+          chunkIds.clear();
         }
 
         if (syncedIds.isNotEmpty) {
@@ -663,7 +749,7 @@ class UploadService {
           print('[UploadService] Batch-synced ${syncedIds.length} HTML status logs');
         }
 
-      } while (unsyncedLogs.length == batchSize);
+      } while (unsyncedLogs.length == batchSize && (budget?.hasTime ?? true));
 
       print('[UploadService] HTML status log sync complete. Total: $totalSynced');
       return totalSynced;
@@ -736,7 +822,7 @@ class UploadService {
   /// Sync all data (events + OCR results + HTML) efficiently
   /// Returns a map with counts of synced items
   /// Sync EMA check-in responses to Firebase
-  Future<int> syncEmaResponses({int batchSize = 50}) async {
+  Future<int> syncEmaResponses({int batchSize = 50, StageBudget? budget}) async {
     if (_isSyncingEma) {
       print('[UploadService] EMA sync already in progress, skipping');
       return 0;
@@ -757,6 +843,7 @@ class UploadService {
 
         final syncedIds = <String>[];
         for (final response in unsyncedResponses) {
+          if (budget != null && !budget.hasTime) break; // per-item: each set can take up to 10 s
           try {
             await _uploadEmaResponse(response);
             syncedIds.add(response.id);
@@ -773,7 +860,7 @@ class UploadService {
         // If none of this batch synced, stop — don't spin on a persistently
         // failing batch within a single cycle (it retries next cycle).
         if (syncedIds.isEmpty) break;
-      } while (unsyncedResponses.length == batchSize);
+      } while (unsyncedResponses.length == batchSize && (budget?.hasTime ?? true));
 
       if (totalSynced > 0) print('[UploadService] EMA sync complete. Total: $totalSynced');
     } finally {
@@ -804,7 +891,7 @@ class UploadService {
       'syncedAt': FieldValue.serverTimestamp(),
     };
 
-    await docRef.set(data);
+    await _net(docRef.set(data), 'doc set');
     print('[UploadService] Uploaded EMA response: ${response.id}');
   }
 
@@ -825,7 +912,7 @@ class UploadService {
   /// Non-destructive: a row is only marked synced AFTER its object lands. Upload
   /// failures bump syncRetryCount and leave the rows local for the next cycle.
   /// Object path: content_events/{participantId}/{sessionId}/{firstTsMs}_{uuid8}.jsonl.gz
-  Future<int> syncContentEvents({int batchSize = 300}) async {
+  Future<int> syncContentEvents({int batchSize = 300, StageBudget? budget}) async {
     if (_isSyncingContent) return 0;
     _isSyncingContent = true;
     int totalSynced = 0;
@@ -844,6 +931,7 @@ class UploadService {
         // contiguous run. One GCS object per group.
         int i = 0;
         while (i < batch.length) {
+          if (budget != null && !budget.hasTime) break; // per-group: each upload can take up to 45 s
           final pid = batch[i].participantId;
           final sid = batch[i].sessionId;
           final start = i;
@@ -926,7 +1014,7 @@ class UploadService {
         // If nothing in this batch could be synced, stop — a persistent failure
         // (offline, permission) shouldn't spin. Next sync cycle retries.
         if (syncedIds.isEmpty) break;
-      } while (batch.length == batchSize);
+      } while (batch.length == batchSize && (budget?.hasTime ?? true));
     } finally {
       _isSyncingContent = false;
     }
@@ -950,6 +1038,13 @@ class UploadService {
       return 0;
     }
   }
+
+  /// Per-stage wall-clock budgets. Events get the most (file uploads); the
+  /// rest are cheap Firestore writes. A cycle therefore ends within ~45 s even
+  /// on a slow network, and `truncated` tells the caller to run another one
+  /// soon rather than wait for the next timer tick.
+  static const Duration eventsStageBudget = Duration(seconds: 20);
+  static const Duration otherStageBudget = Duration(seconds: 5);
 
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
     // Reset counters
@@ -986,32 +1081,39 @@ class UploadService {
     // Every stage is now isolated via _syncStage so one failure can never starve
     // the ones after it, and the two that must never be lost run before the
     // bulk uploads can fail.
+    final emaBudget = StageBudget(otherStageBudget);
+    final eventsBudget = StageBudget(eventsStageBudget);
+    final contentBudget = StageBudget(otherStageBudget);
+    final ocrBudget = StageBudget(otherStageBudget);
+    final htmlBudget = StageBudget(otherStageBudget);
+    final htmlLogBudget = StageBudget(otherStageBudget);
+
     final safetyAlertsSynced =
         await _syncStage('safetyAlerts', () => syncSafetyAlerts());
     final emaSynced = await _syncStage(
-        'emaResponses', () => syncEmaResponses(batchSize: eventBatchSize));
+        'emaResponses', () => syncEmaResponses(batchSize: eventBatchSize, budget: emaBudget));
 
     // Bulk data. Relative order preserved: events must sync before the OCR/HTML
     // stages that update those same event docs.
     final eventsSynced =
-        await _syncStage('events', () => syncEvents(batchSize: eventBatchSize));
+        await _syncStage('events', () => syncEvents(batchSize: eventBatchSize, budget: eventsBudget));
 
     // Offload high-frequency analytics events to compressed GCS objects
     // (content_visible / content_exposure) — not individual Firestore docs.
     final contentEventsSynced =
-        await _syncStage('contentEvents', () => syncContentEvents());
+        await _syncStage('contentEvents', () => syncContentEvents(budget: contentBudget));
 
     // Sync any remaining OCR results (for events that were synced before OCR was done)
     final ocrSynced =
-        await _syncStage('ocrResults', () => syncOcrResults(batchSize: ocrBatchSize));
+        await _syncStage('ocrResults', () => syncOcrResults(batchSize: ocrBatchSize, budget: ocrBudget));
 
     // Sync HTML captures (upload files + update events)
     final htmlCapturesSynced = await _syncStage(
-        'htmlCaptures', () => syncHtmlCaptures(batchSize: eventBatchSize));
+        'htmlCaptures', () => syncHtmlCaptures(batchSize: eventBatchSize, budget: htmlBudget));
 
     // Sync HTML status logs (update events with unchanged status)
     final htmlStatusLogsSynced = await _syncStage(
-        'htmlStatusLogs', () => syncHtmlStatusLogs(batchSize: eventBatchSize));
+        'htmlStatusLogs', () => syncHtmlStatusLogs(batchSize: eventBatchSize, budget: htmlLogBudget));
 
     return {
       'events': eventsSynced,
@@ -1023,6 +1125,10 @@ class UploadService {
       'emaResponses': emaSynced,
       'safetyAlerts': safetyAlertsSynced,
       'bytesUploaded': _totalBytesUploaded,
+      // 1 if any stage ran out of time with work left — the caller should
+      // start another cycle promptly instead of waiting for the timer.
+      'truncated': [emaBudget, eventsBudget, contentBudget, ocrBudget, htmlBudget, htmlLogBudget]
+              .any((b) => b.exceeded) ? 1 : 0,
     };
   }
 
@@ -1060,14 +1166,14 @@ class UploadService {
     required DateTime enrolledAt,
   }) async {
     try {
-      await _firestore.collection(EnvConfig.col('participants')).doc(participantId).set({
+      await _net(_firestore.collection(EnvConfig.col('participants')).doc(participantId).set({
         'participantId': participantId,
         'visitorId': visitorId,
         'enrolledAt': Timestamp.fromDate(enrolledAt),
         'registeredAt': FieldValue.serverTimestamp(),
         'redditLoggedIn': false,
         'twitterLoggedIn': false,
-      }, SetOptions(merge: true));
+      }, SetOptions(merge: true)), 'status set');
 
       print('[UploadService] Registered participant: $participantId');
     } catch (e) {

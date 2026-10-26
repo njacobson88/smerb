@@ -22,6 +22,8 @@ class BackgroundSyncService {
   bool _userPaused = false;
   int _syncCycleCount = 0;
   bool _sweptSinceLaunch = false;
+  bool _lastCycleTruncated = false;
+  Timer? _followUpTimer;
 
   // Sync interval
   static const Duration syncInterval = Duration(seconds: 30);
@@ -86,6 +88,8 @@ class BackgroundSyncService {
     print('[BackgroundSync] Stopping');
     _syncTimer?.cancel();
     _syncTimer = null;
+    _followUpTimer?.cancel();
+    _followUpTimer = null;
     _isRunning = false;
   }
 
@@ -169,6 +173,14 @@ class BackgroundSyncService {
       _updateStatus(SyncStatus.error(e.toString()));
     } finally {
       _isSyncing = false;
+      // A budgeted cycle that left work behind continues almost immediately
+      // (OCR gets its turn at the top of the next cycle), instead of letting
+      // a backlog wait for the 30 s timer.
+      if (_lastCycleTruncated && _isRunning) {
+        _lastCycleTruncated = false;
+        _followUpTimer?.cancel();
+        _followUpTimer = Timer(const Duration(seconds: 2), _runSyncCycle);
+      }
     }
   }
 
@@ -295,7 +307,16 @@ class BackgroundSyncService {
           '${results['htmlCaptures']} HTML captures, '
           '${results['htmlStatusLogs']} HTML status logs, '
           '${results['emaResponses']} EMA responses '
-          '($bytesStr uploaded)');
+          '($bytesStr uploaded)'
+          '${results['truncated'] == 1 ? ' — budget hit, more pending' : ''}');
+      // Follow up quickly only when the cycle both ran out of time AND got
+      // something through; a stage that fails every item in milliseconds
+      // (bad network, rejected writes) must wait for the regular timer rather
+      // than spin every few seconds.
+      final progressed = (results['events'] ?? 0) + (results['ocrResults'] ?? 0) +
+          (results['htmlCaptures'] ?? 0) + (results['htmlStatusLogs'] ?? 0) +
+          (results['emaResponses'] ?? 0) + (results['contentEvents'] ?? 0) > 0;
+      _lastCycleTruncated = results['truncated'] == 1 && progressed;
 
     } catch (e) {
       print('[BackgroundSync] Firebase sync error: $e');
