@@ -486,11 +486,19 @@ const ParticipantDetailScreen = ({
       }
 
       // Update the summary with the new date
-      setSummary(prev => ({
-        ...prev,
-        study_start_date: studyStartInput,
-        study_start_is_custom: true
-      }));
+      setSummary(prev => {
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const [y, m, d] = studyStartInput.split('-').map(Number);
+        const start = new Date(y, m - 1, d);
+        const daysUntil = Math.round((start - today) / 86400000);
+        return {
+          ...prev,
+          study_start_date: studyStartInput,
+          study_start_is_custom: true,
+          study_phase: daysUntil > 0 ? 'scheduled' : (prev.study_phase === 'scheduled' ? 'active' : prev.study_phase),
+          days_until_start: Math.max(0, daysUntil),
+        };
+      });
 
       setEditingStudyStart(false);
       setStudyStartSuccess(true);
@@ -658,7 +666,12 @@ const ParticipantDetailScreen = ({
                   {testStatusSaving ? '...' : (summary.is_test_participant ? 'TEST ACCOUNT' : 'Mark as test')}
                 </button>
               )}
-              {summary && summary.is_active && summary.days_remaining !== undefined && (
+              {summary && summary.is_active && summary.study_phase === 'scheduled' && (
+                <span className="ml-2 px-2 py-0.5 text-sm rounded bg-sky-100 text-sky-800 border border-sky-300">
+                  Scheduled — starts {summary.study_start_date} ({summary.days_until_start} day{summary.days_until_start === 1 ? '' : 's'})
+                </span>
+              )}
+              {summary && summary.is_active && summary.study_phase !== 'scheduled' && summary.days_remaining !== undefined && (
                 <span className="ml-2 text-sm text-gray-500">
                   Day {summary.study_day}/90 ({summary.days_remaining} days remaining)
                 </span>
@@ -704,6 +717,7 @@ const ParticipantDetailScreen = ({
                         onChange={(e) => setStudyStartInput(e.target.value)}
                         className="px-2 py-1 border rounded text-sm"
                         disabled={studyStartSaving}
+                        title="Future dates are allowed for scheduled starts (up to one year ahead)"
                       />
                       <button
                         onClick={handleSaveStudyStart}

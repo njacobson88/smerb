@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from participant_utils import (  # noqa: E402
+from participant_utils import (
+    study_phase, STUDY_DAYS,  # noqa: E402
     fetch_merged_participant,
     merge_participant_docs,
     resolve_study_start,
@@ -118,3 +119,38 @@ class TestFetchMerged(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStudyPhase(unittest.TestCase):
+    """Coordinators schedule starts weeks ahead (REDCap participation_start_date);
+    the dashboard must say 'scheduled', not 'Day -47/90' or 'inactive'."""
+    NOW = datetime(2026, 10, 27, 15, 0)
+
+    def test_scheduled_start_in_future(self):
+        p = study_phase(datetime(2026, 12, 14), now=self.NOW)
+        self.assertEqual(p["phase"], "scheduled")
+        self.assertEqual(p["study_day"], 0)
+        self.assertEqual(p["days_until_start"], 48)
+        self.assertEqual(p["days_remaining"], STUDY_DAYS)
+        self.assertTrue(p["auto_active"])          # stays on the roster
+
+    def test_start_today_is_day_1(self):
+        p = study_phase(datetime(2026, 10, 27, 23, 59), now=self.NOW)   # later clock time, same date
+        self.assertEqual((p["phase"], p["study_day"], p["days_until_start"]), ("active", 1, 0))
+
+    def test_tomorrow_is_scheduled_by_one_day(self):
+        p = study_phase(datetime(2026, 10, 28), now=self.NOW)
+        self.assertEqual((p["phase"], p["days_until_start"]), ("scheduled", 1))
+
+    def test_active_mid_study(self):
+        p = study_phase(datetime(2026, 9, 28), now=self.NOW)   # 29 days ago
+        self.assertEqual((p["phase"], p["study_day"], p["days_remaining"]), ("active", 30, 61))
+
+    def test_day_90_and_91(self):
+        self.assertEqual(study_phase(datetime(2026, 7, 29), now=self.NOW)["phase"], "active")     # delta 90
+        p = study_phase(datetime(2026, 7, 28), now=self.NOW)                                        # delta 91
+        self.assertEqual((p["phase"], p["study_day"], p["days_remaining"], p["auto_active"]), ("completed", 90, 0, False))
+
+    def test_unknown_start(self):
+        p = study_phase(None, now=self.NOW)
+        self.assertEqual(p["phase"], "unknown"); self.assertTrue(p["auto_active"])

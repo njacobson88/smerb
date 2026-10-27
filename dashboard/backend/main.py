@@ -969,7 +969,7 @@ def _latest_build_number():
 
 # resolve_study_start now lives in participant_utils (pure, unit tested) so
 # compliance_notifications can share it without importing this module.
-from participant_utils import resolve_study_start, fetch_merged_participant  # noqa: E402
+from participant_utils import resolve_study_start, fetch_merged_participant, study_phase  # noqa: E402
 
 
 def get_participant_data(participant_id: str) -> Optional[dict]:
@@ -1903,12 +1903,15 @@ def get_overall_status(
                             ref_date = datetime.strptime(study_start_str, "%Y-%m-%d")
                         except (ValueError, TypeError):
                             ref_date = None
-                    is_active = ((datetime.now() - ref_date).days <= 90) if ref_date else True
+                    is_active = study_phase(ref_date)["auto_active"] if ref_date else True
 
+                phase_info = study_phase(study_start) if study_start else None
                 results.append({
                     "id": pid,
                     "study_start_date": study_start_str,
                     "is_active": is_active,
+                    "study_phase": phase_info["phase"] if phase_info else "unknown",
+                    "days_until_start": phase_info["days_until_start"] if phase_info else 0,
                 "is_test_participant": bool((p_data or {}).get("isTestParticipant")),
                 "app_version": (p_data or {}).get("appVersion"),
                 "app_build_number": (p_data or {}).get("appBuildNumber"),
@@ -2026,8 +2029,7 @@ def get_overall_status(
             if manual_status is not None:
                 is_active = manual_status
             elif study_start:
-                days_since_start = (datetime.now() - study_start).days
-                is_active = days_since_start <= 90
+                is_active = study_phase(study_start)["auto_active"]
             else:
                 is_active = True  # Default to active if no start date
 
@@ -2035,6 +2037,8 @@ def get_overall_status(
                 "id": pid,
                 "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
                 "is_active": is_active,
+                "study_phase": study_phase(study_start)["phase"] if study_start else "unknown",
+                "days_until_start": study_phase(study_start)["days_until_start"] if study_start else 0,
                 "dailyStatus": daily_list,
                 "weeklyScreenshots": total_screenshots,
                 "weeklyCheckins": total_checkins,
@@ -2343,8 +2347,8 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
 
         # Calculate if participant is active
         # First check for manual override, then fall back to 90-day calculation
-        days_since_start = (datetime.now() - study_start).days
-        study_day = days_since_start + 1  # Day 1 is the start date
+        phase = study_phase(study_start)
+        study_day = phase["study_day"]
 
         manual_status = participant_data.get("manualActiveStatus")
         if manual_status is not None:
@@ -2353,8 +2357,9 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
             is_active_manual = True
             inactive_reason = participant_data.get("manualActiveStatusReason")
         else:
-            # Auto-calculate based on 90-day window
-            is_active = days_since_start <= 90
+            # Auto-calculate based on 90-day window (a scheduled start counts as
+            # active so the participant stays on the roster)
+            is_active = phase["auto_active"]
             is_active_manual = False
             inactive_reason = None
 
@@ -2370,8 +2375,12 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
             "app_version_updated_at": participant_data.get("appVersionUpdatedAt"),
             "latest_build_number": _latest_build_number(),
             "inactive_reason": inactive_reason,
-            "study_day": min(study_day, 90) if is_active else 90,
-            "days_remaining": max(0, 90 - days_since_start) if is_active else 0,
+            "study_day": study_day if is_active else 90,
+            "days_remaining": phase["days_remaining"] if is_active else 0,
+            # 'scheduled' | 'active' | 'completed' — scheduled means the start
+            # date is still ahead; nothing is expected of the participant yet.
+            "study_phase": phase["phase"],
+            "days_until_start": phase["days_until_start"],
             "device_model": participant_data.get("deviceModel"),
             "os_version": participant_data.get("osVersion"),
             "daily_summary": summary_list
@@ -2461,9 +2470,11 @@ def update_study_start_date(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-        # Don't allow future dates
-        if new_start_date > datetime.now():
-            raise HTTPException(status_code=400, detail="Study start date cannot be in the future.")
+        # Future dates are allowed: coordinators schedule participation at the
+        # qualify interview (REDCap participation_start_date), often weeks out.
+        # Bound it so a typo (e.g. 2062) cannot park a participant forever.
+        if new_start_date > datetime.now() + timedelta(days=365):
+            raise HTTPException(status_code=400, detail="Study start date cannot be more than a year in the future.")
 
         # Get participant reference - check both collections
         participant_ref = None

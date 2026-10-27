@@ -75,3 +75,38 @@ def fetch_merged_participant(db, participant_id: str, collections: Iterable[str]
         if doc.exists:
             merged = merge_participant_docs(merged, doc.to_dict() or {})
     return merged
+
+
+STUDY_DAYS = 90
+
+
+def study_phase(study_start: Optional[datetime], now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Where a participant is relative to their 90-day study window.
+
+    Coordinators schedule starts in the future (REDCap `participation_start_date`
+    is set at the qualify interview, often weeks ahead), so a start date may
+    be after today. Before 2026-10-27 every consumer assumed start <= today:
+    the editor refused future dates, `study_day` went to 0 or negative, and
+    nothing told staff "this person has not started yet".
+
+      phase       'scheduled' (start is after today) | 'active' | 'completed'
+      study_day   1 on the start date; 0 while scheduled; capped at STUDY_DAYS
+      days_until_start  >0 while scheduled, else 0
+      days_remaining    days left in the window (STUDY_DAYS while scheduled)
+      auto_active       the 90-day rule's answer (scheduled counts as active
+                        so the participant stays on the roster)
+    """
+    now = now or datetime.now()
+    if study_start is None:
+        return {"phase": "unknown", "study_day": None, "days_until_start": 0,
+                "days_remaining": None, "auto_active": True}
+    delta_days = (now.date() - study_start.date()).days
+    if delta_days < 0:
+        return {"phase": "scheduled", "study_day": 0, "days_until_start": -delta_days,
+                "days_remaining": STUDY_DAYS, "auto_active": True}
+    study_day = delta_days + 1
+    if delta_days <= STUDY_DAYS:
+        return {"phase": "active", "study_day": min(study_day, STUDY_DAYS), "days_until_start": 0,
+                "days_remaining": max(0, STUDY_DAYS - delta_days), "auto_active": True}
+    return {"phase": "completed", "study_day": STUDY_DAYS, "days_until_start": 0,
+            "days_remaining": 0, "auto_active": False}

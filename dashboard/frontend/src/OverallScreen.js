@@ -594,6 +594,14 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
                               inactive
                             </span>
                           )}
+                          {participant.study_phase === 'scheduled' && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-sky-100 text-sky-800 border border-sky-300"
+                              title={`Scheduled start ${participant.study_start_date}. Nothing is expected from this participant until then.`}
+                            >
+                              starts {participant.study_start_date} ({participant.days_until_start}d)
+                            </span>
+                          )}
                           {participant.captureDiskPaused && (
                             <span
                               className="ml-2 px-1.5 py-0.5 text-xs rounded bg-amber-100 text-amber-800 border border-amber-300"
