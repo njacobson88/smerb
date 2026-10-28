@@ -47,3 +47,42 @@ class TestStaleExportJob(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExportUrlResign(unittest.TestCase):
+    def setUp(self):
+        from main import export_url_needs_resign  # noqa
+        self.f = export_url_needs_resign; self.now = datetime(2026, 10, 28, 20, 0)
+
+    def test_fresh_url_is_kept(self):
+        self.assertFalse(self.f({"downloadUrl": "https://x", "downloadUrlSignedAt": self.now - timedelta(days=2)}, now=self.now))
+
+    def test_missing_url_resigns(self):
+        self.assertTrue(self.f({"downloadUrl": None}, now=self.now))
+
+    def test_near_expiry_resigns(self):
+        self.assertTrue(self.f({"downloadUrl": "https://x", "downloadUrlSignedAt": self.now - timedelta(days=6, hours=20)}, now=self.now))
+
+    def test_expired_resigns(self):
+        self.assertTrue(self.f({"downloadUrl": "https://x", "completedAt": self.now - timedelta(days=30)}, now=self.now))
+
+    def test_legacy_job_without_timestamps_resigns(self):
+        self.assertTrue(self.f({"downloadUrl": "https://x"}, now=self.now))
+
+
+class TestTimestampNormalization(unittest.TestCase):
+    """Naive datetimes must not be shifted by the machine's UTC offset."""
+    def test_naive_datetime_stale_job(self):
+        from main import annotate_stale_export_job
+        now = datetime(2026, 10, 28, 20, 0)
+        j = {"status": "processing", "startedAt": now - timedelta(minutes=100)}
+        self.assertEqual(annotate_stale_export_job(j, now=now)["status"], "failed")
+        j = {"status": "processing", "startedAt": now - timedelta(minutes=80)}
+        self.assertEqual(annotate_stale_export_job(j, now=now)["status"], "processing")
+
+    def test_aware_datetime_is_converted(self):
+        from main import export_url_needs_resign
+        from datetime import timezone as tz
+        now = datetime(2026, 10, 28, 20, 0)
+        aware = (now - timedelta(days=6, hours=20)).replace(tzinfo=tz.utc)
+        self.assertTrue(export_url_needs_resign({"downloadUrl": "https://x", "downloadUrlSignedAt": aware}, now=now))

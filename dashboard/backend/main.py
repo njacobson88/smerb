@@ -3723,6 +3723,8 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
         job_ref.update({
             "status": "completed",
             "downloadUrl": download_url,
+            "downloadUrlSignedAt": datetime.utcnow(),
+            "storagePath": storage_path,
             "filename": filename,
             "completedAt": datetime.utcnow(),
         })
@@ -3918,24 +3920,37 @@ def start_async_export(
 EXPORT_JOB_STALE_MINUTES = 90
 
 
+def _to_naive_utc(value) -> Optional[datetime]:
+    """Normalize a Firestore timestamp / aware datetime / naive-UTC datetime /
+    ISO string to a naive UTC datetime. Order matters: a naive datetime also
+    has .timestamp(), which Python evaluates in LOCAL time — routing it through
+    utcfromtimestamp() silently shifted it by the machine's UTC offset."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    if isinstance(value, str):
+        try:
+            v = datetime.fromisoformat(value.rstrip("Z"))
+        except ValueError:
+            return None
+        return v.astimezone(timezone.utc).replace(tzinfo=None) if v.tzinfo else v
+    if hasattr(value, "timestamp"):
+        return datetime.utcfromtimestamp(value.timestamp())
+    return None
+
+
 def annotate_stale_export_job(job_data: dict, now: Optional[datetime] = None) -> dict:
     """Return job_data, rewritten as failed if it has been 'processing'/'pending'
     for longer than EXPORT_JOB_STALE_MINUTES. Pure; timestamps may be Firestore
     values (with .timestamp()) or ISO strings."""
     if job_data.get("status") not in ("processing", "pending"):
         return job_data
-    started = job_data.get("startedAt") or job_data.get("createdAt")
-    if started is None:
+    started_dt = _to_naive_utc(job_data.get("startedAt") or job_data.get("createdAt"))
+    if started_dt is None:
         return job_data
-    if hasattr(started, "timestamp"):
-        started_dt = datetime.utcfromtimestamp(started.timestamp())
-    elif isinstance(started, str):
-        try:
-            started_dt = datetime.fromisoformat(started.rstrip("Z"))
-        except ValueError:
-            return job_data
-    else:
-        started_dt = started
     age_min = ((now or datetime.utcnow()) - started_dt).total_seconds() / 60
     if age_min < EXPORT_JOB_STALE_MINUTES:
         return job_data
@@ -4298,6 +4313,25 @@ def export_participant_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+EXPORT_URL_LIFETIME_DAYS = 7
+
+
+def export_url_needs_resign(job_data: dict, now: Optional[datetime] = None,
+                            lifetime_days: int = EXPORT_URL_LIFETIME_DAYS) -> bool:
+    """A completed async export's stored signed URL lives 7 days; the zip in
+    Storage lives on. Re-sign when the URL is missing, or signed long enough
+    ago that it is (or is about to be) expired. Pure; timestamps may be
+    Firestore values or naive datetimes."""
+    url = job_data.get("downloadUrl")
+    if not url or not str(url).startswith("http"):
+        return True
+    signed = _to_naive_utc(job_data.get("downloadUrlSignedAt") or job_data.get("completedAt"))
+    if signed is None:
+        return True
+    age = (now or datetime.utcnow()) - signed
+    return age >= timedelta(days=lifetime_days) - timedelta(hours=6)
+
+
 @app.get("/api/exports/{export_id}")
 @limiter.limit("30/minute")
 def download_export(request: Request, export_id: str, user: dict = Depends(verify_firebase_token)):
@@ -4340,6 +4374,27 @@ def download_export(request: Request, export_id: str, user: dict = Depends(verif
             owner = job_data.get("createdBy")
             if owner and owner != user.get("email") and not is_admin:
                 raise HTTPException(status_code=403, detail="Not authorized to download this export")
+            if job_data.get("status") == "completed" and export_url_needs_resign(job_data):
+                # Stored URL missing/expired but the object is still in Storage
+                # (async exports record storagePath; older jobs use the
+                # canonical path). Sign a fresh one and remember it.
+                storage_path = job_data.get("storagePath") or \
+                    f"exports/{job_data.get('participantId')}/{export_id}.zip"
+                try:
+                    blob = get_storage_bucket().blob(storage_path)
+                    if blob.exists():
+                        sa_email, access_token = get_signing_credentials()
+                        fresh = blob.generate_signed_url(
+                            version="v4", expiration=timedelta(days=EXPORT_URL_LIFETIME_DAYS), method="GET",
+                            response_disposition=f'attachment; filename="{job_data.get("filename") or export_id + ".zip"}"',
+                            service_account_email=sa_email, access_token=access_token)
+                        job_ref.update({"downloadUrl": fresh, "downloadUrlSignedAt": datetime.utcnow(),
+                                        "storagePath": storage_path})
+                        logger.info(f"[Export] Re-signed download URL for {export_id}")
+                        return RedirectResponse(url=fresh)
+                    logger.warning(f"[Export] {export_id}: stored URL stale and object {storage_path} missing")
+                except Exception as e:
+                    logger.warning(f"[Export] re-sign failed for {export_id}: {e}")
             download_url = job_data.get("downloadUrl")
             if download_url and download_url.startswith("http"):
                 return RedirectResponse(url=download_url)
