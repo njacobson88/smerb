@@ -3456,6 +3456,55 @@ participant or joined to another export. Re-run with participant metadata
 enabled if you need linkage.
 """
 
+def write_events_json_stream(zf, firestore_events, content_events, strip):
+    """Write events.json as a JSON array one event at a time.
+
+    Preserves the semantics of the old list-based path: Firestore events first
+    (in query order), then GCS content events whose id has not been seen
+    (`content_events.merge_content_events` rule), each de-identified via
+    strip_participant_metadata when `strip` is set. Only the id set lives in
+    memory — not the events — so a 26k-event participant no longer needs the
+    whole array (plus its json.dumps copy) resident at once.
+
+    Returns (events_written, screenshot_infos) where screenshot_infos are the
+    level-3 download descriptors gathered while passing over the events.
+    """
+    seen = set()
+    written = 0
+    screenshot_infos = []
+    with zf.open("events.json", "w") as out:
+        out.write(b"[")
+        first = True
+
+        def emit(ev):
+            nonlocal first, written
+            payload = strip_participant_metadata(ev) if strip else ev
+            if not first:
+                out.write(b",")
+            out.write(json.dumps(payload, default=str).encode("utf-8"))
+            first = False
+            written += 1
+
+        for event_id, ev in firestore_events:
+            seen.add(event_id)
+            if ev.get("screenshotUrl"):
+                screenshot_infos.append({
+                    "event_id": event_id,
+                    "url": ev.get("screenshotUrl"),
+                    "storagePath": ev.get("screenshotStoragePath"),
+                    "timestamp": ev.get("timestamp"),
+                })
+            emit(ev)
+        for ev in content_events:
+            eid = ev.get("id")
+            if eid in seen:
+                continue
+            seen.add(eid)
+            emit(ev)
+        out.write(b"]")
+    return written, screenshot_infos
+
+
 def run_background_export(job_id: str, participant_id: str, export_level: int,
                           start_date: Optional[str], end_date: Optional[str],
                           user_email: str, include_participant_metadata: bool = True):
@@ -3487,10 +3536,24 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                 return
 
         export_id = job_id
-        export_path = EXPORT_DIR / f"{export_id}.zip"
 
-        # Use ZIP_DEFLATED for text, but we'll use ZIP_STORED for images
-        with zipfile.ZipFile(export_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # The zip is written STRAIGHT INTO Cloud Storage as it is built. It
+        # used to be assembled under /tmp — which on Cloud Run is RAM — with
+        # every screenshot also held in a list, and a 1,753-screenshot export
+        # was killed at "Memory limit of 512 MiB exceeded" one second into the
+        # upload (2026-10-28). Now nothing larger than one chunk of images is
+        # ever resident, so export size is bounded by time, not memory.
+        # zipfile writes valid archives to a non-seekable stream (data
+        # descriptors); verified against google-cloud-storage 3.8 BlobWriter.
+        bucket = get_storage_bucket()
+        storage_path = f"exports/{participant_id}/{export_id}.zip"
+        blob = bucket.blob(storage_path)
+        logger.info(f"[Export] Streaming {job_id} to gs://{bucket.name}/{storage_path}")
+
+        # ZIP_DEFLATED for text; images are written ZIP_STORED (already compressed).
+        with blob.open("wb", chunk_size=8 * 1024 * 1024, ignore_flush=True,
+                       content_type="application/zip") as gcs_stream, \
+             zipfile.ZipFile(gcs_stream, 'w', zipfile.ZIP_DEFLATED) as zf:
             # Export participant metadata (unless the researcher opted out).
             if include_participant_metadata:
                 if participant_data:
@@ -3570,40 +3633,34 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                 else:
                     events_query = events_ref
 
-                events_data = []
-                screenshot_infos = []
+                job_ref.update({"phase": "events"})
 
-                for event_doc in events_query.stream():
-                    event = event_doc.to_dict()
-                    for ts_field in ["timestamp", "capturedAt", "createdAt", "syncedAt"]:
-                        ts_val = event.get(ts_field)
-                        if ts_val and hasattr(ts_val, 'timestamp'):
-                            event[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+                def _firestore_events():
+                    for event_doc in events_query.stream():
+                        event = event_doc.to_dict()
+                        for ts_field in ["timestamp", "capturedAt", "createdAt", "syncedAt"]:
+                            ts_val = event.get(ts_field)
+                            if ts_val and hasattr(ts_val, 'timestamp'):
+                                event[ts_field] = datetime.fromtimestamp(ts_val.timestamp()).isoformat()
+                        yield event_doc.id, {"id": event_doc.id, **event}
 
-                    if export_level >= 3:
-                        screenshot_url = event.get("screenshotUrl")
-                        if screenshot_url:
-                            screenshot_infos.append({
-                                "event_id": event_doc.id,
-                                "url": screenshot_url,
-                                "storagePath": event.get("screenshotStoragePath"),  # Direct path if available
-                                "timestamp": event.get("timestamp"),
-                            })
+                # Offloaded content events (content_visible/content_exposure) live
+                # in Cloud Storage; they are appended after the Firestore events,
+                # de-duplicated by id, exactly as merge_content_events did.
+                content_events = read_content_events_from_gcs(participant_id, content_start_dt, content_end_dt)
 
-                    events_data.append({"id": event_doc.id, **event})
-
-                # Merge offloaded content events (content_visible/content_exposure)
-                # that now live in Cloud Storage instead of Firestore.
-                merge_content_events(events_data, participant_id, content_start_dt, content_end_dt)
-
-                if events_data:
-                    zf.writestr("events.json", json.dumps(events_data if include_participant_metadata else strip_participant_metadata(events_data), indent=2, default=str))
+                events_written, screenshot_infos = write_events_json_stream(
+                    zf, _firestore_events(), content_events,
+                    strip=not include_participant_metadata)
+                if export_level < 3:
+                    screenshot_infos = []
+                logger.info(f"[Export] {job_id}: wrote {events_written} events")
 
                 # Level 3: Download screenshots concurrently
                 if export_level >= 3 and screenshot_infos:
                     total = len(screenshot_infos)
                     logger.info(f"Downloading {total} screenshots concurrently for export {job_id}")
-                    job_ref.update({"screenshotTotal": total, "screenshotProgress": 0})
+                    job_ref.update({"screenshotTotal": total, "screenshotProgress": 0, "phase": "screenshots"})
 
                     # Stream each screenshot into the zip as it arrives, in
                     # bounded chunks. The previous version downloaded ALL
@@ -3635,14 +3692,10 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
             filename += f"_{start_date}_to_{end_date}"
         filename += ".zip"
 
-        # Upload to Firebase Storage for persistent storage
+        # The object is complete once the stream above closed; sign a URL for it.
+        job_ref.update({"phase": "finalizing"})
         try:
-            bucket = get_storage_bucket()
-            storage_path = f"exports/{participant_id}/{export_id}.zip"
-            blob = bucket.blob(storage_path)
-            logger.info(f"[Export] Uploading {export_path} to gs://{bucket.name}/{storage_path}")
-            blob.upload_from_filename(str(export_path))
-            logger.info(f"[Export] Upload complete, generating signed URL")
+            logger.info(f"[Export] Stream complete for {job_id}, generating signed URL")
 
             # Generate signed URL valid for 7 days
             # Include Content-Disposition header to force download in browser
@@ -3657,10 +3710,10 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                 access_token=access_token
             )
             logger.info(f"[Export] Successfully uploaded to Firebase Storage: {storage_path}")
-        except Exception as upload_err:
-            logger.error(f"[Export] FAILED to upload to Storage: {upload_err}", exc_info=True)
-            # Don't fall back to unreliable local URLs - surface the error
-            raise Exception(f"Storage upload failed: {upload_err}")
+        except Exception as sign_err:
+            logger.error(f"[Export] FAILED to sign download URL: {sign_err}", exc_info=True)
+            # The zip itself is in Storage; the download endpoint can re-sign it.
+            raise Exception(f"Signed URL generation failed: {sign_err}")
 
         EXPORT_INDEX[export_id] = {
             "filename": filename,
@@ -3677,6 +3730,9 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
         logger.info(f"Background export completed: {job_id}")
 
     except Exception as e:
+        # A partially written exports/<pid>/<job>.zip may remain in Storage; it
+        # is never offered for download (no downloadUrl) and is left for the
+        # admin archive-and-clear tool rather than deleted here.
         logger.error(f"Background export failed: {e}", exc_info=True)
         job_ref.update({
             "status": "failed",
