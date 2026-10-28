@@ -1603,6 +1603,18 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
     }
 
 
+def window_within_cache(start_date: str, end_date: str,
+                        cache_start: Optional[str], cache_end: Optional[str]) -> bool:
+    """True if the requested YYYY-MM-DD range lies inside the cache's window.
+
+    Dates compare as strings (ISO order). A cache without recorded bounds is
+    treated as covering nothing — the live path is always correct, just slower.
+    """
+    if not (start_date and end_date and cache_start and cache_end):
+        return False
+    return cache_start <= start_date and end_date <= cache_end
+
+
 def build_and_store_dashboard_cache(log_prefix: str = "") -> dict:
     """Recompute the overall-status cache for every enrolled participant.
 
@@ -1845,8 +1857,20 @@ def get_overall_status(
         cache_ref = db.collection(DASHBOARD_CACHE_COLLECTION).document("overall_status")
         cache_doc = cache_ref.get()
 
-        if cache_doc.exists:
-            cache_data = cache_doc.to_dict()
+        # The cache only covers a rolling window (today minus 14 days). It used
+        # to be served for ANY requested range, so stepping the overview back
+        # beyond that window showed blank rows for every participant — while the
+        # per-participant pages, which query live, still had the data
+        # (2026-10-28). Older ranges now fall through to the live computation.
+        cache_data = cache_doc.to_dict() if cache_doc.exists else None
+        cache_covers_range = bool(cache_data) and window_within_cache(
+            start_date, end_date, cache_data.get("startDate"), cache_data.get("endDate"))
+        if cache_data and not cache_covers_range:
+            logger.info(
+                f"overall_status {start_date}..{end_date} outside cache window "
+                f"{cache_data.get('startDate')}..{cache_data.get('endDate')} — computing live")
+
+        if cache_data and cache_covers_range:
             cached_participants = cache_data.get("participants", [])
             refreshed_at = cache_data.get("refreshedAt")
 
@@ -1982,11 +2006,12 @@ def get_overall_status(
                 }
             }
 
-        # Cache miss - compute live (but recommend cache refresh)
-        logger.warning("Cache miss for overall_status - computing live")
+        # Cache miss, or a range the cache does not cover - compute live
+        if not cache_data:
+            logger.warning("Cache miss for overall_status - computing live")
 
         # Fall back to live computation (same as before but simplified)
-        participants_info = get_all_participant_ids()
+        participants_info = get_all_participant_ids(enrolled_only=True)
         total_participants = len(participants_info)
 
         start_idx = (page - 1) * page_size
@@ -2075,7 +2100,9 @@ def get_overall_status(
             },
             "cache": {
                 "fromCache": False,
-                "message": "Cache not available. Admin should run refresh.",
+                "message": ("Historical range — computed live (the cache covers "
+                            f"{cache_data.get('startDate')} to {cache_data.get('endDate')})."
+                            if cache_data else "Cache not available. Admin should run refresh."),
             }
         }
 
@@ -3255,6 +3282,49 @@ def download_single_screenshot(ss_info: Dict[str, Any], bucket, session) -> Tupl
     return (event_id, img_data, ext)
 
 
+def iter_screenshots_concurrent(
+    screenshot_infos: List[Dict[str, Any]],
+    max_workers: int = 10,
+    chunk_size: int = 60,
+):
+    """Yield (event_id, image_bytes, extension, timestamp_str) as downloads
+    complete, submitting at most `chunk_size` at a time so no more than one
+    chunk of image bytes is ever held in memory. Failed downloads are skipped
+    (logged), as in download_screenshots_concurrent, which is kept for the
+    synchronous export path."""
+    bucket = None
+    try:
+        bucket = get_storage_bucket()
+    except Exception as e:
+        logger.warning(f"Could not get storage bucket: {e}")
+    session = get_download_session()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for start in range(0, len(screenshot_infos), chunk_size):
+            chunk = screenshot_infos[start:start + chunk_size]
+            future_to_info = {
+                executor.submit(download_single_screenshot, ss_info, bucket, session): ss_info
+                for ss_info in chunk
+            }
+            for future in as_completed(future_to_info):
+                ss_info = future_to_info[future]
+                try:
+                    event_id, img_data, ext = future.result()
+                except Exception as e:
+                    logger.warning(f"Error processing screenshot download: {e}")
+                    continue
+                if not img_data:
+                    continue
+                ts_val = ss_info.get("timestamp")
+                if ts_val:
+                    ts_str = (ts_val.isoformat() if hasattr(ts_val, "isoformat") else str(ts_val))
+                    ts_str = ts_str.replace(":", "-").replace("T", "_")[:19]
+                else:
+                    ts_str = f"img_{event_id[:8]}"
+                yield (event_id, img_data, ext, ts_str)
+            future_to_info.clear()
+
+
 def download_screenshots_concurrent(
     screenshot_infos: List[Dict[str, Any]],
     max_workers: int = 10
@@ -3535,30 +3605,27 @@ def run_background_export(job_id: str, participant_id: str, export_level: int,
                     logger.info(f"Downloading {total} screenshots concurrently for export {job_id}")
                     job_ref.update({"screenshotTotal": total, "screenshotProgress": 0})
 
-                    # Download all screenshots concurrently
-                    downloaded = download_screenshots_concurrent(screenshot_infos, max_workers=15)
-
-                    # Write to zip using ZIP_STORED (images are already compressed)
-                    for idx, (event_id, img_data, ext, ts_str) in enumerate(downloaded):
+                    # Stream each screenshot into the zip as it arrives, in
+                    # bounded chunks. The previous version downloaded ALL
+                    # images into a list first — ~210 MB for 1,753 screenshots —
+                    # on top of the zip growing on Cloud Run's memory-backed
+                    # /tmp, and the container was killed before the upload
+                    # (2026-10-28). Peak memory is now one chunk of images.
+                    written = 0
+                    next_mark = 0.25
+                    for event_id, img_data, ext, ts_str in iter_screenshots_concurrent(
+                            screenshot_infos, max_workers=15, chunk_size=60):
                         filename = f"screenshots/{ts_str}_{event_id[:8]}{ext}"
-                        # Use ZIP_STORED for images - they're already compressed
-                        zf.writestr(
-                            zipfile.ZipInfo(filename),
-                            img_data,
-                            compress_type=zipfile.ZIP_STORED
-                        )
+                        # ZIP_STORED: images are already compressed
+                        zf.writestr(zipfile.ZipInfo(filename), img_data,
+                                    compress_type=zipfile.ZIP_STORED)
+                        written += 1
+                        if written / total >= next_mark:
+                            job_ref.update({"screenshotProgress": written})
+                            next_mark += 0.25
 
-                        # Update progress at 25%, 50%, 75%, and 100%
-                        progress_pct = (idx + 1) / len(downloaded)
-                        if progress_pct >= 0.25 and idx == int(len(downloaded) * 0.25):
-                            job_ref.update({"screenshotProgress": int(total * 0.25)})
-                        elif progress_pct >= 0.50 and idx == int(len(downloaded) * 0.50):
-                            job_ref.update({"screenshotProgress": int(total * 0.50)})
-                        elif progress_pct >= 0.75 and idx == int(len(downloaded) * 0.75):
-                            job_ref.update({"screenshotProgress": int(total * 0.75)})
-
-                    job_ref.update({"screenshotProgress": total})
-                    logger.info(f"Downloaded {len(downloaded)}/{total} screenshots for export {job_id}")
+                    job_ref.update({"screenshotProgress": written})
+                    logger.info(f"Downloaded {written}/{total} screenshots for export {job_id}")
 
         # Generate filename and store result
         level_names = {1: "meta", 2: "ocr", 3: "full"}
@@ -3786,6 +3853,50 @@ def start_async_export(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# A level-3 export runs on a daemon thread inside the request container. If
+# the container is killed mid-run (memory limit — 2026-10-28, 1,753
+# screenshots; or scale-to-zero) nothing ever marks the job failed and the UI
+# shows "processing" forever. Present such jobs as failed at read time; the
+# document itself is left as-is (a thread that is in fact still running would
+# overwrite it on completion).
+EXPORT_JOB_STALE_MINUTES = 90
+
+
+def annotate_stale_export_job(job_data: dict, now: Optional[datetime] = None) -> dict:
+    """Return job_data, rewritten as failed if it has been 'processing'/'pending'
+    for longer than EXPORT_JOB_STALE_MINUTES. Pure; timestamps may be Firestore
+    values (with .timestamp()) or ISO strings."""
+    if job_data.get("status") not in ("processing", "pending"):
+        return job_data
+    started = job_data.get("startedAt") or job_data.get("createdAt")
+    if started is None:
+        return job_data
+    if hasattr(started, "timestamp"):
+        started_dt = datetime.utcfromtimestamp(started.timestamp())
+    elif isinstance(started, str):
+        try:
+            started_dt = datetime.fromisoformat(started.rstrip("Z"))
+        except ValueError:
+            return job_data
+    else:
+        started_dt = started
+    age_min = ((now or datetime.utcnow()) - started_dt).total_seconds() / 60
+    if age_min < EXPORT_JOB_STALE_MINUTES:
+        return job_data
+    out = dict(job_data)
+    total = out.get("screenshotTotal") or 0
+    out["status"] = "failed"
+    out["staleDetected"] = True
+    out["error"] = (
+        f"The export worker stopped responding after {int(age_min)} minutes"
+        + (f" (had downloaded {out.get('screenshotProgress', 0)}/{total} screenshots)" if total else "")
+        + ". Large level-3 exports can exceed the server's memory. Please re-request, "
+          "ideally with a narrower date range."
+    )
+    out.pop("timeEstimate", None)
+    return out
+
+
 @app.get("/api/export/jobs")
 @limiter.limit("60/minute")
 def get_user_export_jobs(request: Request, user: dict = Depends(verify_firebase_token)):
@@ -3821,7 +3932,7 @@ def get_user_export_jobs(request: Request, user: dict = Depends(verify_firebase_
                 else:
                     job_data["timeEstimate"] = "Calculating..."
 
-            jobs.append(job_data)
+            jobs.append(annotate_stale_export_job(job_data))
 
         return {"jobs": jobs}
 
@@ -3852,7 +3963,7 @@ def get_export_job_status(
             if job_data.get(ts_field) and hasattr(job_data[ts_field], 'timestamp'):
                 job_data[ts_field] = datetime.fromtimestamp(job_data[ts_field].timestamp()).isoformat() + "Z"
 
-        return job_data
+        return annotate_stale_export_job(job_data)
 
     except HTTPException:
         raise

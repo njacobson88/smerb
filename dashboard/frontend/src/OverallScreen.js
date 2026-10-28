@@ -126,7 +126,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
   const [pagination, setPagination] = useState({ total: 0, total_pages: 1, page_size: 25 });
   const [testCount, setTestCount] = useState(0);
   const [realCount, setRealCount] = useState(null);
-  const [cacheInfo, setCacheInfo] = useState({ fromCache: false, refreshedAt: null });
+  const [cacheInfo, setCacheInfo] = useState({ fromCache: false, refreshedAt: null, message: null });
   const [refreshingCache, setRefreshingCache] = useState(false);
   const [cacheMessage, setCacheMessage] = useState(null);
   const [sortBy, setSortBy] = useState('compliance'); // 'compliance', 'reddit', 'twitter', 'id'
@@ -368,7 +368,7 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
                 </>
               ) : (
                 <>
-                  <strong>Live Data:</strong> Cache not initialized - slower performance.
+                  <strong>Live Data:</strong> {cacheInfo.message || 'Cache not initialized - slower performance.'}
                 </>
               )}
             </div>
