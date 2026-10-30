@@ -1569,6 +1569,12 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
     pid = p_info["id"]
     study_start = resolve_study_start(p_info.get("data"), start_dt)
     daily_status = compute_participant_stats(pid, start_dt, end_dt)
+    # The participant page's day-by-day totals (see daily_summary.py). A
+    # failure here must not cost the overview row.
+    try:
+        refresh_participant_summary_cache(pid)
+    except Exception as e:
+        logger.warning(f"summary cache refresh failed for {pid}: {e}")
 
     total_screenshots = sum(d["screenshots"] for d in daily_status.values())
     total_checkins = sum(d["checkins"] for d in daily_status.values())
@@ -1590,6 +1596,10 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
     return {
         "id": pid,
         "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
+        # Computed here, once an hour. The page-load path used to recompute it
+        # for every participant on every request — 42 serial Firestore queries
+        # per overview load, ~7 s median (2026-10-30).
+        "si_trend": _si_trend_compact(pid),
         "dailyStatus": daily_list,
         "weeklyScreenshots": total_screenshots,
         "weeklyCheckins": total_checkins,
@@ -1601,6 +1611,73 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
         "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
         "captureDiskUsageMb": (p_info.get("data") or {}).get("captureDiskUsageMb"),
     }
+
+
+from daily_summary import (  # noqa: E402
+    aggregate as _ds_aggregate, merge_days as _ds_merge, incremental_window as _ds_window,
+    history_cutoff as _ds_cutoff,
+)
+
+SUMMARY_EVENT_FIELDS = ["timestamp", "createdAt", "eventType", "type", "platform", "ocr.wordCount"]
+
+
+def compute_daily_summaries(participant_ref, since: Optional[datetime] = None,
+                            until: Optional[datetime] = None) -> dict:
+    """{date: totals} for one participant from Firestore, reading only the
+    fields the aggregation needs. `since`/`until` bound the query (events by
+    timestamp, check-ins by completedAt, alerts by triggeredAt)."""
+    # Day keys are server-LOCAL dates (day_key -> fromtimestamp), so the query
+    # bounds must be the same local midnights expressed as aware UTC instants.
+    # A naive datetime would be read by Firestore as UTC — identical on Cloud
+    # Run (UTC) but wrong on any other host, and it silently dropped the last
+    # hours of the cutoff day in local verification (2026-10-30).
+    def _utc(dt):
+        return dt if dt.tzinfo else dt.astimezone(timezone.utc)
+    def bounded(q, field):
+        if since is not None:
+            q = q.where(field, ">=", _utc(since))
+        if until is not None:
+            q = q.where(field, "<", _utc(until))
+        return q
+    events = (d.to_dict() for d in bounded(
+        participant_ref.collection("events").order_by("timestamp"), "timestamp"
+    ).select(SUMMARY_EVENT_FIELDS).stream())
+    checkins = (d.to_dict() for d in bounded(
+        participant_ref.collection("ema_responses").order_by("completedAt"), "completedAt").stream())
+    alerts = (d.to_dict() for d in bounded(
+        participant_ref.collection("safety_alerts").order_by("triggeredAt"), "triggeredAt").stream())
+    return _ds_aggregate(events, checkins, alerts)
+
+
+def _summary_cache_ref(participant_id: str):
+    return db.collection(DASHBOARD_CACHE_COLLECTION).document(f"summary_{participant_id}")
+
+
+def refresh_participant_summary_cache(participant_id: str, now: Optional[datetime] = None) -> dict:
+    """Bring a participant's per-day totals for every date before the live tail
+    up to date — incrementally (last few days) most hours, from scratch once a
+    day. Returns the cache document contents."""
+    now = now or datetime.now()
+    ref = _summary_cache_ref(participant_id)
+    existing = ref.get().to_dict() or {}
+    full_at = existing.get("fullRebuiltAt")
+    if full_at is not None and hasattr(full_at, "timestamp"):
+        full_at = datetime.fromtimestamp(full_at.timestamp())
+    cutoff = _ds_cutoff(now)                       # cache owns dates <= cutoff
+    until = datetime.strptime(cutoff, "%Y-%m-%d") + timedelta(days=1)
+    fresh_from = _ds_window(existing.get("throughDate"), full_at, now)
+    pref = get_participant_ref(participant_id)
+    if fresh_from is None:
+        days = {d: v for d, v in compute_daily_summaries(pref, None, until).items() if d <= cutoff}
+        doc = {"days": days, "throughDate": cutoff, "refreshedAt": now, "fullRebuiltAt": now}
+    else:
+        since = datetime.strptime(fresh_from, "%Y-%m-%d")
+        fresh = compute_daily_summaries(pref, since, until)
+        days = _ds_merge(existing.get("days") or {}, fresh, fresh_from)
+        days = {d: v for d, v in days.items() if d <= cutoff}
+        doc = {"days": days, "throughDate": cutoff, "refreshedAt": now, "fullRebuiltAt": full_at}
+    ref.set(doc)
+    return doc
 
 
 def window_within_cache(start_date: str, end_date: str,
@@ -1939,8 +2016,9 @@ def get_overall_status(
                 "is_test_participant": bool((p_data or {}).get("isTestParticipant")),
                 "app_version": (p_data or {}).get("appVersion"),
                 "app_build_number": (p_data or {}).get("appBuildNumber"),
-                    # Non-crisis SI trend (staff-only signal; see si_trend.py).
-                    "si_trend": _si_trend_compact(pid),
+                    # Non-crisis SI trend (staff-only signal; see si_trend.py),
+                    # from the hourly cache — never computed on page load.
+                    "si_trend": cached.get("si_trend") or {"status": "insufficient"},
                     "dailyStatus": filtered_daily,
                     "weeklyScreenshots": total_screenshots,
                     "weeklyCheckins": total_checkins,
@@ -2257,99 +2335,29 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
                 study_start = datetime.now()
             study_start_is_custom = False
 
-        # Get all events for this participant - use 'timestamp' field
-        events_ref = participant_ref.collection("events")
-        events = list(events_ref.order_by("timestamp").stream())
-
-        # Aggregate by day
-        daily_summaries = defaultdict(lambda: {
-            "screenshots": 0,
-            "ocr_chars": 0,
-            "ocr_words": 0,
-            "platforms": defaultdict(int),
-            "checkins": 0,
-            "safety_alerts": 0,
-        })
-
-        for event_doc in events:
-            event = event_doc.to_dict()
-            # Events use 'timestamp' or 'createdAt', not 'capturedAt'
-            captured_at = event.get("timestamp") or event.get("createdAt")
-            if not captured_at:
-                continue
-
-            # Handle various timestamp formats
-            if hasattr(captured_at, 'timestamp'):
-                event_date = datetime.fromtimestamp(captured_at.timestamp()).strftime("%Y-%m-%d")
-            elif isinstance(captured_at, str):
-                event_date = captured_at[:10]  # Extract YYYY-MM-DD from ISO string
-            else:
-                event_date = captured_at.strftime("%Y-%m-%d")
-
-            # Events use 'eventType' field, not 'type'
-            event_type = event.get("eventType", event.get("type", ""))
-
-            if event_type == "screenshot":
-                daily_summaries[event_date]["screenshots"] += 1
-                platform = event.get("platform", "unknown")
-                daily_summaries[event_date]["platforms"][platform] += 1
-
-                ocr = event.get("ocr", {})
-                if ocr:
-                    daily_summaries[event_date]["ocr_words"] += ocr.get("wordCount", 0)
-                    daily_summaries[event_date]["ocr_chars"] += ocr.get("wordCount", 0) * 5
-
-        # Get check-ins
-        try:
-            checkins_ref = participant_ref.collection("ema_responses")
-            for checkin_doc in checkins_ref.stream():
-                checkin = checkin_doc.to_dict()
-                completed_at = checkin.get("completedAt")
-                if completed_at:
-                    # Handle various timestamp formats
-                    if hasattr(completed_at, 'timestamp'):
-                        checkin_date = datetime.fromtimestamp(completed_at.timestamp()).strftime("%Y-%m-%d")
-                    elif isinstance(completed_at, str):
-                        checkin_date = completed_at[:10]
-                    else:
-                        checkin_date = completed_at.strftime("%Y-%m-%d")
-                    daily_summaries[checkin_date]["checkins"] += 1
-
-                    # Parse responses - may be JSON string or dict
-                    responses = checkin.get("responses", {})
-                    if isinstance(responses, str):
-                        try:
-                            responses = json.loads(responses)
-                        except (json.JSONDecodeError, TypeError, ValueError):
-                            responses = {}
-
-                    # Check for crisis indicator in responses
-                    for key, value in responses.items():
-                        if isinstance(value, str) and value.lower() in ("yes", "true"):
-                            if "crisis" in key.lower() or "harm" in key.lower() or "hurt" in key.lower():
-                                if "crisis_indicated" not in daily_summaries[checkin_date]:
-                                    daily_summaries[checkin_date]["crisis_indicated"] = False
-                                daily_summaries[checkin_date]["crisis_indicated"] = True
-        except Exception as e:
-            logger.debug(f"Silently handled exception: {e}")
-
-        # Get safety alerts
-        try:
-            alerts_ref = participant_ref.collection("safety_alerts")
-            for alert_doc in alerts_ref.stream():
-                alert = alert_doc.to_dict()
-                triggered_at = alert.get("triggeredAt")
-                if triggered_at:
-                    # Handle various timestamp formats
-                    if hasattr(triggered_at, 'timestamp'):
-                        alert_date = datetime.fromtimestamp(triggered_at.timestamp()).strftime("%Y-%m-%d")
-                    elif isinstance(triggered_at, str):
-                        alert_date = triggered_at[:10]
-                    else:
-                        alert_date = triggered_at.strftime("%Y-%m-%d")
-                    daily_summaries[alert_date]["safety_alerts"] += 1
-        except Exception as e:
-            logger.debug(f"Silently handled exception: {e}")
+        # Day-by-day totals: dates up to the cutoff come from the per-participant
+        # cache (refreshed hourly, see daily_summary.py); the most recent days
+        # are computed live so today is always current. A participant whose
+        # cache does not exist yet is computed fully and the cache is seeded.
+        _now = datetime.now()
+        cutoff = _ds_cutoff(_now)
+        live_since = datetime.strptime(cutoff, "%Y-%m-%d") + timedelta(days=1)
+        summary_cache = _summary_cache_ref(participant_id).get().to_dict()
+        if summary_cache and summary_cache.get("throughDate") == cutoff:
+            tail = compute_daily_summaries(participant_ref, live_since, None)
+            daily_summaries = _ds_merge(summary_cache.get("days") or {}, tail, live_since.strftime("%Y-%m-%d"))
+            summary_cache_info = {"fromCache": True, "throughDate": cutoff,
+                                  "refreshedAt": iso_utc(summary_cache.get("refreshedAt"))}
+        else:
+            try:
+                seeded = refresh_participant_summary_cache(participant_id, _now)
+                tail = compute_daily_summaries(participant_ref, live_since, None)
+                daily_summaries = _ds_merge(seeded.get("days") or {}, tail, live_since.strftime("%Y-%m-%d"))
+                summary_cache_info = {"fromCache": False, "seeded": True, "throughDate": cutoff}
+            except Exception as e:
+                logger.warning(f"summary cache seed failed for {participant_id}, computing live: {e}")
+                daily_summaries = compute_daily_summaries(participant_ref, None, None)
+                summary_cache_info = {"fromCache": False}
 
         # Convert to list sorted by date. Days BEFORE the study start are
         # setup/testing (installing the app, browsing during onboarding), not
@@ -2365,8 +2373,8 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
                 "date": date_str,
                 "screenshots": data["screenshots"],
                 "ocr_words": data["ocr_words"],
-                "reddit": data["platforms"].get("reddit", 0),
-                "twitter": data["platforms"].get("twitter", 0),
+                "reddit": data.get("reddit", 0),
+                "twitter": data.get("twitter", 0),
                 "checkins": data["checkins"],
                 "safety_alerts": data["safety_alerts"],
                 "crisis_indicated": data.get("crisis_indicated", False),
@@ -2410,7 +2418,8 @@ def get_participant_summary(request: Request, participant_id: str, user: dict = 
             "days_until_start": phase["days_until_start"],
             "device_model": participant_data.get("deviceModel"),
             "os_version": participant_data.get("osVersion"),
-            "daily_summary": summary_list
+            "daily_summary": summary_list,
+            "summary_cache": summary_cache_info,
         }
 
     except HTTPException:

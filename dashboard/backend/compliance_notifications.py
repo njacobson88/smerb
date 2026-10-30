@@ -343,7 +343,7 @@ def calculate_participant_compliance(participant_id: str, db, days: int = 3) -> 
     try:
         ema_query = participant_ref.collection("ema_responses").where(
             "completedAt", ">=", start
-        ).where("completedAt", "<", now)
+        ).where("completedAt", "<", now).select(["completedAt"])
         ema_count = len(list(ema_query.stream()))
     except Exception:
         pass
@@ -353,7 +353,7 @@ def calculate_participant_compliance(participant_id: str, db, days: int = 3) -> 
     try:
         events_query = participant_ref.collection("events").where(
             "timestamp", ">=", start
-        ).where("timestamp", "<", now)
+        ).where("timestamp", "<", now).select(["eventType", "type"])  # counts only; skip OCR/data blobs
         for event_doc in events_query.stream():
             event = event_doc.to_dict()
             if event.get("eventType") == "screenshot" or event.get("type") == "screenshot":
@@ -386,7 +386,7 @@ def calculate_weekly_compliance(participant_id: str, db) -> dict:
     try:
         ema_query = participant_ref.collection("ema_responses").where(
             "completedAt", ">=", week_start
-        ).where("completedAt", "<", now)
+        ).where("completedAt", "<", now).select(["completedAt"])
         ema_count = len(list(ema_query.stream()))
     except Exception:
         pass
@@ -396,7 +396,7 @@ def calculate_weekly_compliance(participant_id: str, db) -> dict:
     try:
         events_query = participant_ref.collection("events").where(
             "timestamp", ">=", week_start
-        ).where("timestamp", "<", now)
+        ).where("timestamp", "<", now).select(["eventType", "type", "sessionId"])
         sessions = set()
         for event_doc in events_query.stream():
             event = event_doc.to_dict()
