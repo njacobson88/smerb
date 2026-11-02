@@ -51,13 +51,27 @@ MAX_POSSIBLE = PAY_SCREENING + PAY_INTERVIEW + EMA_CAP * PAY_PER_EMA + WEEK_PERI
 # REDCap instruments that carry each paid completion, and the baseline battery.
 REDCAP_SCREENING = ("consent__screener_arm_1", "cssrs_screener")
 REDCAP_INTERVIEW = ("interview_arm_1", "interview_questions")
-REDCAP_EXIT = ("exit_arm_1", "exit_resources")
+# The exit survey ends on a resources page (`exit_resources`) that REDCap only
+# serves after the last questionnaire. Participants routinely close such pages
+# without pressing Submit (see redcap_weekly), so the exit survey counts as
+# complete when every questionnaire is submitted OR the resources page is.
+REDCAP_EXIT_EVENT = "exit_arm_1"
+REDCAP_EXIT_RESOURCES = "exit_resources"
+REDCAP_EXIT_FORMS = (
+    "idas_2", "phq_9", "gad_7", "social_media_use_measure", "ders",
+    "scale_of_protective_factors", "brs", "bas_2", "weight_questionnaire", "srrq",
+    "weekly_alcohol_and_drug_followback", "ucla_loneliness_scale10", "life_events",
+    "swls",
+)
+REDCAP_EXIT = (REDCAP_EXIT_EVENT, REDCAP_EXIT_RESOURCES)
 REDCAP_BASELINE_EVENT = "postinterview_base_arm_1"
+# Same shape: 16 questionnaires, then `baseline_resources`.
+REDCAP_BASELINE_RESOURCES = "baseline_resources"
 REDCAP_BASELINE_FORMS = (
     "idas_2", "phq_9", "gad_7", "social_media_use_measure", "ace_adults", "ders",
     "scale_of_protective_factors", "brs", "bas_2", "weight_questionnaire",
     "weekly_alcohol_and_drug_followback", "ucla_loneliness_scale10", "life_events",
-    "swls", "dsm5_l1_crosscutting_nda", "whodas_2_nda", "baseline_resources",
+    "swls", "dsm5_l1_crosscutting_nda", "whodas_2_nda",
 )
 
 
@@ -225,7 +239,11 @@ def weekly_app_use(daily_screenshots: Dict[date, Dict[str, int]], study_start: d
 
 def parse_redcap_completions(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     """From a flat export (exportSurveyFields=true) of the three paid events +
-    the baseline battery, decide what is complete and when."""
+    the baseline battery, decide what is complete and when.
+
+    A battery that ends on a resources page (exit, baseline) is complete when
+    all of its questionnaires are submitted; the resources page is optional.
+    """
     from redcap_weekly import parse_redcap_timestamp
     by_event: Dict[str, Dict[str, Any]] = {}
     for r in rows or []:
@@ -233,22 +251,37 @@ def parse_redcap_completions(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         if ev and ev not in by_event:
             by_event[ev] = r
 
+    def _status(r: Dict[str, Any], form: str) -> bool:
+        return str(r.get(f"{form}_complete") or "").strip() == "2"
+
     def _done(ev: str, form: str) -> Dict[str, Any]:
         r = by_event.get(ev) or {}
-        complete = str(r.get(f"{form}_complete") or "").strip() == "2"
+        complete = _status(r, form)
         ts = parse_redcap_timestamp(r.get(f"{form}_timestamp"))
         return {"complete": complete, "at": ts.isoformat() + "Z" if ts else None,
                 "instrument": form, "event": ev}
 
-    base = by_event.get(REDCAP_BASELINE_EVENT) or {}
-    done_forms = [f for f in REDCAP_BASELINE_FORMS if str(base.get(f"{f}_complete") or "").strip() == "2"]
+    def _battery(ev: str, forms: tuple, resources: str) -> Dict[str, Any]:
+        r = by_event.get(ev) or {}
+        done = [f for f in forms if _status(r, f)]
+        resources_submitted = _status(r, resources)
+        complete = resources_submitted or len(done) == len(forms)
+        at = None
+        if complete:
+            # Submitting the resources page is the true end; otherwise the last questionnaire is.
+            stamps = [t for t in (parse_redcap_timestamp(r.get(f"{f}_timestamp")) for f in forms) if t]
+            at = parse_redcap_timestamp(r.get(f"{resources}_timestamp")) or (max(stamps) if stamps else None)
+        return {"completed": len(done), "total": len(forms), "complete": complete,
+                "resourcesSubmitted": resources_submitted,
+                "missing": [f for f in forms if f not in done],
+                "at": at.isoformat() + "Z" if at else None, "event": ev}
+
+    exit_battery = _battery(REDCAP_EXIT_EVENT, REDCAP_EXIT_FORMS, REDCAP_EXIT_RESOURCES)
     return {
         "screening": _done(*REDCAP_SCREENING),
         "interview": _done(*REDCAP_INTERVIEW),
-        "exit": _done(*REDCAP_EXIT),
-        "baselineBattery": {"completed": len(done_forms), "total": len(REDCAP_BASELINE_FORMS),
-                            "complete": len(done_forms) == len(REDCAP_BASELINE_FORMS),
-                            "missing": [f for f in REDCAP_BASELINE_FORMS if f not in done_forms]},
+        "exit": {**exit_battery, "instrument": REDCAP_EXIT_RESOURCES},
+        "baselineBattery": _battery(REDCAP_BASELINE_EVENT, REDCAP_BASELINE_FORMS, REDCAP_BASELINE_RESOURCES),
     }
 
 
@@ -297,7 +330,7 @@ def compensation(ema: Dict[str, Any], app: Dict[str, Any], redcap: Optional[Dict
          "unit": 0.0, "amount": 0.0, "max": 0.0, "note": "tracked, not compensated"},
         {"item": "Post-interview baseline battery", "count": int(((rc.get("baselineBattery") or {}).get("completed") or 0)),
          "unit": 0.0, "amount": 0.0, "max": 0.0,
-         "note": f"of {len(REDCAP_BASELINE_FORMS)} instruments; tracked, not compensated"},
+         "note": f"of {len(REDCAP_BASELINE_FORMS)} questionnaires; tracked, not compensated"},
     ]
     earned = round(sum(l["amount"] for l in lines), 2)
     return {"lines": lines, "earned": earned, "maxPossible": round(MAX_POSSIBLE, 2), "rules": RULES}

@@ -161,16 +161,23 @@ class TestWeeklyAppUse(unittest.TestCase):
 
 
 class TestRedcap(unittest.TestCase):
-    def rows(self, screen="2", interview="2", exit_="0", battery_done=3):
+    def rows(self, screen="2", interview="2", exit_="0", battery_done=3, exit_done=0):
+        from compliance_report import REDCAP_BASELINE_FORMS, REDCAP_EXIT_FORMS
         base = {"redcap_event_name": "postinterview_base_arm_1"}
-        for i, f in enumerate(("idas_2", "phq_9", "gad_7")):
+        for i, f in enumerate(REDCAP_BASELINE_FORMS):
             base[f"{f}_complete"] = "2" if i < battery_done else "0"
+            base[f"{f}_timestamp"] = "2026-09-26 10:%02d:00" % i if i < battery_done else ""
+        ex = {"redcap_event_name": "exit_arm_1", "exit_resources_complete": exit_,
+              "exit_resources_timestamp": "2026-11-20 09:30:00" if exit_ == "2" else ""}
+        for i, f in enumerate(REDCAP_EXIT_FORMS):
+            ex[f"{f}_complete"] = "2" if i < exit_done else "0"
+            ex[f"{f}_timestamp"] = "2026-11-20 09:%02d:00" % i if i < exit_done else ""
         return [
             {"redcap_event_name": "consent__screener_arm_1", "cssrs_screener_complete": screen,
              "cssrs_screener_timestamp": "2026-09-20 10:00:00"},
             {"redcap_event_name": "interview_arm_1", "interview_questions_complete": interview,
              "interview_questions_timestamp": "2026-09-25 14:00:00"},
-            {"redcap_event_name": "exit_arm_1", "exit_resources_complete": exit_},
+            ex,
             base,
         ]
 
@@ -180,11 +187,33 @@ class TestRedcap(unittest.TestCase):
         self.assertTrue(c["interview"]["complete"])
         self.assertFalse(c["exit"]["complete"]); self.assertIsNone(c["exit"]["at"])
         self.assertEqual(c["baselineBattery"]["completed"], 3)
+        self.assertEqual(c["baselineBattery"]["total"], 16)
         self.assertFalse(c["baselineBattery"]["complete"])
+        self.assertEqual(len(c["baselineBattery"]["missing"]), 13)
 
     def test_status_1_unverified_is_not_complete(self):
         c = parse_redcap_completions(self.rows(screen="1"))
         self.assertFalse(c["screening"]["complete"])
+
+    def test_battery_complete_without_resources_page(self):
+        # Resources pages are optional: all questionnaires in = done, stamped at the last one.
+        c = parse_redcap_completions(self.rows(battery_done=16, exit_done=14))
+        self.assertTrue(c["baselineBattery"]["complete"])
+        self.assertFalse(c["baselineBattery"]["resourcesSubmitted"])
+        self.assertEqual(c["baselineBattery"]["missing"], [])
+        self.assertEqual(c["baselineBattery"]["at"], "2026-09-26T14:15:00Z")
+        self.assertTrue(c["exit"]["complete"])
+        self.assertEqual(c["exit"]["at"], "2026-11-20T14:13:00Z")
+
+    def test_exit_resources_submitted_counts_and_dates_the_exit(self):
+        c = parse_redcap_completions(self.rows(exit_="2", exit_done=14))
+        self.assertTrue(c["exit"]["complete"])
+        self.assertEqual(c["exit"]["at"], "2026-11-20T14:30:00Z")
+
+    def test_exit_one_questionnaire_short_is_not_paid(self):
+        c = parse_redcap_completions(self.rows(exit_done=13))
+        self.assertFalse(c["exit"]["complete"])
+        self.assertEqual(c["exit"]["missing"], ["swls"])
 
 
 class TestCompensation(unittest.TestCase):

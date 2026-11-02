@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from redcap_weekly import (  # noqa: E402
     WEEKLY_SURVEY_INSTRUMENTS,
+    WEEKLY_SURVEY_QUESTIONNAIRES,
     REMINDER_FIELDS,
     parse_redcap_timestamp,
     parse_choices,
@@ -63,7 +64,12 @@ class TestInstanceSummary(unittest.TestCase):
         s = summarize_weekly_survey_instance(instance_row(2, "2026-09-21"))
         self.assertTrue(s["complete"])
         self.assertEqual(s["status"], "completed")
-        self.assertEqual(s["instrumentsCompleted"], len(WEEKLY_SURVEY_INSTRUMENTS))
+        self.assertTrue(s["resourcesSubmitted"])
+        self.assertEqual(s["instrumentsCompleted"], len(WEEKLY_SURVEY_QUESTIONNAIRES))
+        self.assertEqual(s["instrumentsTotal"], 10)
+        self.assertEqual(len(s["instruments"]), 11)
+        self.assertEqual([i["instrument"] for i in s["instruments"] if not i["questionnaire"]],
+                         ["wkly_resources"])
 
     def test_first_instrument_only_is_partial(self):
         s = summarize_weekly_survey_instance(
@@ -79,6 +85,38 @@ class TestInstanceSummary(unittest.TestCase):
             instance_row(3, "2026-09-22", completed_instruments=["wkly_resources"]))
         self.assertTrue(s["complete"])
         self.assertIsNotNone(s["completedAt"])
+
+    def test_all_questionnaires_without_resources_page_is_complete(self):
+        # 2026-11-02: participants close the resources page without pressing
+        # Submit; the survey itself is done once SWLS (the last measure) is in.
+        s = summarize_weekly_survey_instance(
+            instance_row(1, "2026-10-29", completed_instruments=WEEKLY_SURVEY_QUESTIONNAIRES))
+        self.assertTrue(s["complete"])
+        self.assertEqual(s["status"], "completed")
+        self.assertFalse(s["resourcesSubmitted"])
+        self.assertEqual(s["instrumentsCompleted"], 10)
+        self.assertEqual(s["instrumentsTotal"], 10)
+        # Finished when SWLS was submitted (2026-10-29 11:45 EDT = 15:45 UTC).
+        self.assertEqual(s["completedAt"], "2026-10-29T15:45:00Z")
+
+    def test_resources_timestamp_wins_when_submitted(self):
+        row = instance_row(1, "2026-10-29")
+        row["wkly_resources_timestamp"] = "2026-10-29 11:50:00"
+        s = summarize_weekly_survey_instance(row)
+        self.assertEqual(s["completedAt"], "2026-10-29T15:50:00Z")
+
+    def test_nine_of_ten_is_still_partial(self):
+        s = summarize_weekly_survey_instance(
+            instance_row(1, "2026-10-29", completed_instruments=WEEKLY_SURVEY_QUESTIONNAIRES[:-1]))
+        self.assertFalse(s["complete"])
+        self.assertEqual(s["status"], "partial")
+        self.assertEqual(s["instrumentsCompleted"], 9)
+
+    def test_unverified_resources_page_does_not_complete(self):
+        row = instance_row(1, "2026-10-29", completed_instruments=["phq_9"])
+        row["wkly_resources_complete"] = "1"
+        s = summarize_weekly_survey_instance(row)
+        self.assertFalse(s["complete"])
 
 
 class TestWeeklyWindow(unittest.TestCase):
@@ -106,7 +144,18 @@ class TestWeeklyWindow(unittest.TestCase):
         self.assertEqual(s["status"], "partial")
         self.assertTrue(s["startedInWindow"])
         self.assertFalse(s["completedInWindow"])
-        self.assertIn("1 of 11", s["weekly_survey_line"])
+        self.assertIn("1 of 10", s["weekly_survey_line"])
+
+    def test_the_reported_shape_reads_as_completed(self):
+        # The exact complaint: "Started but not finished (10 of 11 sections)".
+        rows = [instance_row(1, "2026-09-22", completed_instruments=WEEKLY_SURVEY_QUESTIONNAIRES)]
+        s = summarize_weekly_survey(rows, now=NOW)
+        self.assertEqual(s["status"], "completed")
+        self.assertTrue(s["completedInWindow"])
+        self.assertEqual(s["totalCompleted"], 1)
+        self.assertEqual(s["weekly_survey_status"], "Completed")
+        self.assertIn("✅ Completed Sep 22", s["weekly_survey_line"])
+        self.assertNotIn("of 11", s["weekly_survey_line"])
 
     def test_no_weekly_data_at_all(self):
         s = summarize_weekly_survey([], now=NOW)

@@ -3,10 +3,15 @@
 Two things study staff need that live in REDCap rather than Firestore:
 
 1. **Weekly survey completion.** `weekly_survey_arm_1` is a repeating event; each
-   repeat instance is one week's battery of 11 instruments. REDCap stamps a
-   `<instrument>_timestamp` per survey and a `<instrument>_complete` status
-   (0 = incomplete, 1 = unverified, 2 = complete). There is no single
-   "weekly survey done" field, so completion is derived from those.
+   repeat instance is one week's battery of 10 questionnaires followed by a
+   resources page. REDCap stamps a `<instrument>_timestamp` per survey and a
+   `<instrument>_complete` status (0 = incomplete, 1 = unverified,
+   2 = complete). There is no single "weekly survey done" field, so completion
+   is derived from those: the survey is complete once every questionnaire is
+   submitted. The resources page is informational and participants routinely
+   close it without pressing Submit (2026-11-02: two participants wrote in
+   because their weekly report called a finished survey "not finished"), so
+   it does not count against them.
 2. **Reminders.** The `reminders` instrument (event `reminders_arm_1`) is the
    switchboard Justine set up to gate REDCap's automated survey invitations —
    one radio per contact type, `1 = Send` / `0 = Cancel`.
@@ -34,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 WEEKLY_SURVEY_EVENT = "weekly_survey_arm_1"
 
-# Order matters: this is the order REDCap serves them, so `wkly_resources`
-# (the resource page shown after the last measure) is the completion sentinel.
+# Order matters: this is the order REDCap serves them. `wkly_resources` is the
+# resource page shown after the last measure (SWLS); it is not a questionnaire.
 WEEKLY_SURVEY_INSTRUMENTS = (
     "phq_9",
     "gad_7",
@@ -49,7 +54,9 @@ WEEKLY_SURVEY_INSTRUMENTS = (
     "swls",
     "wkly_resources",
 )
-WEEKLY_SURVEY_FINAL_INSTRUMENT = WEEKLY_SURVEY_INSTRUMENTS[-1]
+WEEKLY_SURVEY_RESOURCES_PAGE = WEEKLY_SURVEY_INSTRUMENTS[-1]
+# The sections a participant actually has to answer; completion is judged on these.
+WEEKLY_SURVEY_QUESTIONNAIRES = WEEKLY_SURVEY_INSTRUMENTS[:-1]
 
 REDCAP_STATUS_COMPLETE = "2"
 
@@ -98,35 +105,52 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 
 
 def summarize_weekly_survey_instance(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Derive completion for a single repeat instance of the weekly battery."""
+    """Derive completion for a single repeat instance of the weekly battery.
+
+    Complete = every questionnaire submitted (status 2). The resources page is
+    reported (`resourcesSubmitted`) but never required; if it WAS submitted the
+    battery is complete regardless, since REDCap only serves it after SWLS.
+    `instrumentsCompleted` / `instrumentsTotal` count questionnaires only, so
+    the participant-facing "x of y sections" never asks for the resources page.
+    """
     per_instrument = []
     completed = 0
     timestamps = []
+    questionnaire_timestamps = []
     for instrument in WEEKLY_SURVEY_INSTRUMENTS:
         status = str(row.get(f"{instrument}_complete") or "").strip()
         ts = parse_redcap_timestamp(row.get(f"{instrument}_timestamp"))
         is_complete = status == REDCAP_STATUS_COMPLETE
-        if is_complete:
+        is_questionnaire = instrument != WEEKLY_SURVEY_RESOURCES_PAGE
+        if is_complete and is_questionnaire:
             completed += 1
         if ts:
             timestamps.append(ts)
+            if is_questionnaire:
+                questionnaire_timestamps.append(ts)
         per_instrument.append({
             "instrument": instrument,
             "complete": is_complete,
             "status": status or "0",
             "completedAt": _iso(ts),
+            "questionnaire": is_questionnaire,
         })
 
-    final_complete = str(
-        row.get(f"{WEEKLY_SURVEY_FINAL_INSTRUMENT}_complete") or ""
+    resources_submitted = str(
+        row.get(f"{WEEKLY_SURVEY_RESOURCES_PAGE}_complete") or ""
     ).strip() == REDCAP_STATUS_COMPLETE
-    is_complete = final_complete or completed == len(WEEKLY_SURVEY_INSTRUMENTS)
+    is_complete = resources_submitted or completed == len(WEEKLY_SURVEY_QUESTIONNAIRES)
 
     last_activity = max(timestamps) if timestamps else None
-    finished_at = (
-        parse_redcap_timestamp(row.get(f"{WEEKLY_SURVEY_FINAL_INSTRUMENT}_timestamp"))
-        or last_activity
-    ) if is_complete else None
+    finished_at = None
+    if is_complete:
+        # When they did press Submit on the resources page that is the true end;
+        # otherwise the last questionnaire (SWLS) they submitted is.
+        finished_at = (
+            parse_redcap_timestamp(row.get(f"{WEEKLY_SURVEY_RESOURCES_PAGE}_timestamp"))
+            or (max(questionnaire_timestamps) if questionnaire_timestamps else None)
+            or last_activity
+        )
 
     try:
         instance = int(row.get("redcap_repeat_instance") or 1)
@@ -137,8 +161,9 @@ def summarize_weekly_survey_instance(row: Dict[str, Any]) -> Dict[str, Any]:
         "instance": instance,
         "status": "completed" if is_complete else ("partial" if completed or last_activity else "none"),
         "complete": is_complete,
+        "resourcesSubmitted": resources_submitted,
         "instrumentsCompleted": completed,
-        "instrumentsTotal": len(WEEKLY_SURVEY_INSTRUMENTS),
+        "instrumentsTotal": len(WEEKLY_SURVEY_QUESTIONNAIRES),
         "completedAt": _iso(finished_at),
         "lastActivityAt": _iso(last_activity),
         "instruments": per_instrument,
@@ -203,7 +228,7 @@ def summarize_weekly_survey(
         "lastCompletedInstance": last_completed["instance"] if last_completed else None,
         "lastActivityAt": focus["lastActivityAt"] if focus else None,
         "instrumentsCompleted": focus["instrumentsCompleted"] if focus else 0,
-        "instrumentsTotal": len(WEEKLY_SURVEY_INSTRUMENTS),
+        "instrumentsTotal": len(WEEKLY_SURVEY_QUESTIONNAIRES),
         "currentInstance": focus["instance"] if focus else None,
         "totalCompleted": len(all_completed),
         "instances": [
@@ -233,7 +258,7 @@ def weekly_survey_email_variables(
     """Render the weekly-survey status into the variables the email templates use."""
     status = summary.get("status")
     done = summary.get("instrumentsCompleted") or 0
-    total = summary.get("instrumentsTotal") or len(WEEKLY_SURVEY_INSTRUMENTS)
+    total = summary.get("instrumentsTotal") or len(WEEKLY_SURVEY_QUESTIONNAIRES)
 
     if status == "completed":
         when = _friendly_date(
