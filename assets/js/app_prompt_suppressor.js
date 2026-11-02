@@ -24,7 +24,6 @@
 (function () {
   'use strict';
   if (window.__SMERB_PROMPT_SUPPRESSOR__) return;
-  window.__SMERB_PROMPT_SUPPRESSOR__ = true;
 
   var host = location.hostname;
   var platform = /reddit\.com$/.test(host) ? 'reddit'
@@ -39,6 +38,7 @@
       '#sticky-community-header-open-app-cta',       // red "Open App" pill in the community header (logged in)
       '#xpromo-small-header, #open-app-header-cta',  // "Open App" in the global header (logged out, seen 2026-10)
       '[id*="open-app-cta"], [id*="open-app-header"], [id*="xpromo"]',
+      '#get-app-button',                             // "Open Reddit App" inside the logged-out sign-up/login sheet (the sheet itself stays)
       '#app-upsell-blocking-bottom-sheet-seo',       // "Get the app to keep using Reddit" (blocking)
       '#app-upsell-blocking-bottom-sheet-direct',
       '[id*="app-upsell"]',
@@ -64,6 +64,9 @@
   // Store pages: a prompt only inside an upsell sheet (a post may legitimately link to one).
   var STORE_LINK = /play\.google\.com\/store\/apps|apps\.apple\.com|itunes\.apple\.com/i;
   var UPSELL_TEXT = /\b(open|get|view|continue|use|try|download|install|see)\b[^.]{0,40}\bapp\b|\bin the app\b|\bapp store\b|\bgoogle play\b|keep using reddit/i;
+  // Login / sign-up UI: a sheet containing any of these is never hidden wholesale.
+  var AUTH_UI = 'a[href*="/login"], a[href*="/register"], input[type="password"], auth-flow-signup-bottom-sheet, auth-flow-login, auth-flow-modal, [id*="auth-flow"]';
+  var rewrittenLinks = 0, rewriteReported = false;
   var SHEET = 'faceplate-bottom-sheet, rpl-bottom-sheet, .rpl-bottom-sheet, rpl-modal-card, faceplate-modal, shreddit-interstitial, [role="dialog"], [data-testid="sheetDialog"]';
   // Classes Reddit puts on <body> to freeze the page behind a blocking sheet
   // (re-added dynamically, so they are stripped on every scan while we hold).
@@ -71,166 +74,222 @@
   var MAX_SHEET_TEXT = 320;   // app-upsell sheets are terse; real content isn't
 
   // --- Hiding ---------------------------------------------------------------
-  var HIDE_ATTR = 'data-smerb-hidden';
-  var style = document.createElement('style');
-  style.id = 'smerb-prompt-suppressor';
-  style.textContent =
-    KNOWN[platform].join(',\n') + ', [' + HIDE_ATTR + '] { display: none !important; visibility: hidden !important; pointer-events: none !important; }\n' +
-    // Applied only while a hidden sheet is holding the page's scroll lock.
-    // Reddit freezes the page with body.scroll-is-blocked {touch-action:none;
-    // overflow:hidden} and body.rpl-scroll-lock {overflow:hidden!important};
-    // this out-specifies both.
-    'html.smerb-unlock-scroll, html.smerb-unlock-scroll body { overflow-y: auto !important; position: static !important; touch-action: auto !important; overscroll-behavior: auto !important; }';
-  (document.head || document.documentElement).appendChild(style);
 
-  var reported = new Set();
-  function describe(el) {
-    var s = el.tagName.toLowerCase();
-    if (el.id) s += '#' + el.id;
-    var t = el.getAttribute('data-testid'); if (t) s += '[' + t + ']';
-    return s;
-  }
-  function report(el, rule, text) {
-    var key = rule + '|' + describe(el);
-    if (reported.has(key)) return;
-    reported.add(key);
-    try {
-      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-        window.flutter_inappwebview.callHandler('SmerbChannel', JSON.stringify({
-          type: 'app_prompt_suppressed', timestamp: Date.now(), url: location.href, platform: platform,
-          data: { rule: rule, selector: describe(el), text: (text || '').slice(0, 120) },
-        }));
-      }
-    } catch (e) { /* reporting is best-effort */ }
-  }
-  function hide(el, rule, text) {
-    if (!el || el === document.body || el === document.documentElement) return;
-    if (el.hasAttribute(HIDE_ATTR)) return;   // already handled (and reported) under its first matching rule
-    {
-      el.setAttribute(HIDE_ATTR, rule);
-      // Reddit's sheets register with an overlay manager that locks scroll
-      // while they are "open"; closing them properly keeps its state sane.
+  function start() {
+    var HIDE_ATTR = 'data-smerb-hidden';
+    var style = document.createElement('style');
+    style.id = 'smerb-prompt-suppressor';
+    style.textContent =
+      KNOWN[platform].join(',\n') + ', [' + HIDE_ATTR + '] { display: none !important; visibility: hidden !important; pointer-events: none !important; }\n' +
+      // Applied only while a hidden sheet is holding the page's scroll lock.
+      // Reddit freezes the page with body.scroll-is-blocked {touch-action:none;
+      // overflow:hidden} and body.rpl-scroll-lock {overflow:hidden!important};
+      // this out-specifies both.
+      'html.smerb-unlock-scroll, html.smerb-unlock-scroll body { overflow-y: auto !important; position: static !important; touch-action: auto !important; overscroll-behavior: auto !important; }';
+    (document.head || document.documentElement).appendChild(style);
+
+    var reported = new Set();
+    function describe(el) {
+      var s = el.tagName.toLowerCase();
+      if (el.id) s += '#' + el.id;
+      var t = el.getAttribute('data-testid'); if (t) s += '[' + t + ']';
+      return s;
+    }
+    function report(el, rule, text) {
+      var key = rule + '|' + describe(el);
+      if (reported.has(key)) return;
+      reported.add(key);
+      send({ type: 'app_prompt_suppressed', timestamp: Date.now(), url: location.href, platform: platform,
+             data: { rule: rule, selector: describe(el), text: (text || '').slice(0, 120) } });
+    }
+    function send(event) {
       try {
-        var closer = el.querySelector('button[aria-label*="close" i], button[aria-label*="dismiss" i], [slot="close"], button[data-testid*="close" i]');
-        if (closer) closer.click();
-        if (el.hasAttribute('open')) el.removeAttribute('open');
-        // Reddit's configured-xpromo components listen for this to tear
-        // themselves down (and release the scroll lock) exactly as if the
-        // participant had tapped their own dismiss control.
-        if (/xpromo/i.test(el.localName + ' ' + el.className)) {
-          el.dispatchEvent(new CustomEvent('dismiss-configured-xpromo', { bubbles: true, composed: true }));
+        if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+          window.flutter_inappwebview.callHandler('SmerbChannel', JSON.stringify(event));
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) { /* reporting is best-effort */ }
     }
-    report(el, rule, text);
-  }
-  function shortText(el) {
-    // Text nodes joined by spaces (innerText is empty for display:none
-    // elements and textContent runs words from adjacent elements together).
-    var parts = [], w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), n;
-    while ((n = w.nextNode())) { var v = n.nodeValue.trim(); if (v) parts.push(v); if (parts.length > 60) break; }
-    return parts.join(' ').replace(/\s+/g, ' ');
-  }
-
-  // --- Layer 2 & 3 ------------------------------------------------------------
-  function isDeepLinkHref(h) { return !!h && APP_LINK.test(h); }
-
-  function scanRoot(root) {
-    // Known selectors: matched by CSS already; still mark+report so the
-    // overlay manager is closed and the event is logged.
-    var i, el;
-    var known = root.querySelectorAll(KNOWN[platform].join(','));
-    for (i = 0; i < known.length; i++) hide(known[i], 'known', shortText(known[i]));
-
-    // Structural: deep links to the native app / store.
-    var links = root.querySelectorAll('a[href], [data-href], button[formaction]');
-    for (i = 0; i < links.length; i++) {
-      el = links[i];
-      var href = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('formaction') || '';
-      var deep = isDeepLinkHref(href), store = STORE_LINK.test(href);
-      if (!deep && !store) continue;
-      var sheet = el.closest(SHEET);
-      var text = sheet ? shortText(sheet) : '';
-      if (sheet && text.length <= MAX_SHEET_TEXT && UPSELL_TEXT.test(text)) hide(sheet, 'deeplink-sheet', text);
-      else if (deep) hide(el, 'deeplink', shortText(el));
+    function hide(el, rule, text) {
+      if (!el || el === document.body || el === document.documentElement) return;
+      if (el.hasAttribute(HIDE_ATTR)) return;   // already handled (and reported) under its first matching rule
+      {
+        el.setAttribute(HIDE_ATTR, rule);
+        // Reddit's sheets register with an overlay manager that locks scroll
+        // while they are "open"; closing them properly keeps its state sane.
+        try {
+          var closer = el.querySelector('button[aria-label*="close" i], button[aria-label*="dismiss" i], [slot="close"], button[data-testid*="close" i]');
+          if (closer) closer.click();
+          if (el.hasAttribute('open')) el.removeAttribute('open');
+          // Reddit's configured-xpromo components listen for this to tear
+          // themselves down (and release the scroll lock) exactly as if the
+          // participant had tapped their own dismiss control.
+          if (/xpromo/i.test(el.localName + ' ' + el.className)) {
+            el.dispatchEvent(new CustomEvent('dismiss-configured-xpromo', { bubbles: true, composed: true }));
+          }
+        } catch (e) { /* ignore */ }
+      }
+      report(el, rule, text);
+    }
+    function shortText(el) {
+      // Text nodes joined by spaces (innerText is empty for display:none
+      // elements and textContent runs words from adjacent elements together).
+      var parts = [], w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), n;
+      while ((n = w.nextNode())) { var v = n.nodeValue.trim(); if (v) parts.push(v); if (parts.length > 60) break; }
+      return parts.join(' ').replace(/\s+/g, ' ');
     }
 
-    // Text: small fixed/sticky upsell bars that use neither a known id nor a
-    // deep link. Prompts are mounted near the top of the tree, so only the
-    // first few levels are checked — getComputedStyle on every node of a
-    // Reddit feed would be far too slow to run on each mutation.
-    walkShallow(root, 0, function (el) {
-      if (el.hasAttribute(HIDE_ATTR) || el.closest('[' + HIDE_ATTR + ']')) return;
-      var cs = getComputedStyle(el);
-      if (cs.position !== 'fixed' && cs.position !== 'sticky') return;
-      var r = el.getBoundingClientRect();
-      if (r.width < innerWidth * 0.5 || r.height < 36 || r.height > innerHeight * 0.6) return;
-      var t = shortText(el);
-      if (t.length === 0 || t.length > 160 || !UPSELL_TEXT.test(t)) return;
-      // Never hide the site's own navigation/header, which can be sticky and
-      // happens to contain words like "app" in menus; those are long anyway.
-      if (el.closest('header, reddit-header-small, reddit-header-large, [role="banner"], [role="navigation"]')) return;
-      hide(el, 'upsell-text', t);
-    });
-  }
+    // --- Layer 2 & 3 ------------------------------------------------------------
+    function isDeepLinkHref(h) { return !!h && APP_LINK.test(h); }
 
-  var MAX_DEPTH = 6;
-  function walkShallow(root, depth, fn) {
-    if (depth > MAX_DEPTH) return;
-    var kids = root.children || [];
-    for (var i = 0; i < kids.length; i++) {
-      var el = kids[i];
-      fn(el);
-      if (el.shadowRoot) walkShallow(el.shadowRoot, depth + 1, fn);
-      walkShallow(el, depth + 1, fn);
+    function scanRoot(root) {
+      // Known selectors: matched by CSS already; still mark+report so the
+      // overlay manager is closed and the event is logged.
+      var i, el;
+      var known = root.querySelectorAll(KNOWN[platform].join(','));
+      for (i = 0; i < known.length; i++) hide(known[i], 'known', shortText(known[i]));
+
+      // Structural: deep links to the native app / store.
+      var links = root.querySelectorAll('a[href], [data-href], button[formaction]');
+      for (i = 0; i < links.length; i++) {
+        el = links[i];
+        var href = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('formaction') || '';
+        var deep = isDeepLinkHref(href), store = STORE_LINK.test(href);
+        if (!deep && !store) continue;
+        var sheet = el.closest(SHEET);
+        // Reddit's logged-out "Reply to join the conversation" sheet is the
+        // participant's way to LOG IN (Continue with Google / Email, Log In)
+        // and merely carries an "Open Reddit App" button. Hiding the whole
+        // sheet made it flash for ~0.3 s and took the login path away
+        // (participant report, 2026-10-31): hide only the button.
+        if (sheet && sheet.querySelector(AUTH_UI)) {
+          if (deep) hide(el, 'deeplink-in-auth-sheet', shortText(el));
+          continue;
+        }
+        var text = sheet ? shortText(sheet) : '';
+        if (sheet && text.length <= MAX_SHEET_TEXT && UPSELL_TEXT.test(text)) hide(sheet, 'deeplink-sheet', text);
+        else if (deep) hide(el, 'deeplink', shortText(el));
+      }
+
+      // Logged-out Reddit links every post through applink.reddit.com. On iOS
+      // that host is a universal link for the Reddit app, so a tap on a post
+      // left the study browser and opened Reddit's own app (participant
+      // report, 2026-10-31). The path is identical on www.reddit.com (the
+      // host 301s there for everyone else), so point the links back at it.
+      if (platform === 'reddit') {
+        var appLinks = root.querySelectorAll('a[href^="https://applink.reddit.com/"], a[href^="http://applink.reddit.com/"], a[href^="//applink.reddit.com/"]');
+        for (i = 0; i < appLinks.length; i++) {
+          try {
+            var fixed = new URL(appLinks[i].getAttribute('href'), location.href);
+            fixed.protocol = 'https:'; fixed.host = 'www.reddit.com';
+            appLinks[i].setAttribute('href', fixed.href);
+            rewrittenLinks++;
+          } catch (e) { /* leave it */ }
+        }
+        if (rewrittenLinks && !rewriteReported) {
+          rewriteReported = true;
+          send({ type: 'app_link_rewritten', timestamp: Date.now(), url: location.href, platform: platform,
+                 data: { host: 'applink.reddit.com', count: rewrittenLinks } });
+        }
+      }
+
+      // Text: small fixed/sticky upsell bars that use neither a known id nor a
+      // deep link. Prompts are mounted near the top of the tree, so only the
+      // first few levels are checked — getComputedStyle on every node of a
+      // Reddit feed would be far too slow to run on each mutation.
+      walkShallow(root, 0, function (el) {
+        if (el.hasAttribute(HIDE_ATTR) || el.closest('[' + HIDE_ATTR + ']')) return;
+        if (el.querySelector(AUTH_UI)) return;   // login / sign-up sheet: never hidden wholesale
+        var cs = getComputedStyle(el);
+        if (cs.position !== 'fixed' && cs.position !== 'sticky') return;
+        var r = el.getBoundingClientRect();
+        if (r.width < innerWidth * 0.5 || r.height < 36 || r.height > innerHeight * 0.6) return;
+        var t = shortText(el);
+        if (t.length === 0 || t.length > 160 || !UPSELL_TEXT.test(t)) return;
+        // Never hide the site's own navigation/header, which can be sticky and
+        // happens to contain words like "app" in menus; those are long anyway.
+        if (el.closest('header, reddit-header-small, reddit-header-large, [role="banner"], [role="navigation"]')) return;
+        hide(el, 'upsell-text', t);
+      });
     }
+
+    var MAX_DEPTH = 6;
+    function walkShallow(root, depth, fn) {
+      if (depth > MAX_DEPTH) return;
+      var kids = root.children || [];
+      for (var i = 0; i < kids.length; i++) {
+        var el = kids[i];
+        fn(el);
+        if (el.shadowRoot) walkShallow(el.shadowRoot, depth + 1, fn);
+        walkShallow(el, depth + 1, fn);
+      }
+    }
+
+    var holding = false;
+    function unlockScrollIfHeld() {
+      if (!document.body) return;   // document-start run, before <body> exists
+      // Only intervene when something we hid is still holding the lock.
+      var hiddenSheet = document.querySelector('[' + HIDE_ATTR + ']');
+      var body = document.body, bodyCs = getComputedStyle(body);
+      var classLocked = LOCK_CLASSES.some(function (c) { return body.classList.contains(c); });
+      var locked = classLocked || bodyCs.overflowY === 'hidden' || bodyCs.position === 'fixed';
+      var visibleDialog = Array.prototype.some.call(document.querySelectorAll(SHEET), function (d) {
+        if (d.hasAttribute(HIDE_ATTR)) return false;
+        var r = d.getBoundingClientRect(), cs = getComputedStyle(d);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth
+          && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0';
+      });
+      holding = !!hiddenSheet && locked && !visibleDialog;
+      document.documentElement.classList.toggle('smerb-unlock-scroll', holding);
+      if (holding && classLocked) LOCK_CLASSES.forEach(function (c) { body.classList.remove(c); });
+    }
+    // While holding the page open behind a hidden blocking sheet, keep Reddit's
+    // touchmove handlers (which preventDefault to freeze scrolling) from running.
+    window.addEventListener('touchmove', function (e) {
+      if (holding) e.stopImmediatePropagation();
+    }, { capture: true, passive: true });
+
+    var scheduled = false, lastScan = 0, lastScanMs = 0;
+    function scan() {
+      scheduled = false;
+      lastScan = Date.now();
+      var t0 = performance.now();
+      try { scanRoot(document); } catch (e) { window.__smerbPromptError = String(e && e.stack || e); }
+      try { unlockScrollIfHeld(); } catch (e) { window.__smerbPromptError = String(e && e.stack || e); }
+      lastScanMs = performance.now() - t0;
+    }
+    function schedule() {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(scan, Math.max(50, 400 - (Date.now() - lastScan)));
+    }
+    // Debug hook (used by the emulator tests): force a scan and report its cost.
+    window.__smerbPromptScan = function () { scan(); return { ms: Math.round(lastScanMs * 10) / 10, hidden: document.querySelectorAll('[' + HIDE_ATTR + ']').length }; };
+
+    new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'class', 'style', 'href'] });
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', schedule);
+    schedule();
+    // SPA navigations and late-arriving sheets.
+    setInterval(schedule, 2000);
+    window.addEventListener('popstate', schedule);
   }
 
-  var holding = false;
-  function unlockScrollIfHeld() {
-    if (!document.body) return;   // document-start run, before <body> exists
-    // Only intervene when something we hid is still holding the lock.
-    var hiddenSheet = document.querySelector('[' + HIDE_ATTR + ']');
-    var body = document.body, bodyCs = getComputedStyle(body);
-    var classLocked = LOCK_CLASSES.some(function (c) { return body.classList.contains(c); });
-    var locked = classLocked || bodyCs.overflowY === 'hidden' || bodyCs.position === 'fixed';
-    var visibleDialog = Array.prototype.some.call(document.querySelectorAll(SHEET), function (d) {
-      if (d.hasAttribute(HIDE_ATTR)) return false;
-      var r = d.getBoundingClientRect(), cs = getComputedStyle(d);
-      return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth
-        && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0';
-    });
-    holding = !!hiddenSheet && locked && !visibleDialog;
-    document.documentElement.classList.toggle('smerb-unlock-scroll', holding);
-    if (holding && classLocked) LOCK_CLASSES.forEach(function (c) { body.classList.remove(c); });
-  }
-  // While holding the page open behind a hidden blocking sheet, keep Reddit's
-  // touchmove handlers (which preventDefault to freeze scrolling) from running.
-  window.addEventListener('touchmove', function (e) {
-    if (holding) e.stopImmediatePropagation();
-  }, { capture: true, passive: true });
-
-  var scheduled = false, lastScan = 0, lastScanMs = 0;
-  function scan() {
-    scheduled = false;
-    lastScan = Date.now();
-    var t0 = performance.now();
-    try { scanRoot(document); } catch (e) { window.__smerbPromptError = String(e && e.stack || e); }
-    try { unlockScrollIfHeld(); } catch (e) { window.__smerbPromptError = String(e && e.stack || e); }
-    lastScanMs = performance.now() - t0;
-  }
-  function schedule() {
-    if (scheduled) return;
-    scheduled = true;
-    setTimeout(scan, Math.max(50, 400 - (Date.now() - lastScan)));
-  }
-  // Debug hook (used by the emulator tests): force a scan and report its cost.
-  window.__smerbPromptScan = function () { scan(); return { ms: Math.round(lastScanMs * 10) / 10, hidden: document.querySelectorAll('[' + HIDE_ATTR + ']').length }; };
-
-  new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'class', 'style', 'href'] });
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', schedule);
-  schedule();
-  // SPA navigations and late-arriving sheets.
-  setInterval(schedule, 2000);
-  window.addEventListener('popstate', schedule);
+  // Android's document-start injection can run before <html> exists; the old
+  // version threw on appendChild(null) AFTER setting the guard, so neither it
+  // nor the load-complete fallback ever ran on that page (found reproducing a
+  // participant report, 2026-11-02). Wait for the root element, and claim the
+  // guard only once setup has actually succeeded.
+  var bootTries = 0;
+  (function boot() {
+    if (window.__SMERB_PROMPT_SUPPRESSOR__) return;        // another injection won the race
+    if (!document.documentElement) {
+      if (bootTries++ < 500) setTimeout(boot, 10);           // ~5 s; the load-complete injection covers the rest
+      return;
+    }
+    try {
+      start();
+      window.__SMERB_PROMPT_SUPPRESSOR__ = true;
+    } catch (e) {
+      window.__smerbPromptInitError = String(e && e.stack || e);
+    }
+  })();
 })();

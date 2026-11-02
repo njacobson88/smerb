@@ -172,10 +172,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final redditCookies = await _cookieManager.getCookies(
       url: WebUri('https://www.reddit.com'),
     );
-    final redditLoggedIn = redditCookies.any((cookie) =>
-        cookie.name == 'reddit_session' ||
-        cookie.name == 'token_v2' ||
-        cookie.name == 'loid');
+    // Only reddit_session means a signed-in account: Reddit also issues
+    // token_v2 and loid to logged-out visitors (verified in the study
+    // WebView, 2026-11-02), so counting them reported "logged in" for a
+    // participant whose Reddit session had actually been dropped.
+    final redditLoggedIn = redditCookies.any((cookie) => cookie.name == 'reddit_session');
 
     if (redditLoggedIn && !_redditLoggedIn) {
       print('[Browser] Reddit login detected!');
@@ -824,6 +825,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
               },
               shouldOverrideUrlLoading: (controller, action) async {
                 final url = action.request.url;
+                if (url != null && url.host.toLowerCase() == 'applink.reddit.com') {
+                  // Logged-out Reddit routes post links through this host,
+                  // which iOS treats as a universal link for the Reddit app:
+                  // the tap left the study browser (participant report,
+                  // 2026-10-31). Same path on www.reddit.com instead. The
+                  // page script rewrites the links too; this catches any
+                  // navigation it missed.
+                  final www = url.uriValue.replace(scheme: 'https', host: 'www.reddit.com');
+                  print('[Browser] Rewrote app link to $www');
+                  _logBrowserEvent('app_link_rewritten', {'target': url.toString(), 'host': 'applink.reddit.com'});
+                  await controller.loadUrl(urlRequest: URLRequest(url: WebUri.uri(www)));
+                  return NavigationActionPolicy.CANCEL;
+                }
                 if (url != null && _isNativeAppHandoff(url)) {
                   // "Open in app" / store deep links: there is nowhere for
                   // them to go from inside the study browser. Swallow them
