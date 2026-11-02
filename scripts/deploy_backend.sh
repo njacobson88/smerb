@@ -17,7 +17,8 @@ echo "======================================"
 echo "Deploying backend: $ENVIRONMENT"
 echo "======================================"
 
-cd "$(dirname "$0")/../dashboard/backend"
+BACKEND_DIR="$(cd "$(dirname "$0")/../dashboard/backend" && pwd)"
+cd "$BACKEND_DIR"
 
 if [[ "$ENVIRONMENT" == "prod" ]]; then
   SERVICE_NAME="socialscope-dashboard-api"
@@ -33,8 +34,9 @@ fi
 
 # Load REDCap (and other) secrets from dashboard/backend/.env if present, so a
 # deploy from a shell that didn't export them doesn't blank them.
-if [[ -f "$(dirname "$0")/../dashboard/backend/.env" ]]; then
-  set -a; . "$(dirname "$0")/../dashboard/backend/.env"; set +a
+# (Resolved before the cd above: a relative $0 no longer points anywhere after it.)
+if [[ -f "$BACKEND_DIR/.env" ]]; then
+  set -a; . "$BACKEND_DIR/.env"; set +a
 fi
 
 # Guard: REDCAP_API_TOKEN being empty here would silently break ID
