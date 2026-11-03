@@ -55,4 +55,34 @@ void main() {
       expect(LocalMediaRetention.filesToDelete(filesOnDisk: {}, referencedFiles: {}), isEmpty);
     });
   });
+
+  group('CachePressureValve', () {
+    const cap = 2048 * 1024 * 1024;
+    test('nothing to free below the trigger', () {
+      expect(CachePressureValve.bytesToFree(usageBytes: (cap * 0.94).floor(), capBytes: cap), 0);
+      expect(CachePressureValve.bytesToFree(usageBytes: 0, capBytes: cap), 0);
+      expect(CachePressureValve.bytesToFree(usageBytes: 10, capBytes: 0), 0);
+    });
+
+    test('at or over the trigger, free down to the target', () {
+      expect(CachePressureValve.bytesToFree(usageBytes: cap, capBytes: cap), cap - (cap * 0.85).floor());
+      expect(CachePressureValve.bytesToFree(usageBytes: cap + 5 * 1048576, capBytes: cap),
+          cap + 5 * 1048576 - (cap * 0.85).floor());
+    });
+
+    test('picks the oldest captures until the need is covered, no more', () {
+      final cands = [
+        (id: 'a', bytes: 100), (id: 'b', bytes: 100), (id: 'c', bytes: 100), (id: 'd', bytes: 100),
+      ];
+      expect(CachePressureValve.pickToDrop(oldestFirst: cands, bytesNeeded: 250), ['a', 'b', 'c']);
+      expect(CachePressureValve.pickToDrop(oldestFirst: cands, bytesNeeded: 300), ['a', 'b', 'c']);
+      expect(CachePressureValve.pickToDrop(oldestFirst: cands, bytesNeeded: 0), isEmpty);
+      expect(CachePressureValve.pickToDrop(oldestFirst: cands, bytesNeeded: 10000), ['a', 'b', 'c', 'd']);
+    });
+
+    test('zero-byte (already missing) files do not satisfy the need by themselves', () {
+      final cands = [(id: 'ghost', bytes: 0), (id: 'real', bytes: 500)];
+      expect(CachePressureValve.pickToDrop(oldestFirst: cands, bytesNeeded: 400), ['ghost', 'real']);
+    });
+  });
 }

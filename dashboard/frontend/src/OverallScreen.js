@@ -117,6 +117,19 @@ const CompliancePill = ({ value }) => {
 };
 
 
+// HTML page uploads are expected to lag screenshots by hours, not days. Flag a
+// participant whose screenshots are current but whose last HTML upload is more
+// than 2 days older (or absent) — the stalled-queue signature of app 1.0.23/24.
+function htmlStall(p) {
+  if (!p || !p.lastScreenshotAt) return false;
+  const shot = Date.parse(p.lastScreenshotAt);
+  if (Number.isNaN(shot)) return false;
+  if (Date.now() - shot > 2 * 86400000) return false; // not actively capturing: nothing to compare
+  if (!p.lastHtmlCaptureAt) return true;
+  const html = Date.parse(p.lastHtmlCaptureAt);
+  return !Number.isNaN(html) && shot - html > 2 * 86400000;
+}
+
 const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, goToSiTrend }) => {
   const [weekOffset, setWeekOffset] = useState(0);
   const [participants, setParticipants] = useState([]);
@@ -605,9 +618,25 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
                           {participant.captureDiskPaused && (
                             <span
                               className="ml-2 px-1.5 py-0.5 text-xs rounded bg-amber-100 text-amber-800 border border-amber-300"
-                              title={`Capture is paused: the study app's own cache on this phone hit its 2 GB cap${participant.captureDiskUsageMb ? ` (${participant.captureDiskUsageMb} MB)` : ''}. This is the app's cache, not the phone's storage. App 1.0.22+ frees it automatically on next launch; older builds stay paused.`}
+                              title={`Capture is paused: the study app's own cache on this phone hit its 2 GB cap${participant.captureDiskUsageMb ? ` (${participant.captureDiskUsageMb} MB)` : ''}. This is the app's cache, not the phone's storage. Usually unsent HTML page captures (see the HTML badge). App 1.0.25+ frees space automatically; older builds stay paused until updated.`}
                             >
                               ⚠ capture paused (app cache full{participant.captureDiskUsageMb ? `, ${participant.captureDiskUsageMb} MB` : ''})
+                            </span>
+                          )}
+                          {htmlStall(participant) && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-orange-100 text-orange-800 border border-orange-300"
+                              title={`HTML page captures are not uploading: screenshots are current but the last HTML page upload was ${participant.lastHtmlCaptureAt ? participant.lastHtmlCaptureAt.slice(0, 10) : 'never in the last 14 days'}. Unsent HTML stays on the phone and fills the app cache. Fixed in app 1.0.25; the backlog drains after the update.`}
+                            >
+                              ⚠ HTML not uploading{participant.lastHtmlCaptureAt ? ` since ${participant.lastHtmlCaptureAt.slice(5, 10)}` : ''}
+                            </span>
+                          )}
+                          {(participant.htmlDroppedForSpace > 0 || participant.htmlUnsyncable > 0) && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-gray-100 text-gray-700 border border-gray-300"
+                              title={`HTML pages lost in the last 14 days: ${participant.htmlDroppedForSpace || 0} dropped by the app to keep screenshot capture running when its cache was full, ${participant.htmlUnsyncable || 0} whose file was already gone.`}
+                            >
+                              HTML lost: {(participant.htmlDroppedForSpace || 0) + (participant.htmlUnsyncable || 0)}
                             </span>
                           )}
                         </div>

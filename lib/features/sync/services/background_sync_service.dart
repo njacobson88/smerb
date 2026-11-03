@@ -4,6 +4,10 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import '../../storage/database/database.dart';
 import '../../storage/services/local_media_retention.dart';
+import '../../capture/services/screenshot_service.dart';
+import 'package:drift/drift.dart' show Value;
+import 'package:uuid/uuid.dart';
+import 'dart:convert';
 import '../../ocr/services/ocr_service.dart';
 import '../../settings/services/pause_service.dart';
 import 'upload_service.dart';
@@ -30,6 +34,11 @@ class BackgroundSyncService {
 
   // Run data retention every ~120 cycles (~1 hour)
   static const int _retentionInterval = 120;
+  // Check cache pressure every ~10 cycles (~5 min): a directory walk of a few
+  // thousand files, cheap enough at that cadence, and capture re-checks the
+  // cap on every tick while paused so it resumes within seconds of relief.
+  static const int _pressureInterval = 10;
+  int _cyclesSincePressureCheck = 0;
 
   // Callbacks for status updates
   void Function(SyncStatus)? onSyncStatusChanged;
@@ -131,6 +140,7 @@ class BackgroundSyncService {
       if (!_sweptSinceLaunch) {
         _sweptSinceLaunch = true;
         await _sweepLocalMedia();
+        await _relieveCachePressure();
       }
 
       // Step 1: Process any pending OCR (bounded; local-only, no network)
@@ -146,6 +156,11 @@ class BackgroundSyncService {
       // Step 3: Periodically prune old synced data (~hourly), then free the
       // local media files nothing needs any more (same cadence: a few
       // thousand stat() calls). Also runs once at launch, see Step 0b.
+      if (++_cyclesSincePressureCheck >= _pressureInterval) {
+        _cyclesSincePressureCheck = 0;
+        await _relieveCachePressure();
+      }
+
       _syncCycleCount++;
       if (_syncCycleCount >= _retentionInterval) {
         _syncCycleCount = 0;
@@ -244,6 +259,79 @@ class BackgroundSyncService {
       }
     } catch (e) {
       print('[BackgroundSync] local media sweep error: $e');
+    }
+  }
+
+  /// Screenshots come first (PI decision 2026-11-03): when the app's own
+  /// cache is about to hit the cap that pauses capture, drop the OLDEST
+  /// unsent HTML page captures — only as much as needed to get back under
+  /// the cap — and leave an `html_dropped_for_space` event saying exactly
+  /// what was lost. Nothing else is ever deleted here; uploaded files are the
+  /// sweep's job and unsent screenshots are never touched.
+  Future<void> _relieveCachePressure() async {
+    try {
+      final usage = await ScreenshotService.getLocalStorageBytes();
+      if (usage < 0) return;
+      const cap = ScreenshotService.maxLocalStorageMb * 1024 * 1024;
+      final need = CachePressureValve.bytesToFree(usageBytes: usage, capBytes: cap);
+      if (need == 0) return;
+
+      // Oldest unsent captures first; size each file as we go.
+      final candidates = await database.getUnsyncedHtmlCaptures(limit: 5000);
+      if (candidates.isEmpty) {
+        print('[BackgroundSync] cache at ${usage ~/ 1048576} MB but no unsent HTML to drop');
+        return;
+      }
+      final sized = <({String id, int bytes})>[];
+      final byId = <String, HtmlCapture>{};
+      for (final c in candidates) {
+        int bytes = 0;
+        try { bytes = await File(c.filePath).length(); } catch (_) {}
+        sized.add((id: c.id, bytes: bytes));
+        byId[c.id] = c;
+      }
+      final doomed = CachePressureValve.pickToDrop(oldestFirst: sized, bytesNeeded: need);
+      if (doomed.isEmpty) return;
+
+      int freed = 0, deleted = 0;
+      final dropped = <HtmlCapture>[];
+      for (final id in doomed) {
+        final c = byId[id]!;
+        try {
+          final f = File(c.filePath);
+          if (await f.exists()) { freed += await f.length(); await f.delete(); deleted++; }
+          dropped.add(c);
+        } catch (e) {
+          print('[BackgroundSync] could not drop ${c.filePath}: $e');
+        }
+      }
+      if (dropped.isEmpty) return;
+      // Retire the rows so the upload queue never looks for these files.
+      await database.markHtmlCapturesAsSynced(dropped.map((c) => c.id).toList());
+      final times = dropped.map((c) => c.capturedAt).toList()..sort();
+      final first = dropped.first;
+      await database.insertEvent(EventsCompanion(
+        id: Value(const Uuid().v4()),
+        sessionId: Value(first.sessionId),
+        participantId: Value(first.participantId),
+        eventType: const Value('html_dropped_for_space'),
+        timestamp: Value(DateTime.now()),
+        platform: Value(first.platform),
+        data: Value(jsonEncode({
+          'count': dropped.length,
+          'filesDeleted': deleted,
+          'bytesFreed': freed,
+          'usageMbBefore': usage ~/ 1048576,
+          'capMb': ScreenshotService.maxLocalStorageMb,
+          'oldestCapturedAt': times.first.toIso8601String(),
+          'newestCapturedAt': times.last.toIso8601String(),
+          'eventIds': dropped.take(50).map((c) => c.eventId).toList(),
+        })),
+      ));
+      print('[BackgroundSync] Cache pressure: dropped ${dropped.length} oldest unsent HTML captures '
+          '(${freed ~/ 1048576} MB) — cache was ${usage ~/ 1048576} MB of ${ScreenshotService.maxLocalStorageMb} MB');
+    } catch (e) {
+      print('[BackgroundSync] cache pressure check error: $e');
     }
   }
 

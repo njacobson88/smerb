@@ -457,13 +457,32 @@ class AppDatabase extends _$AppDatabase {
     return into(htmlCaptures).insert(capture);
   }
 
-  /// Get unsynced HTML captures
-  Future<List<HtmlCapture>> getUnsyncedHtmlCaptures({int? limit}) {
-    final query = select(htmlCaptures)..where((h) => h.synced.equals(false));
+  /// Get unsynced HTML captures, oldest first. [excludeIds] (rows that failed
+  /// earlier in the same stage run) are skipped so they cannot pin the head
+  /// of the queue; the list is capped well below SQLite's variable limit.
+  Future<List<HtmlCapture>> getUnsyncedHtmlCaptures({int? limit, List<String> excludeIds = const []}) {
+    final ids = excludeIds.take(900).toList();
+    final query = select(htmlCaptures)
+      ..where((h) => ids.isEmpty ? h.synced.equals(false) : (h.synced.equals(false) & h.id.isNotIn(ids)))
+      ..orderBy([(h) => OrderingTerm.asc(h.capturedAt)]);
     if (limit != null) {
       query.limit(limit);
     }
     return query.get();
+  }
+
+  /// Count of unsynced HTML captures (COUNT, not a row load).
+  Future<int> getUnsyncedHtmlCaptureCount() async {
+    final c = countAll();
+    final q = selectOnly(htmlCaptures)..addColumns([c])..where(htmlCaptures.synced.equals(false));
+    return (await q.getSingle()).read(c) ?? 0;
+  }
+
+  /// Count of unsynced HTML status logs (COUNT, not a row load).
+  Future<int> getUnsyncedHtmlStatusLogCount() async {
+    final c = countAll();
+    final q = selectOnly(htmlStatusLogs)..addColumns([c])..where(htmlStatusLogs.synced.equals(false));
+    return (await q.getSingle()).read(c) ?? 0;
   }
 
   /// Mark HTML captures as synced
@@ -496,11 +515,11 @@ class AppDatabase extends _$AppDatabase {
         .write(const HtmlStatusLogsCompanion(synced: Value(true)));
   }
 
-  /// Get pending HTML status log count
+  /// Get pending HTML sync count (captures + status logs). Used every sync
+  /// cycle — it used to load every pending row (11k on a backlogged device)
+  /// just to count them.
   Future<int> getPendingHtmlSyncCount() async {
-    final unsyncedCaptures = await getUnsyncedHtmlCaptures();
-    final unsyncedLogs = await getUnsyncedHtmlStatusLogs();
-    return unsyncedCaptures.length + unsyncedLogs.length;
+    return await getUnsyncedHtmlCaptureCount() + await getUnsyncedHtmlStatusLogCount();
   }
 
   // ==========================================================================

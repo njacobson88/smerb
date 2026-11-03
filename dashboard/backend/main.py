@@ -1455,9 +1455,17 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
         "timestamp", "<", end_dt + timedelta(days=1)
     ).select([
         "timestamp", "createdAt", "eventType", "type", "platform", "ocr.wordCount",
+        # HTML page uploads lag screenshots by design and stalled outright on
+        # app 1.0.23/1.0.24 (2026-11-03); the overview flags a stall.
+        "html.charCount", "data.count",
     ])
 
     events = list(events_query.stream())
+    last_screenshot_at = None
+    last_html_capture_at = None
+    html_captures = 0
+    html_dropped = 0        # html_dropped_for_space (cache valve) — pages lost
+    html_unsyncable = 0     # html_capture_unsyncable — rows whose file vanished
 
     # Aggregate by day
     daily_status = defaultdict(lambda: {
@@ -1487,6 +1495,13 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
 
         if event_type == "screenshot":
             daily_status[event_date]["screenshots"] += 1
+            if hasattr(captured_at, "timestamp") and (last_screenshot_at is None or captured_at > last_screenshot_at):
+                last_screenshot_at = captured_at
+            html = event.get("html") or {}
+            if isinstance(html, dict) and html.get("charCount"):
+                html_captures += 1
+                if hasattr(captured_at, "timestamp") and (last_html_capture_at is None or captured_at > last_html_capture_at):
+                    last_html_capture_at = captured_at
             ocr = event.get("ocr", {})
             if ocr:
                 daily_status[event_date]["ocr_chars"] += ocr.get("wordCount", 0) * 5
@@ -1498,6 +1513,17 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
                 daily_status[event_date]["twitter"] += 1
         elif event_type == "checkin":
             daily_status[event_date]["checkins"] += 1
+        elif event_type in ("html_dropped_for_space", "html_capture_unsyncable"):
+            data = event.get("data") or {}
+            n = data.get("count") if isinstance(data, dict) else None
+            try:
+                n = int(n or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if event_type == "html_dropped_for_space":
+                html_dropped += n
+            else:
+                html_unsyncable += n
 
     # Get safety alerts
     try:
@@ -1556,7 +1582,15 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
     except Exception as e:
         logger.debug(f"Silently handled exception: {e}")
 
-    return dict(daily_status)
+    out = dict(daily_status)
+    out["_html"] = {
+        "lastScreenshotAt": last_screenshot_at.isoformat() if last_screenshot_at is not None else None,
+        "lastHtmlCaptureAt": last_html_capture_at.isoformat() if last_html_capture_at is not None else None,
+        "htmlCaptures": html_captures,
+        "htmlDropped": html_dropped,
+        "htmlUnsyncable": html_unsyncable,
+    }
+    return out
 
 
 CACHE_REFRESH_WORKERS = int(os.environ.get("CACHE_REFRESH_WORKERS", "8"))
@@ -1569,6 +1603,7 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
     pid = p_info["id"]
     study_start = resolve_study_start(p_info.get("data"), start_dt)
     daily_status = compute_participant_stats(pid, start_dt, end_dt)
+    html_meta = daily_status.pop("_html", {})   # not a day; see compute_participant_stats
     # The participant page's day-by-day totals (see daily_summary.py). A
     # failure here must not cost the overview row.
     try:
@@ -1596,6 +1631,14 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
     return {
         "id": pid,
         "study_start_date": study_start.strftime("%Y-%m-%d") if study_start else None,
+        # HTML page-capture health over the 14-day window. A participant whose
+        # screenshots are recent but whose last HTML upload is days older has a
+        # stalled HTML queue (see app 1.0.25 notes) — flagged on the overview.
+        "lastScreenshotAt": html_meta.get("lastScreenshotAt"),
+        "lastHtmlCaptureAt": html_meta.get("lastHtmlCaptureAt"),
+        "htmlCaptures": html_meta.get("htmlCaptures", 0),
+        "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
+        "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
         # Computed here, once an hour. The page-load path used to recompute it
         # for every participant on every request — 42 serial Firestore queries
         # per overview load, ~7 s median (2026-10-30).
@@ -2027,6 +2070,11 @@ def get_overall_status(
                     "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
                     "captureDiskPaused": p_data.get("captureDiskPaused", False),
                     "captureDiskUsageMb": p_data.get("captureDiskUsageMb"),
+                    "lastScreenshotAt": html_meta.get("lastScreenshotAt"),
+                    "lastHtmlCaptureAt": html_meta.get("lastHtmlCaptureAt"),
+                    "htmlCaptures": html_meta.get("htmlCaptures", 0),
+                    "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
+                    "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
                     # True until the next cache rebuild picks this participant up.
                     "awaitingStats": pid not in cached_by_id,
                 })
@@ -2104,6 +2152,7 @@ def get_overall_status(
 
             # Use the helper function for computing stats
             daily_status = compute_participant_stats(pid, start_dt, end_dt)
+            html_meta = daily_status.pop("_html", {})   # not a day; see compute_participant_stats
 
             # Calculate totals
             total_screenshots = sum(d.get("screenshots", 0) for d in daily_status.values())

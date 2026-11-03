@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../../../core/config/environment_config.dart';
@@ -29,6 +31,13 @@ class StageBudget {
     if (DateTime.now().isBefore(_deadline!)) return true;
     exceeded = true;
     return false;
+  }
+
+  /// Time left before the deadline (zero once passed; unbounded stays zero too).
+  Duration get remaining {
+    if (_deadline == null) return Duration.zero;
+    final left = _deadline!.difference(DateTime.now());
+    return left.isNegative ? Duration.zero : left;
   }
 }
 
@@ -552,7 +561,16 @@ class UploadService {
   // OCR results are now batch-synced in syncOcrResults() above
 
   /// Sync HTML captures to Firebase (uploads HTML files and updates event docs)
-  /// Returns the number of HTML captures synced
+  /// Returns the number of HTML captures synced.
+  ///
+  /// Queue discipline (2026-11-03): oldest first; a row whose file no longer
+  /// exists can never upload and is retired on the spot (and counted in an
+  /// `html_capture_unsyncable` event); a row that fails for any other reason
+  /// is skipped for the rest of this stage run so it cannot pin the head of
+  /// the queue; each row is marked synced BEFORE its file is deleted, so an
+  /// app kill between the two can no longer strand a row pointing at a
+  /// missing file. Uploads run a few at a time — they are small and
+  /// latency-bound.
   Future<int> syncHtmlCaptures({int batchSize = 50, StageBudget? budget}) async {
     if (_isSyncingHtml) {
       print('[UploadService] HTML sync already in progress, skipping');
@@ -561,37 +579,35 @@ class UploadService {
 
     _isSyncingHtml = true;
     int totalSynced = 0;
+    final skip = <String>{};
+    final retired = <HtmlCapture>[];
 
     try {
       List<HtmlCapture> unsyncedCaptures;
-
       do {
-        unsyncedCaptures = await database.getUnsyncedHtmlCaptures(limit: batchSize);
-
+        unsyncedCaptures = await database.getUnsyncedHtmlCaptures(
+            limit: batchSize, excludeIds: skip.toList());
         if (unsyncedCaptures.isEmpty) break;
 
         print('[UploadService] Processing batch of ${unsyncedCaptures.length} HTML captures');
 
-        final syncedIds = <String>[];
-
-        for (final capture in unsyncedCaptures) {
-          if (budget != null && !budget.hasTime) break; // per-file: each upload can take up to 30 s
-          try {
-            await _uploadHtmlCapture(capture);
-            syncedIds.add(capture.id);
-          } catch (e) {
-            print('[UploadService] Failed to sync HTML capture ${capture.id}: $e');
-          }
+        int attempted = 0;
+        for (var i = 0; i < unsyncedCaptures.length; i += htmlUploadParallelism) {
+          if (budget != null && !budget.hasTime) break; // per-chunk: each upload can take up to 30 s
+          final chunk = unsyncedCaptures.sublist(
+              i, math.min(i + htmlUploadParallelism, unsyncedCaptures.length));
+          attempted += chunk.length;
+          final results = await Future.wait(
+              chunk.map((c) => _syncOneHtmlCapture(c, skip, retired)));
+          totalSynced += results.where((ok) => ok).length;
         }
+        if (attempted == 0) break;
+      } while (budget?.hasTime ?? true);
 
-        if (syncedIds.isNotEmpty) {
-          await database.markHtmlCapturesAsSynced(syncedIds);
-          totalSynced += syncedIds.length;
-          print('[UploadService] Marked ${syncedIds.length} HTML captures as synced');
-        }
-
-      } while (unsyncedCaptures.length == batchSize && (budget?.hasTime ?? true));
-
+      if (retired.isNotEmpty) {
+        print('[UploadService] Retired ${retired.length} HTML captures whose file no longer exists');
+        await _recordUnsyncableHtml(retired);
+      }
       print('[UploadService] HTML capture sync complete. Total: $totalSynced');
       return totalSynced;
 
@@ -600,6 +616,61 @@ class UploadService {
       rethrow;
     } finally {
       _isSyncingHtml = false;
+    }
+  }
+
+  /// How many HTML uploads run concurrently within one chunk.
+  static const int htmlUploadParallelism = 3;
+
+  /// Upload one capture, mark its row synced, then delete its file.
+  /// Returns true on success. Failures are recorded in [skip] (retry next
+  /// stage run) or [retired] (file gone: never retried).
+  Future<bool> _syncOneHtmlCapture(
+      HtmlCapture capture, Set<String> skip, List<HtmlCapture> retired) async {
+    try {
+      if (!await File(capture.filePath).exists()) {
+        await database.markHtmlCapturesAsSynced([capture.id]);
+        retired.add(capture);
+        return false;
+      }
+      await _uploadHtmlCapture(capture);
+      await database.markHtmlCapturesAsSynced([capture.id]);
+      try {
+        await File(capture.filePath).delete();
+      } catch (e) {
+        print('[UploadService] Warning: could not delete local HTML file: $e');
+      }
+      return true;
+    } catch (e) {
+      skip.add(capture.id);
+      print('[UploadService] Failed to sync HTML capture ${capture.id}: $e');
+      return false;
+    }
+  }
+
+  /// One local event per stage run naming the captures that could never be
+  /// uploaded, so the loss is visible in Firestore rather than only in logs.
+  Future<void> _recordUnsyncableHtml(List<HtmlCapture> retired) async {
+    try {
+      final first = retired.first;
+      final times = retired.map((c) => c.capturedAt).toList()..sort();
+      await database.insertEvent(EventsCompanion(
+        id: Value(const Uuid().v4()),
+        sessionId: Value(first.sessionId),
+        participantId: Value(first.participantId),
+        eventType: const Value('html_capture_unsyncable'),
+        timestamp: Value(DateTime.now()),
+        platform: Value(first.platform),
+        data: Value(jsonEncode({
+          'count': retired.length,
+          'reason': 'file_missing',
+          'oldestCapturedAt': times.first.toIso8601String(),
+          'newestCapturedAt': times.last.toIso8601String(),
+          'eventIds': retired.take(50).map((c) => c.eventId).toList(),
+        })),
+      ));
+    } catch (e) {
+      print('[UploadService] Could not record unsyncable HTML captures: $e');
     }
   }
 
@@ -639,7 +710,16 @@ class UploadService {
         throw Exception('HTML upload timed out after 30s');
       },
     );
-    final downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'html getDownloadURL');
+    // Best-effort: nothing downstream needs this URL (the dashboard signs
+    // URLs from storagePath and the hourly transcode rewrites it anyway), and
+    // the read rule needs a signed-in participant, so it must never fail the
+    // upload.
+    String? downloadUrl;
+    try {
+      downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'html getDownloadURL');
+    } catch (e) {
+      print('[UploadService] html getDownloadURL failed (continuing): $e');
+    }
 
     // Update the event document with HTML data using dot notation
     // to avoid overwriting fields set by status log sync
@@ -663,13 +743,7 @@ class UploadService {
     }, SetOptions(merge: true)), 'html event set');
 
     print('[UploadService] Uploaded HTML capture: $storagePath');
-
-    // Delete local file after confirmed upload
-    try {
-      await file.delete();
-    } catch (e) {
-      print('[UploadService] Warning: could not delete local HTML file: $e');
-    }
+    // The caller marks the row synced and only then deletes the file.
   }
 
   /// Sync HTML status logs to Firebase (updates event docs with HTML status)
@@ -1045,6 +1119,10 @@ class UploadService {
   /// soon rather than wait for the next timer tick.
   static const Duration eventsStageBudget = Duration(seconds: 20);
   static const Duration otherStageBudget = Duration(seconds: 5);
+  // HTML pages are the second-largest stream (~125 KB gzipped per capture,
+  // up to one per screenshot) and get their own, larger slice. Any time the
+  // screenshot stage leaves unused is handed to it as well.
+  static const Duration htmlStageBudget = Duration(seconds: 10);
 
   Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
     // Reset counters
@@ -1081,37 +1159,44 @@ class UploadService {
     // Every stage is now isolated via _syncStage so one failure can never starve
     // the ones after it, and the two that must never be lost run before the
     // bulk uploads can fail.
-    final emaBudget = StageBudget(otherStageBudget);
-    final eventsBudget = StageBudget(eventsStageBudget);
-    final contentBudget = StageBudget(otherStageBudget);
-    final ocrBudget = StageBudget(otherStageBudget);
-    final htmlBudget = StageBudget(otherStageBudget);
-    final htmlLogBudget = StageBudget(otherStageBudget);
-
+    // Each budget is started the moment ITS stage starts. 1.0.23 created all
+    // six up front with fixed deadlines, so by the time the screenshot stage
+    // had used its 20 s every later stage's 5 s window had already closed:
+    // any stage that checks the budget before its first item (HTML captures,
+    // content events) then uploaded nothing, cycle after cycle. Reproduced on
+    // the emulator 2026-11-03; in the live study it stopped HTML page uploads
+    // for a heavy participant on 10-29 and filled their 2 GB cache.
     final safetyAlertsSynced =
         await _syncStage('safetyAlerts', () => syncSafetyAlerts());
+    final emaBudget = StageBudget(otherStageBudget);
     final emaSynced = await _syncStage(
         'emaResponses', () => syncEmaResponses(batchSize: eventBatchSize, budget: emaBudget));
 
     // Bulk data. Relative order preserved: events must sync before the OCR/HTML
     // stages that update those same event docs.
+    final eventsBudget = StageBudget(eventsStageBudget);
     final eventsSynced =
         await _syncStage('events', () => syncEvents(batchSize: eventBatchSize, budget: eventsBudget));
 
     // Offload high-frequency analytics events to compressed GCS objects
     // (content_visible / content_exposure) — not individual Firestore docs.
+    final contentBudget = StageBudget(otherStageBudget);
     final contentEventsSynced =
         await _syncStage('contentEvents', () => syncContentEvents(budget: contentBudget));
 
     // Sync any remaining OCR results (for events that were synced before OCR was done)
+    final ocrBudget = StageBudget(otherStageBudget);
     final ocrSynced =
         await _syncStage('ocrResults', () => syncOcrResults(batchSize: ocrBatchSize, budget: ocrBudget));
 
-    // Sync HTML captures (upload files + update events)
+    // Sync HTML captures (upload files + update events). Gets its own slice
+    // plus whatever the screenshot stage did not use.
+    final htmlBudget = StageBudget(htmlStageBudget + eventsBudget.remaining);
     final htmlCapturesSynced = await _syncStage(
         'htmlCaptures', () => syncHtmlCaptures(batchSize: eventBatchSize, budget: htmlBudget));
 
     // Sync HTML status logs (update events with unchanged status)
+    final htmlLogBudget = StageBudget(otherStageBudget);
     final htmlStatusLogsSynced = await _syncStage(
         'htmlStatusLogs', () => syncHtmlStatusLogs(batchSize: eventBatchSize, budget: htmlLogBudget));
 

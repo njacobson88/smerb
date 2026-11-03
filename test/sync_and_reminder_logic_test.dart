@@ -15,6 +15,18 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 60));
       expect(b.hasTime, isFalse);
       expect(b.exceeded, isTrue);
+      expect(b.remaining, Duration.zero);
+    });
+    test('remaining shrinks from the limit and a fresh budget starts full', () async {
+      // 1.0.23 built every stage budget at the top of syncAll, so a budget
+      // "started" 20 s earlier had nothing left when its stage began. A stage
+      // budget must be created when the stage starts.
+      final b = StageBudget(const Duration(seconds: 5));
+      expect(b.remaining.inMilliseconds, greaterThan(4900));
+      expect(b.remaining.inMilliseconds, lessThanOrEqualTo(5000));
+      expect(StageBudget.unlimited().remaining, Duration.zero);
+      final later = StageBudget(const Duration(seconds: 10) + b.remaining);
+      expect(later.remaining.inMilliseconds, greaterThan(14800));
     });
   });
 

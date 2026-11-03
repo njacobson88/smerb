@@ -68,3 +68,47 @@ class LocalMediaRetention {
     return out;
   }
 }
+
+/// Cache-pressure valve — pure decision logic, unit-tested.
+///
+/// Why (2026-11-03): the app's own cache cap (2 GB of screenshots + HTML)
+/// pauses screenshot capture when hit. Unsynced HTML is never swept, so once
+/// HTML uploads fall behind (they stalled outright on 1.0.23, see
+/// UploadService.syncAll) four days of page HTML can fill the cache and stop
+/// the primary data stream. The PI's call: screenshots come first. When the
+/// cache is nearly full, drop the OLDEST unsent HTML — just enough to get
+/// comfortably under the cap — and record exactly what was dropped.
+class CachePressureValve {
+  CachePressureValve._();
+
+  /// Start dropping when usage reaches this fraction of the cap…
+  static const double triggerFraction = 0.95;
+  /// …and stop once it is back down to this fraction.
+  static const double targetFraction = 0.85;
+
+  /// Bytes that must be freed, or 0 when usage is below the trigger.
+  static int bytesToFree({required int usageBytes, required int capBytes,
+      double trigger = triggerFraction, double target = targetFraction}) {
+    if (capBytes <= 0 || usageBytes < capBytes * trigger) return 0;
+    final need = usageBytes - (capBytes * target).floor();
+    return need > 0 ? need : 0;
+  }
+
+  /// Pick candidates (oldest first, with their sizes) until [bytesNeeded] is
+  /// covered. Returns the chosen ids in order. Never picks more than needed;
+  /// never picks anything when nothing is needed.
+  static List<String> pickToDrop({
+    required Iterable<({String id, int bytes})> oldestFirst,
+    required int bytesNeeded,
+  }) {
+    final out = <String>[];
+    if (bytesNeeded <= 0) return out;
+    var freed = 0;
+    for (final c in oldestFirst) {
+      if (freed >= bytesNeeded) break;
+      out.add(c.id);
+      freed += c.bytes;
+    }
+    return out;
+  }
+}
