@@ -139,6 +139,10 @@ class BackgroundSyncService {
       // recovers within seconds of opening the app.
       if (!_sweptSinceLaunch) {
         _sweptSinceLaunch = true;
+        // Before the sweep: an iOS update renames the app's folder, and a
+        // sweep against stale paths would delete every unsent file as an
+        // orphan (see LocalPathRebase).
+        await _rebaseLocalPaths();
         await _sweepLocalMedia();
         await _relieveCachePressure();
       }
@@ -197,6 +201,51 @@ class BackgroundSyncService {
         _followUpTimer = Timer(const Duration(seconds: 2), _runSyncCycle);
       }
     }
+  }
+
+  /// Point every stored screenshot / HTML path at the CURRENT documents
+  /// folder. iOS renames the app container on every update, which until
+  /// 1.0.26 made every file still awaiting upload unreachable — and then
+  /// swept as an orphan. Runs once per launch, before anything opens files.
+  Future<void> _rebaseLocalPaths() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final r = await database.rebaseStoredPaths(docs.path);
+      if (r.screenshotRows == 0 && r.htmlRows == 0) return;
+      print('[BackgroundSync] Rebased stored paths onto ${docs.path}: '
+          '${r.screenshotRows} screenshot rows, ${r.htmlRows} HTML rows '
+          '(old prefixes: ${r.oldPrefixes.length})');
+      final pid = await database.getLatestParticipantId();
+      if (pid == null) return;
+      await database.insertEvent(EventsCompanion(
+        id: Value(const Uuid().v4()),
+        sessionId: const Value('system'),
+        participantId: Value(pid),
+        eventType: const Value('local_paths_rebased'),
+        timestamp: Value(DateTime.now()),
+        platform: Value(Platform.isIOS ? 'ios' : 'android'),
+        data: Value(jsonEncode({
+          'screenshotRows': r.screenshotRows,
+          'htmlRows': r.htmlRows,
+          'oldPrefixCount': r.oldPrefixes.length,
+          // The install-specific segment: the container UUID on iOS
+          // (…/Application/<UUID>/Documents), the package dir on Android.
+          'oldPrefixes': r.oldPrefixes.map(_installSegment).take(10).toList(),
+          'newPrefix': _installSegment(docs.path),
+        })),
+      ));
+    } catch (e) {
+      print('[BackgroundSync] path rebase error: $e');
+    }
+  }
+
+  static String _installSegment(String dir) {
+    final parts = dir.split('/').where((p) => p.isNotEmpty).toList();
+    const generic = {'Documents', 'app_flutter', 'files'};
+    for (final p in parts.reversed) {
+      if (!generic.contains(p)) return p;
+    }
+    return dir;
   }
 
   /// Delete screenshot files that are uploaded and either OCR'd or past the

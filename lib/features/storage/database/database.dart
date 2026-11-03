@@ -3,6 +3,7 @@ import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import '../services/local_path_rebase.dart';
 
 part 'database.g.dart';
 
@@ -131,6 +132,9 @@ class OcrResults extends Table {
 @DriftDatabase(tables: [Events, Sessions, OcrResults, HtmlCaptures, HtmlStatusLogs, EmaResponses, LocalSafetyAlerts])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
+
+  /// For unit tests: run the real schema on any executor (in-memory sqlite).
+  AppDatabase.forTesting(super.executor);
 
   @override
   int get schemaVersion => 7;
@@ -429,6 +433,65 @@ class AppDatabase extends _$AppDatabase {
                  ocrDone: (r.data['all_ocr'] as int? ?? 0) == 1);
     }
     return out;
+  }
+
+  /// Rewrite every stored screenshot / HTML file path whose prefix is not the
+  /// current documents directory (iOS renames the app container on every
+  /// update — see LocalPathRebase). Returns (screenshotRows, htmlRows,
+  /// oldPrefixes). Must run before anything that opens those files: the
+  /// launch sweep, OCR, uploads, the cache valve.
+  Future<({int screenshotRows, int htmlRows, Set<String> oldPrefixes})> rebaseStoredPaths(String docsDir) async {
+    final root = docsDir.endsWith('/') ? docsDir.substring(0, docsDir.length - 1) : docsDir;
+    final prefix = '$root/';
+    final prefixes = <String>{};
+    int shots = 0, html = 0;
+
+    final shotRows = await customSelect(
+      "SELECT id, json_extract(data, '\$.filePath') AS fp FROM events "
+      "WHERE event_type = 'screenshot' AND json_extract(data, '\$.filePath') IS NOT NULL "
+      'AND substr(json_extract(data, \'\$.filePath\'), 1, ?) != ?',
+      variables: [Variable.withInt(prefix.length), Variable.withString(prefix)],
+      readsFrom: {events},
+    ).get();
+    final htmlRows = await customSelect(
+      'SELECT id, file_path FROM html_captures WHERE substr(file_path, 1, ?) != ?',
+      variables: [Variable.withInt(prefix.length), Variable.withString(prefix)],
+      readsFrom: {htmlCaptures},
+    ).get();
+    if (shotRows.isEmpty && htmlRows.isEmpty) {
+      return (screenshotRows: 0, htmlRows: 0, oldPrefixes: prefixes);
+    }
+
+    await transaction(() async {
+      for (final r in shotRows) {
+        final fp = r.data['fp'] as String?;
+        final np = fp == null ? null : LocalPathRebase.rebase(fp, root);
+        if (np == null) continue;
+        prefixes.add(LocalPathRebase.prefixOf(fp!) ?? '?');
+        await customStatement(
+          "UPDATE events SET data = json_set(data, '\$.filePath', ?) WHERE id = ?",
+          [np, r.data['id'] as String],
+        );
+        shots++;
+      }
+      for (final r in htmlRows) {
+        final fp = r.data['file_path'] as String;
+        final np = LocalPathRebase.rebase(fp, root);
+        if (np == null) continue;
+        prefixes.add(LocalPathRebase.prefixOf(fp) ?? '?');
+        await customStatement('UPDATE html_captures SET file_path = ? WHERE id = ?', [np, r.data['id'] as String]);
+        html++;
+      }
+    });
+    return (screenshotRows: shots, htmlRows: html, oldPrefixes: prefixes);
+  }
+
+  /// The participant id on the most recent event row, if any (for system
+  /// events that are not tied to a session).
+  Future<String?> getLatestParticipantId() async {
+    final r = await customSelect('SELECT participant_id FROM events ORDER BY timestamp DESC LIMIT 1',
+        readsFrom: {events}).getSingleOrNull();
+    return r?.data['participant_id'] as String?;
   }
 
   /// Every HTML file path still referenced by an html_captures row.
