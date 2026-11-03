@@ -2070,11 +2070,14 @@ def get_overall_status(
                     "overallCompliance": min(100, int((total_checkins / (days_count * config.EMA_PROMPTS_PER_DAY)) * 100)) if days_count > 0 else 0,
                     "captureDiskPaused": p_data.get("captureDiskPaused", False),
                     "captureDiskUsageMb": p_data.get("captureDiskUsageMb"),
-                    "lastScreenshotAt": html_meta.get("lastScreenshotAt"),
-                    "lastHtmlCaptureAt": html_meta.get("lastHtmlCaptureAt"),
-                    "htmlCaptures": html_meta.get("htmlCaptures", 0),
-                    "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
-                    "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
+                    # HTML health fields are computed by the hourly cache row
+                    # (see _build_participant_cache_entry); absent until the
+                    # first rebuild after this version deploys.
+                    "lastScreenshotAt": cached.get("lastScreenshotAt"),
+                    "lastHtmlCaptureAt": cached.get("lastHtmlCaptureAt"),
+                    "htmlCaptures": cached.get("htmlCaptures", 0),
+                    "htmlDroppedForSpace": cached.get("htmlDroppedForSpace", 0),
+                    "htmlUnsyncable": cached.get("htmlUnsyncable", 0),
                     # True until the next cache rebuild picks this participant up.
                     "awaitingStats": pid not in cached_by_id,
                 })
