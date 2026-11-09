@@ -51,4 +51,12 @@ void main() {
       expect(d(lastScheduledDate: '2026-10-21', todayDate: '2026-10-21', pendingReminderIds: [], expectedCount: 0), isNull);
     });
   });
+
+  group('HTML upload failure policy', () {
+    test('a capture is set aside only after repeated failures in one process', () {
+      expect(UploadService.shouldSetAsideForSession(0), isFalse);
+      expect(UploadService.shouldSetAsideForSession(UploadService.htmlMaxFailuresPerSession - 1), isFalse);
+      expect(UploadService.shouldSetAsideForSession(UploadService.htmlMaxFailuresPerSession), isTrue);
+    });
+  });
 }

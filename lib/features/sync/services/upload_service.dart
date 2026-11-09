@@ -579,7 +579,13 @@ class UploadService {
 
     _isSyncingHtml = true;
     int totalSynced = 0;
-    final skip = <String>{};
+    // Captures that failed repeatedly this process are left out of every
+    // batch: one poison file must never block everything captured after it.
+    final skip = <String>{
+      for (final e in _htmlFailures.entries)
+        if (shouldSetAsideForSession(e.value)) e.key,
+    };
+    final failuresBefore = _htmlFailures.values.fold<int>(0, (a, b) => a + b);
     final retired = <HtmlCapture>[];
 
     try {
@@ -608,6 +614,9 @@ class UploadService {
         print('[UploadService] Retired ${retired.length} HTML captures whose file no longer exists');
         await _recordUnsyncableHtml(retired);
       }
+      if (_htmlFailures.values.fold<int>(0, (a, b) => a + b) > failuresBefore) {
+        await _recordHtmlUploadFailures();
+      }
       print('[UploadService] HTML capture sync complete. Total: $totalSynced');
       return totalSynced;
 
@@ -621,6 +630,52 @@ class UploadService {
 
   /// How many HTML uploads run concurrently within one chunk.
   static const int htmlUploadParallelism = 3;
+
+  /// Upload failures per capture id in this process (reset on restart, so a
+  /// transient cause gets a fresh chance next launch).
+  final Map<String, int> _htmlFailures = {};
+  String? _lastHtmlError;
+  DateTime? _lastHtmlFailureEventAt;
+
+  /// After this many failed attempts in one process a capture is set aside
+  /// (still on disk, still unsynced — retried after the next app restart).
+  static const int htmlMaxFailuresPerSession = 3;
+  static bool shouldSetAsideForSession(int failures) => failures >= htmlMaxFailuresPerSession;
+
+  /// Minimum spacing between html_upload_failed events (the stage runs every
+  /// 30 s; a persistently broken device must not write thousands of these).
+  static const Duration htmlFailureEventInterval = Duration(minutes: 30);
+
+  /// One event naming what is going wrong, so the dashboard can show the
+  /// reason instead of only "HTML not uploading".
+  Future<void> _recordHtmlUploadFailures() async {
+    try {
+      final now = DateTime.now();
+      if (_lastHtmlFailureEventAt != null &&
+          now.difference(_lastHtmlFailureEventAt!) < htmlFailureEventInterval) return;
+      final pid = await database.getLatestParticipantId();
+      if (pid == null) return;
+      final setAside = _htmlFailures.values.where(shouldSetAsideForSession).length;
+      _lastHtmlFailureEventAt = now;
+      await database.insertEvent(EventsCompanion(
+        id: Value(const Uuid().v4()),
+        sessionId: const Value('system'),
+        participantId: Value(pid),
+        eventType: const Value('html_upload_failed'),
+        timestamp: Value(now),
+        platform: const Value('system'),
+        data: Value(jsonEncode({
+          'failingCaptures': _htmlFailures.length,
+          'setAsideThisSession': setAside,
+          'lastError': (_lastHtmlError ?? '').substring(0, math.min(300, (_lastHtmlError ?? '').length)),
+          'pendingHtml': await database.getUnsyncedHtmlCaptureCount(),
+        })),
+      ));
+      print('[UploadService] Recorded html_upload_failed: ${_htmlFailures.length} failing, $setAside set aside, last: $_lastHtmlError');
+    } catch (e) {
+      print('[UploadService] could not record html_upload_failed: $e');
+    }
+  }
 
   /// Upload one capture, mark its row synced, then delete its file.
   /// Returns true on success. Failures are recorded in [skip] (retry next
@@ -643,7 +698,10 @@ class UploadService {
       return true;
     } catch (e) {
       skip.add(capture.id);
-      print('[UploadService] Failed to sync HTML capture ${capture.id}: $e');
+      _htmlFailures[capture.id] = (_htmlFailures[capture.id] ?? 0) + 1;
+      _lastHtmlError = e.toString();
+      print('[UploadService] Failed to sync HTML capture ${capture.id} '
+          '(attempt ${_htmlFailures[capture.id]}): $e');
       return false;
     }
   }
@@ -721,26 +779,35 @@ class UploadService {
       print('[UploadService] html getDownloadURL failed (continuing): $e');
     }
 
-    // Update the event document with HTML data using dot notation
-    // to avoid overwriting fields set by status log sync
-    await _net(_firestore
-        .collection(EnvConfig.col('participants'))
-        .doc(capture.participantId)
-        .collection('events')
-        .doc(capture.eventId)
-        .set({
-      // Nested map, NOT dotted keys: set(merge) treats dotted keys as literal
-      // field names, which breaks the Cloud Functions' update("html.x") calls
-      'html': {
-        'storageUrl': downloadUrl,
-        'storagePath': storagePath,
-        'charCount': capture.charCount,
-        'hash': capture.htmlHash,
-        'changed': true,
-        'capturedAt': Timestamp.fromDate(capture.capturedAt),
-      },
-      'htmlSyncedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true)), 'html event set');
+    // Record the upload on the event document. A timed-out write is already
+    // in the SDK's durable queue and WILL land (see _isQueuedFirestoreTimeout);
+    // treating it as a failure made one phone re-upload the same 25 pages
+    // every cycle for four weeks (322475615, 2026-10-14 → 11-09: every ack
+    // took longer than the timeout, the row was never marked synced, and
+    // nothing captured after that date ever left the device).
+    try {
+      await _net(_firestore
+          .collection(EnvConfig.col('participants'))
+          .doc(capture.participantId)
+          .collection('events')
+          .doc(capture.eventId)
+          .set({
+        // Nested map, NOT dotted keys: set(merge) treats dotted keys as literal
+        // field names, which breaks the Cloud Functions' update("html.x") calls
+        'html': {
+          'storageUrl': downloadUrl,
+          'storagePath': storagePath,
+          'charCount': capture.charCount,
+          'hash': capture.htmlHash,
+          'changed': true,
+          'capturedAt': Timestamp.fromDate(capture.capturedAt),
+        },
+        'htmlSyncedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true)), 'html event set');
+    } catch (e) {
+      if (!_isQueuedFirestoreTimeout(e)) rethrow;
+      print('[UploadService] html event set timed out for ${capture.eventId} — queued by the SDK');
+    }
 
     print('[UploadService] Uploaded HTML capture: $storagePath');
     // The caller marks the row synced and only then deletes the file.
@@ -965,7 +1032,12 @@ class UploadService {
       'syncedAt': FieldValue.serverTimestamp(),
     };
 
-    await _net(docRef.set(data), 'doc set');
+    try {
+      await _net(docRef.set(data), 'ema doc set');
+    } catch (e) {
+      if (!_isQueuedFirestoreTimeout(e)) rethrow;
+      print('[UploadService] ema doc set timed out for ${response.id} — queued by the SDK');
+    }
     print('[UploadService] Uploaded EMA response: ${response.id}');
   }
 
