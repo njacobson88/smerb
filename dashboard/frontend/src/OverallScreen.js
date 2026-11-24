@@ -626,9 +626,9 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
                           {htmlStall(participant) && (
                             <span
                               className="ml-2 px-1.5 py-0.5 text-xs rounded bg-orange-100 text-orange-800 border border-orange-300"
-                              title={`HTML page captures are not uploading: screenshots are current but the last HTML page upload was ${participant.lastHtmlCaptureAt ? participant.lastHtmlCaptureAt.slice(0, 10) : 'never in the last 14 days'}. Unsent HTML stays on the phone and fills the app cache. Fixed in app 1.0.25; the backlog drains after the update.`}
+                              title={`HTML page captures are not uploading: screenshots are current but the last HTML page upload was ${participant.lastHtmlCaptureAt ? participant.lastHtmlCaptureAt.slice(0, 10) : 'never in the last 14 days'}. Unsent HTML stays on the phone and fills the app cache.${participant.htmlLastFailure ? ` Latest error reported by the app (${participant.htmlLastFailure.at ? participant.htmlLastFailure.at.slice(0, 16).replace('T', ' ') : ''}, ${participant.htmlLastFailure.stage === 'capture' ? 'while capturing the page' : 'while uploading'}): ${participant.htmlLastFailure.reason || 'unknown'}${participant.htmlLastFailure.pendingHtml != null ? `; ${participant.htmlLastFailure.pendingHtml} pages waiting on the phone` : ''}.` : ' The app has not reported an error (older than 1.0.28, or the page-source step is returning nothing).'}`}
                             >
-                              ⚠ HTML not uploading{participant.lastHtmlCaptureAt ? ` since ${participant.lastHtmlCaptureAt.slice(5, 10)}` : ''}
+                              ⚠ HTML not uploading{participant.lastHtmlCaptureAt ? ` since ${participant.lastHtmlCaptureAt.slice(5, 10)}` : ''}{participant.htmlLastFailure && participant.htmlLastFailure.stage === 'capture' ? ' (capture failing)' : ''}
                             </span>
                           )}
                           {(participant.htmlDroppedForSpace > 0 || participant.htmlUnsyncable > 0) && (

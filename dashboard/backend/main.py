@@ -1458,6 +1458,10 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
         # HTML page uploads lag screenshots by design and stalled outright on
         # app 1.0.23/1.0.24 (2026-11-03); the overview flags a stall.
         "html.charCount", "data.count",
+        # HTML diagnostics events written by app 1.0.28+ (upload stage and
+        # page-capture step); the overview shows the latest reason.
+        "data.lastError", "data.reason", "data.errorKinds", "data.pendingHtml",
+        "data.htmlFailures", "data.htmlChanged", "data.screenshotsSaved",
     ])
 
     events = list(events_query.stream())
@@ -1466,6 +1470,7 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
     html_captures = 0
     html_dropped = 0        # html_dropped_for_space (cache valve) — pages lost
     html_unsyncable = 0     # html_capture_unsyncable — rows whose file vanished
+    html_last_failure = None  # latest html_upload_failed / html_capture_failed, see below
 
     # Aggregate by day
     daily_status = defaultdict(lambda: {
@@ -1524,6 +1529,26 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
                 html_dropped += n
             else:
                 html_unsyncable += n
+        elif event_type in ("html_upload_failed", "html_capture_failed"):
+            # Keep only the most recent one; the overview badge shows its reason.
+            if hasattr(captured_at, "timestamp") and (
+                html_last_failure is None or captured_at > html_last_failure["_at"]
+            ):
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if event_type == "html_upload_failed":
+                    kinds = data.get("errorKinds") if isinstance(data.get("errorKinds"), dict) else {}
+                    reason = ", ".join(f"{k} x{v}" for k, v in sorted(kinds.items())) or (data.get("lastError") or "")
+                    stage = "upload"
+                else:
+                    reason = data.get("reason") or ""
+                    stage = "capture"
+                html_last_failure = {
+                    "_at": captured_at,
+                    "at": captured_at.isoformat(),
+                    "stage": stage,
+                    "reason": str(reason)[:200],
+                    "pendingHtml": data.get("pendingHtml"),
+                }
 
     # Get safety alerts
     try:
@@ -1589,6 +1614,9 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
         "htmlCaptures": html_captures,
         "htmlDropped": html_dropped,
         "htmlUnsyncable": html_unsyncable,
+        # {at, stage: upload|capture, reason, pendingHtml} or None (app 1.0.28+).
+        "htmlLastFailure": ({k: v for k, v in html_last_failure.items() if k != "_at"}
+                            if html_last_failure else None),
     }
     return out
 
@@ -1639,6 +1667,7 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
         "htmlCaptures": html_meta.get("htmlCaptures", 0),
         "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
         "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
+        "htmlLastFailure": html_meta.get("htmlLastFailure"),
         # Computed here, once an hour. The page-load path used to recompute it
         # for every participant on every request — 42 serial Firestore queries
         # per overview load, ~7 s median (2026-10-30).
@@ -2078,6 +2107,7 @@ def get_overall_status(
                     "htmlCaptures": cached.get("htmlCaptures", 0),
                     "htmlDroppedForSpace": cached.get("htmlDroppedForSpace", 0),
                     "htmlUnsyncable": cached.get("htmlUnsyncable", 0),
+                    "htmlLastFailure": cached.get("htmlLastFailure"),
                     # True until the next cache rebuild picks this participant up.
                     "awaitingStats": pid not in cached_by_id,
                 })
@@ -2204,6 +2234,14 @@ def get_overall_status(
                 # paused on a full cache (data-loss risk; usually a long offline gap).
                 "captureDiskPaused": (p_info.get("data") or {}).get("captureDiskPaused", False),
                 "captureDiskUsageMb": (p_info.get("data") or {}).get("captureDiskUsageMb"),
+                # Same HTML health fields as the cached path (this live path
+                # serves ranges older than the 14-day cache).
+                "lastScreenshotAt": html_meta.get("lastScreenshotAt"),
+                "lastHtmlCaptureAt": html_meta.get("lastHtmlCaptureAt"),
+                "htmlCaptures": html_meta.get("htmlCaptures", 0),
+                "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
+                "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
+                "htmlLastFailure": html_meta.get("htmlLastFailure"),
                 "is_test_participant": bool((p_info.get("data") or {}).get("isTestParticipant")),
                 "app_version": (p_info.get("data") or {}).get("appVersion"),
                 "app_build_number": (p_info.get("data") or {}).get("appBuildNumber"),
