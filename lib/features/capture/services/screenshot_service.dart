@@ -66,6 +66,20 @@ class ScreenshotService {
   String? _lastHtmlHash;
   String? _lastHtmlCaptureId;
 
+  // HTML capture diagnostics (2026-11-24). One phone (686175383) stopped
+  // producing HTML pages on its first day while screenshots kept flowing, and
+  // nothing on the server said why: every failure path here was a silent
+  // return or a print. These counters feed two events the dashboard can see:
+  // html_capture_failed (throttled, with the reason) and, at stopCapture,
+  // html_capture_session with the session's totals.
+  int _htmlChangedCount = 0;
+  int _htmlUnchangedCount = 0;
+  int _screenshotsSavedCount = 0;
+  final Map<String, int> _htmlFailureCounts = {};
+  String? _lastHtmlFailureDetail;
+  DateTime? _lastHtmlFailureEventAt;
+  static const Duration htmlFailureEventInterval = Duration(minutes: 10);
+
   // Screenshot dedupe: content hash → saved file path. The consecutive
   // _hasChanged check misses screens revisited later (login pages, profile
   // pages, idle screens) — ~18% of stored screenshots were exact duplicates.
@@ -120,7 +134,79 @@ class ScreenshotService {
     _lastHtmlHash = null;
     _lastHtmlCaptureId = null;
     _jpegHashToPath.clear();
+    _recordHtmlCaptureSession();
     print('[ScreenshotService] Stopped screenshot capture');
+  }
+
+  /// Session totals for HTML capture, written as one local event (synced with
+  /// the others). Lets the dashboard tell "no HTML because every page was
+  /// unchanged" from "no HTML because the page-source step keeps failing".
+  void _recordHtmlCaptureSession() {
+    final shots = _screenshotsSavedCount;
+    final changed = _htmlChangedCount;
+    final unchanged = _htmlUnchangedCount;
+    final failures = Map<String, int>.from(_htmlFailureCounts);
+    final detail = _lastHtmlFailureDetail;
+    final platform = _currentPlatform;
+    _screenshotsSavedCount = 0;
+    _htmlChangedCount = 0;
+    _htmlUnchangedCount = 0;
+    _htmlFailureCounts.clear();
+    _lastHtmlFailureDetail = null;
+    if (shots == 0 && failures.isEmpty) return;
+    // Fire-and-forget: stopCapture is synchronous and runs on screen dispose.
+    database.insertEvent(EventsCompanion(
+      id: drift.Value(const Uuid().v4()),
+      sessionId: drift.Value(sessionId),
+      participantId: drift.Value(participantId),
+      eventType: const drift.Value('html_capture_session'),
+      timestamp: drift.Value(DateTime.now()),
+      platform: drift.Value(platform),
+      data: drift.Value(jsonEncode({
+        'screenshotsSaved': shots,
+        'htmlChanged': changed,
+        'htmlUnchanged': unchanged,
+        'htmlFailures': failures,
+        if (detail != null) 'lastFailure': detail,
+      })),
+    )).catchError((e) {
+      print('[ScreenshotService] could not record html_capture_session: $e');
+      return 0;
+    });
+  }
+
+  /// Count one HTML capture failure and, at most every
+  /// [htmlFailureEventInterval], write an html_capture_failed event naming it.
+  Future<void> _noteHtmlCaptureFailure(String reason, String detail, {String? url}) async {
+    _htmlFailureCounts[reason] = (_htmlFailureCounts[reason] ?? 0) + 1;
+    final trimmed = detail.length > 300 ? detail.substring(0, 300) : detail;
+    _lastHtmlFailureDetail = '$reason: $trimmed';
+    print('[ScreenshotService] HTML capture failed ($reason): $trimmed');
+    final now = DateTime.now();
+    if (_lastHtmlFailureEventAt != null &&
+        now.difference(_lastHtmlFailureEventAt!) < htmlFailureEventInterval) return;
+    _lastHtmlFailureEventAt = now;
+    try {
+      await database.insertEvent(EventsCompanion(
+        id: drift.Value(const Uuid().v4()),
+        sessionId: drift.Value(sessionId),
+        participantId: drift.Value(participantId),
+        eventType: const drift.Value('html_capture_failed'),
+        timestamp: drift.Value(now),
+        platform: drift.Value(_currentPlatform),
+        url: drift.Value(url),
+        data: drift.Value(jsonEncode({
+          'reason': reason,
+          'detail': trimmed,
+          'failuresThisSession': Map<String, int>.from(_htmlFailureCounts),
+          'htmlChangedThisSession': _htmlChangedCount,
+          'htmlUnchangedThisSession': _htmlUnchangedCount,
+          'screenshotsThisSession': _screenshotsSavedCount,
+        })),
+      ));
+    } catch (e) {
+      print('[ScreenshotService] could not record html_capture_failed: $e');
+    }
   }
 
   /// Check disk usage of local data directories.
@@ -319,6 +405,7 @@ class ScreenshotService {
       );
 
       await database.insertEvent(event);
+      _screenshotsSavedCount++;
 
       print('[ScreenshotService] Saved screenshot: ${filePath.split('/').last} '
           '(${compressedBytes.length} bytes, $compressionRatio% compression'
@@ -360,14 +447,26 @@ class ScreenshotService {
     required DateTime capturedAt,
   }) async {
     try {
-      if (_controller == null) return;
+      if (_controller == null) {
+        await _noteHtmlCaptureFailure('no_controller', 'WebView controller was null', url: url);
+        return;
+      }
 
       // Extract full page HTML
       final htmlResult = await _controller!.evaluateJavascript(
         source: 'document.documentElement.outerHTML',
       );
 
-      if (htmlResult == null || htmlResult is! String || htmlResult.isEmpty) {
+      if (htmlResult == null) {
+        await _noteHtmlCaptureFailure('js_null', 'evaluateJavascript returned null', url: url);
+        return;
+      }
+      if (htmlResult is! String) {
+        await _noteHtmlCaptureFailure('js_not_string', 'returned ${htmlResult.runtimeType}', url: url);
+        return;
+      }
+      if (htmlResult.isEmpty) {
+        await _noteHtmlCaptureFailure('js_empty', 'evaluateJavascript returned an empty string', url: url);
         return;
       }
 
@@ -390,6 +489,7 @@ class ScreenshotService {
         );
 
         await database.insertHtmlStatusLog(statusLog);
+        _htmlUnchangedCount++;
       } else {
         // HTML changed - save the file and create a capture record
         final directory = await getApplicationDocumentsDirectory();
@@ -435,13 +535,14 @@ class ScreenshotService {
         await database.insertHtmlStatusLog(statusLog);
 
         _lastHtmlCaptureId = captureId;
+        _htmlChangedCount++;
 
         print('[ScreenshotService] Saved HTML: ${html.length} chars, hash: ${htmlHash.substring(0, 8)}...');
       }
 
       _lastHtmlHash = htmlHash;
     } catch (e) {
-      print('[ScreenshotService] Error capturing HTML: $e');
+      await _noteHtmlCaptureFailure('exception', e.toString(), url: url);
     }
   }
 

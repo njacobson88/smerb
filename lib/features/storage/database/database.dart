@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
@@ -539,6 +540,31 @@ class AppDatabase extends _$AppDatabase {
     final c = countAll();
     final q = selectOnly(htmlCaptures)..addColumns([c])..where(htmlCaptures.synced.equals(false));
     return (await q.getSingle()).read(c) ?? 0;
+  }
+
+  /// When the oldest still-unsent HTML page was captured (null when none).
+  /// Reported in the sync diagnostics so a growing backlog is visible from
+  /// the dashboard, not only from the phone.
+  Future<DateTime?> getOldestUnsyncedHtmlCaptureAt() async {
+    final q = select(htmlCaptures)
+      ..where((h) => h.synced.equals(false))
+      ..orderBy([(h) => OrderingTerm.asc(h.capturedAt)])
+      ..limit(1);
+    return (await q.getSingleOrNull())?.capturedAt;
+  }
+
+  /// The local event rows for [ids] (missing ids are simply absent). Used by
+  /// the HTML stages to copy the event's own identity fields into their
+  /// merge-writes, so a write that lands before the screenshot event itself
+  /// creates a rules-valid document instead of being rejected.
+  Future<Map<String, Event>> getEventsByIds(List<String> ids) async {
+    final out = <String, Event>{};
+    for (var i = 0; i < ids.length; i += 500) {
+      final chunk = ids.sublist(i, math.min(i + 500, ids.length));
+      final rows = await (select(events)..where((e) => e.id.isIn(chunk))).get();
+      for (final r in rows) out[r.id] = r;
+    }
+    return out;
   }
 
   /// Count of unsynced HTML status logs (COUNT, not a row load).

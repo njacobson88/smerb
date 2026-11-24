@@ -347,7 +347,10 @@ class UploadService {
           .doc(event.participantId)
           .collection('events')
           .doc(event.id)
-          .set(docData), 'event doc set');
+          // merge: the HTML stages may already have created this document
+          // (see eventSkeleton) — a plain set() would wipe their `html` map
+          // and lose the page capture after its local file was deleted.
+          .set(docData, SetOptions(merge: true)), 'event doc set');
     } catch (e) {
       // The file is already in Storage; the doc write is durably queued.
       if (!_isQueuedFirestoreTimeout(e)) rethrow;
@@ -617,6 +620,9 @@ class UploadService {
       if (_htmlFailures.values.fold<int>(0, (a, b) => a + b) > failuresBefore) {
         await _recordHtmlUploadFailures();
       }
+      _htmlUploadedSinceProgress += totalSynced;
+      _htmlUploadedThisProcess += totalSynced;
+      await _recordHtmlSyncProgress();
       print('[UploadService] HTML capture sync complete. Total: $totalSynced');
       return totalSynced;
 
@@ -636,6 +642,14 @@ class UploadService {
   final Map<String, int> _htmlFailures = {};
   String? _lastHtmlError;
   DateTime? _lastHtmlFailureEventAt;
+  /// Failures in this process by [classifyHtmlError] kind, and the capture
+  /// time of the most recent failure per capture (for the diagnostics event).
+  final Map<String, int> _htmlErrorKinds = {};
+  final Map<String, DateTime> _lastHtmlFailedCaptures = {};
+  /// Throughput since the last html_sync_progress event, and in this process.
+  int _htmlUploadedSinceProgress = 0;
+  int _htmlUploadedThisProcess = 0;
+  DateTime? _lastHtmlProgressEventAt;
 
   /// After this many failed attempts in one process a capture is set aside
   /// (still on disk, still unsynced — retried after the next app restart).
@@ -645,6 +659,99 @@ class UploadService {
   /// Minimum spacing between html_upload_failed events (the stage runs every
   /// 30 s; a persistently broken device must not write thousands of these).
   static const Duration htmlFailureEventInterval = Duration(minutes: 30);
+
+  /// Minimum spacing between html_sync_progress events.
+  static const Duration htmlProgressEventInterval = Duration(minutes: 30);
+
+  /// Coarse class of an HTML upload failure, for the diagnostics event. Plain
+  /// strings on purpose: the dashboard shows them verbatim.
+  static String classifyHtmlError(Object e) {
+    final s = e.toString();
+    if (s.contains('permission-denied') || s.contains('PERMISSION_DENIED')) return 'permission_denied';
+    if (s.contains('HTML file not found')) return 'file_missing';
+    if (e is TimeoutException || s.contains('timed out')) return 'timeout';
+    if (s.contains('firebase_storage') || s.contains('storage/')) return 'storage';
+    if (s.contains('unavailable') || s.contains('network') || s.contains('SocketException')) return 'network';
+    if (s.contains('cloud_firestore')) return 'firestore';
+    return 'other';
+  }
+
+  /// The identity fields of an event document, for the HTML stages' merge
+  /// writes. The Firestore rules accept a create only when id, sessionId,
+  /// participantId, eventType and timestamp are present, and set(merge) on a
+  /// document that does not exist yet IS a create. Values come from the local
+  /// event row when it still exists (byte-identical to what the events stage
+  /// writes, so merging onto an existing document changes nothing); otherwise
+  /// from the capture itself. Pure; unit-tested.
+  static Map<String, dynamic> eventSkeleton(
+    Event? localEvent, {
+    required String eventId,
+    required String sessionId,
+    required String participantId,
+    String? platform,
+    String? url,
+    required DateTime fallbackTimestamp,
+  }) {
+    if (localEvent != null) {
+      return {
+        'id': localEvent.id,
+        'sessionId': localEvent.sessionId,
+        'participantId': localEvent.participantId,
+        'eventType': localEvent.eventType,
+        'timestamp': Timestamp.fromDate(localEvent.timestamp),
+        'platform': localEvent.platform,
+        if (localEvent.url != null) 'url': localEvent.url,
+        'createdAt': Timestamp.fromDate(localEvent.createdAt),
+      };
+    }
+    return {
+      'id': eventId,
+      'sessionId': sessionId,
+      'participantId': participantId,
+      // HTML is only ever captured alongside a screenshot.
+      'eventType': 'screenshot',
+      'timestamp': Timestamp.fromDate(fallbackTimestamp),
+      if (platform != null) 'platform': platform,
+      if (url != null) 'url': url,
+    };
+  }
+
+  /// One event per [htmlProgressEventInterval] saying how the HTML queue is
+  /// moving: uploaded since the last one, still pending, and how old the
+  /// oldest pending page is. Written only when there is something to say.
+  Future<void> _recordHtmlSyncProgress() async {
+    try {
+      final now = DateTime.now();
+      if (_lastHtmlProgressEventAt != null &&
+          now.difference(_lastHtmlProgressEventAt!) < htmlProgressEventInterval) return;
+      final pending = await database.getUnsyncedHtmlCaptureCount();
+      if (_htmlUploadedSinceProgress == 0 && pending == 0) return;
+      final pid = await database.getLatestParticipantId();
+      if (pid == null) return;
+      final oldest = await database.getOldestUnsyncedHtmlCaptureAt();
+      _lastHtmlProgressEventAt = now;
+      final uploaded = _htmlUploadedSinceProgress;
+      _htmlUploadedSinceProgress = 0;
+      await database.insertEvent(EventsCompanion(
+        id: Value(const Uuid().v4()),
+        sessionId: const Value('system'),
+        participantId: Value(pid),
+        eventType: const Value('html_sync_progress'),
+        timestamp: Value(now),
+        platform: const Value('system'),
+        data: Value(jsonEncode({
+          'uploadedSinceLast': uploaded,
+          'pendingHtml': pending,
+          'oldestPendingCapturedAt': oldest?.toIso8601String(),
+          'pendingStatusLogs': await database.getUnsyncedHtmlStatusLogCount(),
+          'failingCaptures': _htmlFailures.length,
+        })),
+      ));
+      print('[UploadService] Recorded html_sync_progress: +$uploaded, pending $pending, oldest ${oldest?.toIso8601String()}');
+    } catch (e) {
+      print('[UploadService] could not record html_sync_progress: $e');
+    }
+  }
 
   /// One event naming what is going wrong, so the dashboard can show the
   /// reason instead of only "HTML not uploading".
@@ -669,6 +776,13 @@ class UploadService {
           'setAsideThisSession': setAside,
           'lastError': (_lastHtmlError ?? '').substring(0, math.min(300, (_lastHtmlError ?? '').length)),
           'pendingHtml': await database.getUnsyncedHtmlCaptureCount(),
+          // Diagnostics (2026-11-24): which kind of failure, how old the
+          // failing pages are, and whether the queue behind them is moving.
+          'errorKinds': Map<String, int>.from(_htmlErrorKinds),
+          'oldestPendingCapturedAt': (await database.getOldestUnsyncedHtmlCaptureAt())?.toIso8601String(),
+          'failingCapturedAt': (_lastHtmlFailedCaptures.values.map((d) => d.toIso8601String()).toList()..sort())
+              .take(20).toList(),
+          'uploadedThisProcess': _htmlUploadedThisProcess,
         })),
       ));
       print('[UploadService] Recorded html_upload_failed: ${_htmlFailures.length} failing, $setAside set aside, last: $_lastHtmlError');
@@ -700,8 +814,11 @@ class UploadService {
       skip.add(capture.id);
       _htmlFailures[capture.id] = (_htmlFailures[capture.id] ?? 0) + 1;
       _lastHtmlError = e.toString();
+      final kind = classifyHtmlError(e);
+      _htmlErrorKinds[kind] = (_htmlErrorKinds[kind] ?? 0) + 1;
+      _lastHtmlFailedCaptures[capture.id] = capture.capturedAt;
       print('[UploadService] Failed to sync HTML capture ${capture.id} '
-          '(attempt ${_htmlFailures[capture.id]}): $e');
+          '(attempt ${_htmlFailures[capture.id]}, $kind): $e');
       return false;
     }
   }
@@ -785,6 +902,15 @@ class UploadService {
     // every cycle for four weeks (322475615, 2026-10-14 → 11-09: every ack
     // took longer than the timeout, the row was never marked synced, and
     // nothing captured after that date ever left the device).
+    //
+    // The write also carries the event's identity fields (eventSkeleton). The
+    // rules only accept a CREATE that has id/sessionId/participantId/eventType/
+    // timestamp, and set(merge) on a document that does not exist yet is a
+    // create: when the screenshot event itself has not reached Firestore (its
+    // file upload kept failing), this write was rejected with permission-denied
+    // on every cycle and the same pages were pushed to Storage again and again
+    // (686175383, 2026-11-20 → 11-24: 22 pages, ~40 re-uploads a day).
+    final localEvent = (await database.getEventsByIds([capture.eventId]))[capture.eventId];
     try {
       await _net(_firestore
           .collection(EnvConfig.col('participants'))
@@ -792,6 +918,13 @@ class UploadService {
           .collection('events')
           .doc(capture.eventId)
           .set({
+        ...eventSkeleton(localEvent,
+            eventId: capture.eventId,
+            sessionId: capture.sessionId,
+            participantId: capture.participantId,
+            platform: capture.platform,
+            url: capture.url,
+            fallbackTimestamp: capture.capturedAt),
         // Nested map, NOT dotted keys: set(merge) treats dotted keys as literal
         // field names, which breaks the Cloud Functions' update("html.x") calls
         'html': {
@@ -829,6 +962,12 @@ class UploadService {
         print('[UploadService] Processing batch of ${unsyncedLogs.length} HTML status logs');
 
         final syncedIds = <String>[];
+        // Identity fields for each event, so a merge that lands before the
+        // event document exists is a rules-valid create (see eventSkeleton).
+        // One rejected document fails the whole batch, and the same 50 oldest
+        // logs would then be retried forever (head-of-line blocking).
+        final localEvents = await database.getEventsByIds(
+            unsyncedLogs.map((l) => l.eventId).toSet().toList());
 
         // Batch HTML status log updates
         WriteBatch? batch;
@@ -845,15 +984,26 @@ class UploadService {
                 .collection('events')
                 .doc(log.eventId);
 
-            final updates = <String, dynamic>{
-              'html.changed': log.htmlChanged,
-              'html.hash': log.htmlHash,
-              'html.capturedAt': Timestamp.fromDate(log.capturedAt),
-              'htmlSyncedAt': FieldValue.serverTimestamp(),
+            // Nested map, NOT dotted keys: with set(merge) a dotted string key
+            // is a literal field name, not a path. A nested map deep-merges
+            // into the existing `html` map and touches only these fields.
+            final htmlFields = <String, dynamic>{
+              'changed': log.htmlChanged,
+              'hash': log.htmlHash,
+              'capturedAt': Timestamp.fromDate(log.capturedAt),
             };
             if (log.htmlCaptureId != null) {
-              updates['html.htmlCaptureId'] = log.htmlCaptureId;
+              htmlFields['htmlCaptureId'] = log.htmlCaptureId;
             }
+            final updates = <String, dynamic>{
+              ...eventSkeleton(localEvents[log.eventId],
+                  eventId: log.eventId,
+                  sessionId: log.sessionId,
+                  participantId: log.participantId,
+                  fallbackTimestamp: log.capturedAt),
+              'html': htmlFields,
+              'htmlSyncedAt': FieldValue.serverTimestamp(),
+            };
 
             // Use set/merge — event doc may have been pruned
             batch.set(docRef, updates, SetOptions(merge: true));
