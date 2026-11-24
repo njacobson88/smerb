@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:uuid/uuid.dart';
@@ -20,6 +21,70 @@ import '../../storage/database/database.dart';
 /// cycle never starts. Seen in the field 2026-10-21: OCR stopped minutes into
 /// every session, HTML snapshots never synced, and completed check-ins took a
 /// median 14 h to reach Firestore (the EMA stage only runs at cycle start).
+/// Decides when a Storage upload has stalled: no bytes moved for [stall], or
+/// the whole thing has run longer than [hardCap]. Replaces the fixed 30 s
+/// timeout that cut off slow-but-moving uploads and, worse, let a stuck one
+/// hold a sync cycle for the full 30 s (322475615, 2026-11-24: whole browsing
+/// sessions with zero pages uploaded). Pure; unit-tested.
+class UploadStallDetector {
+  UploadStallDetector({
+    required DateTime startedAt,
+    this.stall = const Duration(seconds: 10),
+    this.hardCap = const Duration(minutes: 3),
+  })  : _startedAt = startedAt,
+        _lastProgressAt = startedAt;
+
+  final Duration stall;
+  final Duration hardCap;
+  final DateTime _startedAt;
+  DateTime _lastProgressAt;
+  int _bytes = 0;
+  int get bytesTransferred => _bytes;
+
+  /// Record a progress snapshot. Only a strictly higher byte count counts.
+  void progress(int bytesTransferred, DateTime now) {
+    if (bytesTransferred > _bytes) {
+      _bytes = bytesTransferred;
+      _lastProgressAt = now;
+    }
+  }
+
+  /// Non-null when the upload should be cancelled: the reason to report.
+  String? stalledReason(DateTime now) {
+    if (now.difference(_startedAt) >= hardCap) {
+      return 'exceeded ${hardCap.inSeconds}s ($_bytes bytes sent)';
+    }
+    if (now.difference(_lastProgressAt) >= stall) {
+      return 'no progress for ${stall.inSeconds}s ($_bytes bytes sent)';
+    }
+    return null;
+  }
+}
+
+/// Await [task] with the stall guard; cancels it and throws when stalled.
+Future<TaskSnapshot> awaitUploadWithStallGuard(UploadTask task, String what) async {
+  final detector = UploadStallDetector(startedAt: DateTime.now());
+  final sub = task.snapshotEvents.listen((s) => detector.progress(s.bytesTransferred, DateTime.now()),
+      onError: (_) {});
+  Timer? ticker;
+  final stalled = Completer<String>();
+  ticker = Timer.periodic(const Duration(seconds: 2), (_) {
+    final reason = detector.stalledReason(DateTime.now());
+    if (reason != null && !stalled.isCompleted) stalled.complete(reason);
+  });
+  try {
+    final result = await Future.any<Object>([task, stalled.future]);
+    if (result is TaskSnapshot) return result;
+    try {
+      await task.cancel();
+    } catch (_) {}
+    throw Exception('$what stalled: $result');
+  } finally {
+    ticker.cancel();
+    await sub.cancel();
+  }
+}
+
 class StageBudget {
   StageBudget(Duration limit) : _deadline = DateTime.now().add(limit);
   StageBudget.unlimited() : _deadline = null;
@@ -442,14 +507,9 @@ class UploadService {
 
       final uploadTask = ref.putFile(file, metadata);
 
-      // Add timeout to prevent hanging uploads (30 seconds per file)
-      final snapshot = await uploadTask.timeout(
-        const Duration(seconds: 30),
-        onTimeout: () {
-          uploadTask.cancel();
-          throw Exception('Screenshot upload timed out after 30s');
-        },
-      );
+      // Stall-based guard (see UploadStallDetector): cut only when no bytes
+      // move for 10 s, or after a 3-minute hard cap.
+      final snapshot = await awaitUploadWithStallGuard(uploadTask, 'Screenshot upload');
 
       final downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'getDownloadURL');
       _totalBytesUploaded += snapshot.totalBytes;
@@ -663,13 +723,36 @@ class UploadService {
   /// Minimum spacing between html_sync_progress events.
   static const Duration htmlProgressEventInterval = Duration(minutes: 30);
 
+  /// "wifi" / "mobile" / "ethernet" / "none" / "other", or several joined
+  /// with "+", for the diagnostics events (2026-11-24: a backlog that only
+  /// moves on some sessions — is it the cellular ones?). Pure; unit-tested.
+  static String connectivityLabel(List<ConnectivityResult> results) {
+    const names = {
+      ConnectivityResult.wifi: 'wifi',
+      ConnectivityResult.mobile: 'mobile',
+      ConnectivityResult.ethernet: 'ethernet',
+      ConnectivityResult.vpn: 'vpn',
+      ConnectivityResult.none: 'none',
+    };
+    final labels = results.map((r) => names[r] ?? 'other').toSet().toList()..sort();
+    return labels.isEmpty ? 'unknown' : labels.join('+');
+  }
+
+  Future<String> _currentConnection() async {
+    try {
+      return connectivityLabel(await Connectivity().checkConnectivity());
+    } catch (_) {
+      return 'unknown';
+    }
+  }
+
   /// Coarse class of an HTML upload failure, for the diagnostics event. Plain
   /// strings on purpose: the dashboard shows them verbatim.
   static String classifyHtmlError(Object e) {
     final s = e.toString();
     if (s.contains('permission-denied') || s.contains('PERMISSION_DENIED')) return 'permission_denied';
     if (s.contains('HTML file not found')) return 'file_missing';
-    if (e is TimeoutException || s.contains('timed out')) return 'timeout';
+    if (e is TimeoutException || s.contains('timed out') || s.contains('stalled')) return 'timeout';
     if (s.contains('firebase_storage') || s.contains('storage/')) return 'storage';
     if (s.contains('unavailable') || s.contains('network') || s.contains('SocketException')) return 'network';
     if (s.contains('cloud_firestore')) return 'firestore';
@@ -745,6 +828,7 @@ class UploadService {
           'oldestPendingCapturedAt': oldest?.toIso8601String(),
           'pendingStatusLogs': await database.getUnsyncedHtmlStatusLogCount(),
           'failingCaptures': _htmlFailures.length,
+          'connection': await _currentConnection(),
         })),
       ));
       print('[UploadService] Recorded html_sync_progress: +$uploaded, pending $pending, oldest ${oldest?.toIso8601String()}');
@@ -783,6 +867,7 @@ class UploadService {
           'failingCapturedAt': (_lastHtmlFailedCaptures.values.map((d) => d.toIso8601String()).toList()..sort())
               .take(20).toList(),
           'uploadedThisProcess': _htmlUploadedThisProcess,
+          'connection': await _currentConnection(),
         })),
       ));
       print('[UploadService] Recorded html_upload_failed: ${_htmlFailures.length} failing, $setAside set aside, last: $_lastHtmlError');
@@ -878,13 +963,9 @@ class UploadService {
     );
 
     final uploadTask = ref.putFile(file, metadata);
-    final snapshot = await uploadTask.timeout(
-      const Duration(seconds: 30),
-      onTimeout: () {
-        uploadTask.cancel();
-        throw Exception('HTML upload timed out after 30s');
-      },
-    );
+    // Stall-based, not a fixed 30 s: a slow link that is still moving bytes
+    // gets to finish; a stuck transfer is cut after 10 s without progress.
+    final snapshot = await awaitUploadWithStallGuard(uploadTask, 'HTML upload');
     // Best-effort: nothing downstream needs this URL (the dashboard signs
     // URLs from storagePath and the hourly transcode rewrites it anyway), and
     // the read rule needs a signed-in participant, so it must never fail the
