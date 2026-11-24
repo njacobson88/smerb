@@ -68,6 +68,7 @@ dependencies:
   firebase_auth: ^5.3.1          # per-participant custom-token sign-in (enrollment link)
   app_links: ^6.3.2              # smerb:// enrollment deep link
   gal: ^2.3.3                    # save long-pressed images/videos to Photos/Gallery
+  workmanager: ^0.10.10        # OS-scheduled uploads while the app is closed (WorkManager / BGTaskScheduler)
 
 dev_dependencies:
   flutter_test:

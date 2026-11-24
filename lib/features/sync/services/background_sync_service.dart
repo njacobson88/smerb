@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:isolate';
+import 'dart:ui' show IsolateNameServer;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
+import 'background_upload_scheduler.dart';
 import '../../storage/database/database.dart';
 import '../../storage/services/local_media_retention.dart';
 import '../../capture/services/screenshot_service.dart';
@@ -28,6 +31,21 @@ class BackgroundSyncService {
   bool _sweptSinceLaunch = false;
   bool _lastCycleTruncated = false;
   Timer? _followUpTimer;
+
+  // Results of the most recent Firebase sync in this cycle (null when the
+  // cycle skipped the upload: offline, paused, error).
+  Map<String, int>? _lastCycleResults;
+  // Stage-budget scale for cycles run on behalf of a background task.
+  double _cycleBudgetScale = 1.0;
+
+  /// Name under which the running app's sync engine listens for drain
+  /// requests from an OS-scheduled background isolate (see
+  /// background_upload_scheduler.dart). Registered in [start], removed in
+  /// [stop]; a process that is gone has no entry, which is how the background
+  /// isolate knows to upload by itself.
+  static const String relayPortName = 'com.dartmouth.smerb.sync.main';
+  ReceivePort? _relayPort;
+  bool _draining = false;
 
   // Sync interval
   static const Duration syncInterval = Duration(seconds: 30);
@@ -80,6 +98,7 @@ class BackgroundSyncService {
 
     _isRunning = true;
     print('[BackgroundSync] Starting with ${syncInterval.inSeconds}s interval');
+    _listenForRelayRequests();
 
     // Run initial sync after a short delay
     Future.delayed(const Duration(seconds: 5), () {
@@ -100,9 +119,80 @@ class BackgroundSyncService {
     _followUpTimer?.cancel();
     _followUpTimer = null;
     _isRunning = false;
+    IsolateNameServer.removePortNameMapping(relayPortName);
+    _relayPort?.close();
+    _relayPort = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Background-task relay. An OS-scheduled background isolate that finds this
+  // engine alive asks it to drain the queues instead of opening the database
+  // itself; this keeps every upload on one engine with one set of in-process
+  // state. Message: {'cmd': 'drain', 'task', 'budgetMs', 'reply': SendPort}.
+  // ---------------------------------------------------------------------------
+  void _listenForRelayRequests() {
+    IsolateNameServer.removePortNameMapping(relayPortName);
+    _relayPort?.close();
+    final port = ReceivePort();
+    _relayPort = port;
+    if (!IsolateNameServer.registerPortWithName(port.sendPort, relayPortName)) {
+      print('[BackgroundSync] could not register relay port');
+    }
+    port.listen((msg) {
+      if (msg is! Map || msg['cmd'] != 'drain') return;
+      final reply = msg['reply'];
+      final budget = Duration(milliseconds: (msg['budgetMs'] as int?) ?? 60000);
+      final task = (msg['task'] as String?) ?? 'unknown';
+      if (_draining) {
+        // Two OS tasks fired together; the running drain already covers it.
+        if (reply is SendPort) reply.send({'cycles': 0, 'stoppedBecause': 'drain_already_running'});
+        return;
+      }
+      final started = DateTime.now();
+      drain(budget: budget).then((summary) async {
+        final map = summary.toMap('relay');
+        await recordBackgroundSyncEvent(database, task, map,
+            elapsed: DateTime.now().difference(started));
+        if (reply is SendPort) reply.send(map);
+      }).catchError((e) {
+        if (reply is SendPort) reply.send({'stoppedBecause': 'error', 'error': '$e'});
+      });
+    });
+  }
+
+  /// Run cycles back to back until the upload queues are empty or [budget] is
+  /// spent. Used by the relay above; also safe to call from the UI.
+  Future<DrainSummary> drain({required Duration budget}) async {
+    print('[BackgroundSync] drain requested, budget ${budget.inSeconds}s');
+    final previousScale = _cycleBudgetScale;
+    _cycleBudgetScale = BackgroundSyncPlan.budgetScale(budget);
+    _draining = true;
+    try {
+      return await runDrainLoop(
+        budget: budget,
+        pending: () => pendingUploadCounts(database),
+        isPaused: () async => _userPaused || PauseService().isPaused,
+        runCycle: () async {
+          // A timer-driven cycle may be mid-flight; let it finish first.
+          final waitUntil = DateTime.now().add(const Duration(seconds: 90));
+          while (_isSyncing && DateTime.now().isBefore(waitUntil)) {
+            await Future.delayed(const Duration(milliseconds: 300));
+          }
+          _lastCycleResults = null;
+          await _runSyncCycle();
+          // No results means the cycle uploaded nothing (offline / error);
+          // report zero progress so the loop stops instead of spinning.
+          return _lastCycleResults ?? const <String, int>{};
+        },
+      );
+    } finally {
+      _draining = false;
+      _cycleBudgetScale = previousScale;
+    }
   }
 
   /// Check if the device has network connectivity
+  Future<bool> hasNetwork() => _hasNetworkConnectivity();
   Future<bool> _hasNetworkConnectivity() async {
     try {
       final results = await Connectivity().checkConnectivity();
@@ -128,6 +218,14 @@ class BackgroundSyncService {
     }
 
     _isSyncing = true;
+    // A headless background run (app was not running when the OS fired the
+    // task) still has the database: let it finish rather than upload the same
+    // rows from two isolates. It unregisters itself within minutes.
+    if (await BackgroundSyncRunner.isHeadlessRunActive()) {
+      print('[BackgroundSync] headless background upload in progress, skipping cycle');
+      _isSyncing = false;
+      return;
+    }
     _updateStatus(SyncStatus.syncing());
 
     try {
@@ -432,7 +530,9 @@ class BackgroundSyncService {
       final results = await uploadService.syncAll(
         eventBatchSize: 25,
         ocrBatchSize: 25,
+        budgetScale: _cycleBudgetScale,
       );
+      _lastCycleResults = results;
 
       final bytesUploaded = results['bytesUploaded'] ?? 0;
       final bytesStr = bytesUploaded > 1024 * 1024

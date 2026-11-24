@@ -55,7 +55,16 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
+		<string>processing</string>
 		<string>remote-notification</string>
+	</array>
+	<!-- OS-scheduled upload tasks (workmanager / BGTaskScheduler). Must match
+	     the identifiers in lib/features/sync/services/background_upload_scheduler.dart
+	     and AppDelegate.swift. -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.dartmouth.smerb.sync.periodic</string>
+		<string>com.dartmouth.smerb.sync.processing</string>
 	</array>
 	<key>FirebaseMessagingAutoInitEnabled</key>
 	<true/>

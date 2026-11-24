@@ -17,6 +17,7 @@ import 'features/capture/services/capture_service.dart';
 import 'features/settings/services/pause_service.dart';
 import 'features/sync/services/upload_service.dart';
 import 'features/sync/services/background_sync_service.dart';
+import 'features/sync/services/background_upload_scheduler.dart';
 import 'features/ocr/services/ocr_service.dart';
 import 'features/onboarding/services/participant_service.dart';
 import 'features/onboarding/services/enrollment_link_service.dart';
@@ -175,12 +176,18 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
       // App going to background - trigger immediate sync
       print('[App] App pausing - triggering sync');
       _backgroundSyncService?.syncNow();
+      // Hidden (not merely covered by a dialog) with a real backlog: hand the
+      // rest to the OS-scheduled drain task so uploads outlive the app.
+      if (state == AppLifecycleState.paused) _maybeRequestDrain();
     } else if (state == AppLifecycleState.resumed) {
       // App coming back to foreground - ensure sync is running
       print('[App] App resumed');
       if (_backgroundSyncService != null && !_backgroundSyncService!.isRunning) {
         _backgroundSyncService!.start();
       }
+      // The live engine is back; drop the drain task (and its Android
+      // notification). It is re-enqueued the next time the app is hidden.
+      if (_uploadService != null) BackgroundUploadScheduler.cancelDrain();
       // Re-check enrolment status so a participant deactivated from the
       // dashboard stops interacting with the app without needing a reinstall.
       _refreshParticipantStatus();
@@ -269,6 +276,30 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
     }
   }
 
+  Future<void> _maybeRequestDrain() async {
+    final upload = _uploadService;
+    final sync = _backgroundSyncService;
+    if (upload == null || sync == null) return;
+    try {
+      // Android lets a worker become a foreground service only within ~15 s
+      // of the app leaving the screen. A drain enqueued while offline would
+      // start later, be refused that promotion, and the process would be
+      // frozen mid-upload (seen on the API 34 emulator). Offline backlogs are
+      // the periodic Wi-Fi job's business.
+      if (!await sync.hasNetwork()) return;
+      final s = await upload.getSyncStatus();
+      final events = s['pendingEvents'] ?? 0;
+      final html = s['pendingHtml'] ?? 0;
+      final ema = s['pendingEma'] ?? 0;
+      if (!BackgroundSyncPlan.shouldDrain(pendingEvents: events, pendingHtml: html, pendingEma: ema)) {
+        return;
+      }
+      await BackgroundUploadScheduler.requestDrain(pendingItems: events + html + ema);
+    } catch (e) {
+      print('[App] drain request skipped: $e');
+    }
+  }
+
   Future<void> _checkinNotificationCanceller() async {
     final svc = CheckinService(database: _database);
     await svc.cancelNotifications();
@@ -340,6 +371,14 @@ class _AppInitializerState extends State<AppInitializer> with WidgetsBindingObse
 
     // Start background sync
     _backgroundSyncService!.start();
+
+    // OS-scheduled uploads for when the app is not open (periodic Wi-Fi job,
+    // iOS processing task, drain-on-background). Idempotent; never fatal.
+    await BackgroundUploadScheduler.ensureScheduled();
+    // The app is on screen, so the live engine owns uploads: drop any drain
+    // left over from the last time it was hidden (the lifecycle observer does
+    // not fire for the initial resumed state).
+    await BackgroundUploadScheduler.cancelDrain();
 
     // Start a session. platform/app_version were previously hardcoded to
     // 'ios' / '1.0.0' for every device, which is wrong on Android and wrong on

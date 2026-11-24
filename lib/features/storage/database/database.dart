@@ -756,6 +756,11 @@ LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dbFolder = await getApplicationDocumentsDirectory();
     final file = File(path.join(dbFolder.path, 'smerb.db'));
-    return NativeDatabase(file);
+    // Since 2026-11-24 a background isolate (OS-scheduled upload, see
+    // background_upload_scheduler.dart) can hold a second connection to this
+    // file while the app is launching or shutting down. SQLite serialises the
+    // writers; without a busy timeout the loser would get SQLITE_BUSY at once
+    // instead of waiting its turn.
+    return NativeDatabase(file, setup: (raw) => raw.execute('PRAGMA busy_timeout = 5000;'));
   });
 }

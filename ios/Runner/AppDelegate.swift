@@ -2,6 +2,7 @@ import Flutter
 import UIKit
 import MLKitTextRecognition
 import MLKitVision
+import workmanager_apple
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
@@ -12,6 +13,20 @@ import MLKitVision
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+
+    // Background uploads (see lib/features/sync/services/background_upload_scheduler.dart).
+    // BGTaskScheduler only delivers a task to a relaunched app if its launch
+    // handler was registered before didFinishLaunching returns, so register
+    // both identifiers here; the Dart side submits the actual requests. The
+    // headless engine that runs a task needs the other plugins (Firebase,
+    // sqlite, path_provider, ...) registered on it too.
+    WorkmanagerPlugin.setPluginRegistrantCallback { registry in
+      GeneratedPluginRegistrant.register(with: registry)
+    }
+    WorkmanagerPlugin.registerPeriodicTask(
+      withIdentifier: "com.dartmouth.smerb.sync.periodic",
+      earliestBeginInSeconds: NSNumber(value: 15 * 60))
+    WorkmanagerPlugin.registerBGProcessingTask(withIdentifier: "com.dartmouth.smerb.sync.processing")
 
     // Register OCR method channel
     let controller = window?.rootViewController as! FlutterViewController

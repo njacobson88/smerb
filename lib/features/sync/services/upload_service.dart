@@ -1427,7 +1427,13 @@ class UploadService {
   // screenshot stage leaves unused is handed to it as well.
   static const Duration htmlStageBudget = Duration(seconds: 10);
 
-  Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50}) async {
+  ///
+  /// [budgetScale] shrinks every stage budget proportionally so one cycle fits
+  /// a short OS-granted background window (an iOS refresh task gets ~30 s;
+  /// see BackgroundSyncPlan.budgetScale). 1.0 = the normal ~50 s cycle.
+  Future<Map<String, int>> syncAll({int eventBatchSize = 50, int ocrBatchSize = 50, double budgetScale = 1.0}) async {
+    Duration scaled(Duration d) =>
+        budgetScale >= 1.0 ? d : Duration(milliseconds: math.max(1000, (d.inMilliseconds * budgetScale).round()));
     // Reset counters
     _screenshotsUploaded = 0;
     _totalBytesUploaded = 0;
@@ -1471,35 +1477,35 @@ class UploadService {
     // for a heavy participant on 10-29 and filled their 2 GB cache.
     final safetyAlertsSynced =
         await _syncStage('safetyAlerts', () => syncSafetyAlerts());
-    final emaBudget = StageBudget(otherStageBudget);
+    final emaBudget = StageBudget(scaled(otherStageBudget));
     final emaSynced = await _syncStage(
         'emaResponses', () => syncEmaResponses(batchSize: eventBatchSize, budget: emaBudget));
 
     // Bulk data. Relative order preserved: events must sync before the OCR/HTML
     // stages that update those same event docs.
-    final eventsBudget = StageBudget(eventsStageBudget);
+    final eventsBudget = StageBudget(scaled(eventsStageBudget));
     final eventsSynced =
         await _syncStage('events', () => syncEvents(batchSize: eventBatchSize, budget: eventsBudget));
 
     // Offload high-frequency analytics events to compressed GCS objects
     // (content_visible / content_exposure) — not individual Firestore docs.
-    final contentBudget = StageBudget(otherStageBudget);
+    final contentBudget = StageBudget(scaled(otherStageBudget));
     final contentEventsSynced =
         await _syncStage('contentEvents', () => syncContentEvents(budget: contentBudget));
 
     // Sync any remaining OCR results (for events that were synced before OCR was done)
-    final ocrBudget = StageBudget(otherStageBudget);
+    final ocrBudget = StageBudget(scaled(otherStageBudget));
     final ocrSynced =
         await _syncStage('ocrResults', () => syncOcrResults(batchSize: ocrBatchSize, budget: ocrBudget));
 
     // Sync HTML captures (upload files + update events). Gets its own slice
     // plus whatever the screenshot stage did not use.
-    final htmlBudget = StageBudget(htmlStageBudget + eventsBudget.remaining);
+    final htmlBudget = StageBudget(scaled(htmlStageBudget) + eventsBudget.remaining);
     final htmlCapturesSynced = await _syncStage(
         'htmlCaptures', () => syncHtmlCaptures(batchSize: eventBatchSize, budget: htmlBudget));
 
     // Sync HTML status logs (update events with unchanged status)
-    final htmlLogBudget = StageBudget(otherStageBudget);
+    final htmlLogBudget = StageBudget(scaled(otherStageBudget));
     final htmlStatusLogsSynced = await _syncStage(
         'htmlStatusLogs', () => syncHtmlStatusLogs(batchSize: eventBatchSize, budget: htmlLogBudget));
 
