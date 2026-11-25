@@ -130,6 +130,23 @@ function htmlStall(p) {
   return !Number.isNaN(html) && shot - html > 2 * 86400000;
 }
 
+// Screenshot IMAGES are expected to follow their event documents within the
+// same sync cycle. Flag a participant whose screenshot events are current but
+// whose last image upload is more than a day older (or absent) with a real
+// backlog — the signature of 963177422 (2026-11-12 → 11-25: the phone's sign-in
+// had lapsed, every image reached Storage, no event document was ever written,
+// and the dashboard counted the empty documents as screenshots).
+function screenshotStall(p) {
+  if (!p || !p.lastScreenshotAt) return false;
+  const shot = Date.parse(p.lastScreenshotAt);
+  if (Number.isNaN(shot)) return false;
+  if (Date.now() - shot > 2 * 86400000) return false; // not actively capturing: nothing to compare
+  if ((p.screenshotsWithoutImage || 0) < 20) return false;
+  if (!p.lastScreenshotImageAt) return true;
+  const img = Date.parse(p.lastScreenshotImageAt);
+  return !Number.isNaN(img) && shot - img > 86400000;
+}
+
 const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, goToSiTrend }) => {
   const [weekOffset, setWeekOffset] = useState(0);
   const [participants, setParticipants] = useState([]);
@@ -623,7 +640,15 @@ const OverallScreen = ({ goToParticipantView, goToDayView, setParticipantList, g
                               ⚠ capture paused (app cache full{participant.captureDiskUsageMb ? `, ${participant.captureDiskUsageMb} MB` : ''})
                             </span>
                           )}
-                          {htmlStall(participant) && (
+                          {screenshotStall(participant) && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 text-xs rounded bg-red-100 text-red-800 border border-red-300"
+                              title={`Screenshot images are not uploading: the app is still capturing (last screenshot event ${participant.lastScreenshotAt.slice(0, 16).replace('T', ' ')}) but ${participant.screenshotsWithoutImage} screenshot records in the last 14 days have no image, and the last image that did upload was ${participant.lastScreenshotImageAt ? participant.lastScreenshotImageAt.slice(0, 10) : 'never in the last 14 days'}. The images stay on the phone and are retried.${participant.screenshotLastFailure ? ` Latest error reported by the app (${participant.screenshotLastFailure.at ? participant.screenshotLastFailure.at.slice(0, 16).replace('T', ' ') : ''}): ${participant.screenshotLastFailure.reason || 'unknown'}${participant.screenshotLastFailure.signedIn === false ? '; the phone is NOT signed in (enrollment link) — re-sending the enrollment link restores it' : ''}${participant.screenshotLastFailure.pendingEvents != null ? `; ${participant.screenshotLastFailure.pendingEvents} events waiting on the phone` : ''}.` : ' The app has not reported an error (older than 1.0.29).'}`}
+                            >
+                              ⚠ screenshots not uploading{participant.lastScreenshotImageAt ? ` since ${participant.lastScreenshotImageAt.slice(5, 10)}` : ''}
+                            </span>
+                          )}
+                          {htmlStall(participant) && !screenshotStall(participant) && (
                             <span
                               className="ml-2 px-1.5 py-0.5 text-xs rounded bg-orange-100 text-orange-800 border border-orange-300"
                               title={`HTML page captures are not uploading: screenshots are current but the last HTML page upload was ${participant.lastHtmlCaptureAt ? participant.lastHtmlCaptureAt.slice(0, 10) : 'never in the last 14 days'}. Unsent HTML stays on the phone and fills the app cache.${participant.htmlLastFailure ? ` Latest error reported by the app (${participant.htmlLastFailure.at ? participant.htmlLastFailure.at.slice(0, 16).replace('T', ' ') : ''}, ${participant.htmlLastFailure.stage === 'capture' ? 'while capturing the page' : 'while uploading'}): ${participant.htmlLastFailure.reason || 'unknown'}${participant.htmlLastFailure.pendingHtml != null ? `; ${participant.htmlLastFailure.pendingHtml} pages waiting on the phone` : ''}.` : ' The app has not reported an error (older than 1.0.28, or the page-source step is returning nothing).'}`}

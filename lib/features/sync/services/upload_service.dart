@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:drift/drift.dart' show Value;
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../../../core/config/environment_config.dart';
@@ -124,6 +125,28 @@ Future<T> _net<T>(Future<T> f, String what) =>
 /// bound). Storage uploads are different — their timeout cancels the transfer.
 bool _isQueuedFirestoreTimeout(Object e) => e is TimeoutException;
 
+/// The URL Firebase Storage serves [storagePath] at once the object's custom
+/// metadata carries [token] under `firebaseStorageDownloadTokens` — the same
+/// URL the SDK's getDownloadURL() would hand back. Built locally because
+/// getDownloadURL() is a READ, and the Storage rules only grant reads to a
+/// signed-in participant: a phone whose Firebase session has lapsed (963177422,
+/// 2026-11-12 → 11-25: 1,900 screenshots reached Storage, not one event doc
+/// was written) must still be able to finish its uploads. Pure; unit-tested.
+String firebaseDownloadUrl(String bucket, String storagePath, String token) =>
+    'https://firebasestorage.googleapis.com/v0/b/$bucket/o/'
+    '${Uri.encodeComponent(storagePath)}?alt=media&token=$token';
+
+/// Whether this process holds a Firebase Auth session (enrollment-link sign-in).
+/// Only the Storage READ rules depend on it; reported in the diagnostics events
+/// so a lapsed session is visible instead of inferred.
+bool firebaseSignedIn() {
+  try {
+    return FirebaseAuth.instance.currentUser != null;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Commit a batch, bounded by [_netTimeout]. True when the writes are
 /// guaranteed to land (server ack, or timeout = durably queued); false on a
 /// real failure (rules rejection, serialization, ...), which the caller
@@ -161,6 +184,13 @@ class UploadService {
   // Track upload stats
   int _screenshotsUploaded = 0;
   int _totalBytesUploaded = 0;
+
+  /// Why the most recent screenshot event failed to sync (null after a
+  /// success), and when the last screenshot_upload_failed event was written.
+  String? _lastScreenshotError;
+  DateTime? _lastScreenshotFailureEventAt;
+  /// Minimum spacing between screenshot_upload_failed events.
+  static const Duration screenshotFailureEventInterval = Duration(minutes: 30);
 
   // Storage paths already uploaded (deduped events share one object).
   //
@@ -301,6 +331,7 @@ class UploadService {
         // Upload screenshot events individually (each needs a file upload).
         // Check the budget per file: on a slow link one 25-event batch can
         // take over a minute, and anything not attempted simply stays queued.
+        var screenshotFailures = 0;
         for (final event in screenshotEvents) {
           if (budget != null && !budget.hasTime) break;
           try {
@@ -309,8 +340,13 @@ class UploadService {
           } catch (e) {
             print('[UploadService] Failed to sync event ${event.id} '
                 '(retry ${event.syncRetryCount + 1}/${AppDatabase.maxSyncRetries}): $e');
+            _lastScreenshotError ??= e.toString();
+            screenshotFailures++;
             failedIds.add(event.id);
           }
+        }
+        if (screenshotFailures > 0) {
+          await _recordScreenshotUploadFailures(screenshotFailures, screenshotEvents.length);
         }
 
         // Mark successfully synced events
@@ -357,6 +393,7 @@ class UploadService {
       storageUrl = await _uploadScreenshot(event, eventData);
       if (storageUrl != null) {
         _screenshotsUploaded++;
+        _lastScreenshotError = null;
       } else {
         // Screenshot file missing or upload failed — don't mark as synced
         // so it can be retried (up to maxSyncRetries)
@@ -397,6 +434,9 @@ class UploadService {
         docData['screenshotStoragePath'] =
             'screenshots/${event.participantId}/${event.sessionId}/${sp.split('/').last}';
       }
+      // The token the hourly transcode and the backend proxy key on.
+      final token = Uri.tryParse(storageUrl)?.queryParameters['token'];
+      if (token != null && token.isNotEmpty) docData['screenshotToken'] = token;
     }
 
     // Add OCR data for screenshots
@@ -486,6 +526,7 @@ class UploadService {
         }
       }
       print('[UploadService] Screenshot file not found: $filePath');
+      _lastScreenshotError = 'file missing: $filename';
       return null;
     }
 
@@ -494,6 +535,14 @@ class UploadService {
 
       // Upload with metadata. Screenshots are immutable — long cache lifetime
       // lets dashboard browsers cache them, cutting repeat-view egress.
+      //
+      // The download token is minted HERE and stored with the object, so the
+      // URL is known without a getDownloadURL() round trip. That call is a
+      // read, which the rules allow only to a signed-in participant — one
+      // phone whose session lapsed uploaded ~1,900 screenshots that never got
+      // an event document because this step failed every time (963177422,
+      // 2026-11-12 → 11-25). Firebase treats this metadata key as the token.
+      final token = const Uuid().v4();
       final metadata = SettableMetadata(
         contentType: 'image/jpeg',
         cacheControl: 'private, max-age=31536000, immutable',
@@ -502,6 +551,7 @@ class UploadService {
           'sessionId': event.sessionId,
           'participantId': event.participantId,
           'timestamp': event.timestamp.toIso8601String(),
+          'firebaseStorageDownloadTokens': token,
         },
       );
 
@@ -511,7 +561,7 @@ class UploadService {
       // move for 10 s, or after a 3-minute hard cap.
       final snapshot = await awaitUploadWithStallGuard(uploadTask, 'Screenshot upload');
 
-      final downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'getDownloadURL');
+      final downloadUrl = firebaseDownloadUrl(snapshot.ref.bucket, storagePath, token);
       _totalBytesUploaded += snapshot.totalBytes;
       _cacheUploadUrl(storagePath, downloadUrl);
       _pendingLocalDeletes[filePath] = true;
@@ -521,6 +571,7 @@ class UploadService {
       return downloadUrl;
     } catch (e) {
       print('[UploadService] Failed to upload screenshot: $e');
+      _lastScreenshotError = e.toString();
       return null;
     }
   }
@@ -829,11 +880,48 @@ class UploadService {
           'pendingStatusLogs': await database.getUnsyncedHtmlStatusLogCount(),
           'failingCaptures': _htmlFailures.length,
           'connection': await _currentConnection(),
+          'signedIn': firebaseSignedIn(),
         })),
       ));
       print('[UploadService] Recorded html_sync_progress: +$uploaded, pending $pending, oldest ${oldest?.toIso8601String()}');
     } catch (e) {
       print('[UploadService] could not record html_sync_progress: $e');
+    }
+  }
+
+  /// One event naming why screenshot events are not reaching Firestore, so
+  /// the dashboard can show the reason instead of only "no screenshots".
+  /// 963177422 went 13 days (2026-11-12 → 11-25) with every screenshot event
+  /// failing and nothing on the dashboard but an empty gallery.
+  Future<void> _recordScreenshotUploadFailures(int failedThisBatch, int attempted) async {
+    try {
+      final now = DateTime.now();
+      if (_lastScreenshotFailureEventAt != null &&
+          now.difference(_lastScreenshotFailureEventAt!) < screenshotFailureEventInterval) return;
+      final pid = await database.getLatestParticipantId();
+      if (pid == null) return;
+      _lastScreenshotFailureEventAt = now;
+      final err = _lastScreenshotError ?? '';
+      await database.insertEvent(EventsCompanion(
+        id: Value(const Uuid().v4()),
+        sessionId: const Value('system'),
+        participantId: Value(pid),
+        eventType: const Value('screenshot_upload_failed'),
+        timestamp: Value(now),
+        platform: const Value('system'),
+        data: Value(jsonEncode({
+          'failedThisBatch': failedThisBatch,
+          'attemptedThisBatch': attempted,
+          'lastError': err.substring(0, math.min(300, err.length)),
+          'pendingEvents': await database.getUnsyncedEventCount(),
+          'stuckEvents': await database.getStuckEventCount(),
+          'signedIn': firebaseSignedIn(),
+          'connection': await _currentConnection(),
+        })),
+      ));
+      print('[UploadService] Recorded screenshot_upload_failed: $failedThisBatch/$attempted, last: $err');
+    } catch (e) {
+      print('[UploadService] could not record screenshot_upload_failed: $e');
     }
   }
 
@@ -868,6 +956,7 @@ class UploadService {
               .take(20).toList(),
           'uploadedThisProcess': _htmlUploadedThisProcess,
           'connection': await _currentConnection(),
+          'signedIn': firebaseSignedIn(),
         })),
       ));
       print('[UploadService] Recorded html_upload_failed: ${_htmlFailures.length} failing, $setAside set aside, last: $_lastHtmlError');
@@ -949,6 +1038,7 @@ class UploadService {
     final storagePath = 'html/${capture.participantId}/${capture.sessionId}/$filename';
 
     final ref = _storage.ref().child(storagePath);
+    final htmlToken = const Uuid().v4();
     final isGzipped = capture.filePath.endsWith('.gz');
     final metadata = SettableMetadata(
       contentType: isGzipped ? 'application/gzip' : 'text/html',
@@ -959,6 +1049,10 @@ class UploadService {
         'sessionId': capture.sessionId,
         'participantId': capture.participantId,
         'htmlHash': capture.htmlHash,
+        // Minted locally — see firebaseDownloadUrl. Nothing downstream needs
+        // this URL (the dashboard signs URLs from storagePath), but a
+        // signed-out phone used to leave html.storageUrl null.
+        'firebaseStorageDownloadTokens': htmlToken,
       },
     );
 
@@ -966,16 +1060,7 @@ class UploadService {
     // Stall-based, not a fixed 30 s: a slow link that is still moving bytes
     // gets to finish; a stuck transfer is cut after 10 s without progress.
     final snapshot = await awaitUploadWithStallGuard(uploadTask, 'HTML upload');
-    // Best-effort: nothing downstream needs this URL (the dashboard signs
-    // URLs from storagePath and the hourly transcode rewrites it anyway), and
-    // the read rule needs a signed-in participant, so it must never fail the
-    // upload.
-    String? downloadUrl;
-    try {
-      downloadUrl = await _net(snapshot.ref.getDownloadURL(), 'html getDownloadURL');
-    } catch (e) {
-      print('[UploadService] html getDownloadURL failed (continuing): $e');
-    }
+    final String? downloadUrl = firebaseDownloadUrl(snapshot.ref.bucket, storagePath, htmlToken);
 
     // Record the upload on the event document. A timed-out write is already
     // in the SDK's durable queue and WILL land (see _isQueuedFirestoreTimeout);

@@ -1471,6 +1471,14 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
     html_dropped = 0        # html_dropped_for_space (cache valve) — pages lost
     html_unsyncable = 0     # html_capture_unsyncable — rows whose file vanished
     html_last_failure = None  # latest html_upload_failed / html_capture_failed, see below
+    # Screenshot upload health (2026-11-25). A screenshot event document can
+    # exist WITHOUT its image: the app's HTML stage creates the document first
+    # (eventSkeleton) and the image upload fills it in later. 963177422 had 1,900
+    # such documents and an empty gallery for 13 days while every count above
+    # said screenshots were arriving. Track the two separately.
+    last_screenshot_image_at = None   # latest screenshot event whose image reached Storage
+    screenshots_without_image = 0     # screenshot events still missing screenshotUrl
+    screenshot_last_failure = None    # latest screenshot_upload_failed (app 1.0.29+)
 
     # Aggregate by day
     daily_status = defaultdict(lambda: {
@@ -1502,6 +1510,13 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
             daily_status[event_date]["screenshots"] += 1
             if hasattr(captured_at, "timestamp") and (last_screenshot_at is None or captured_at > last_screenshot_at):
                 last_screenshot_at = captured_at
+            if event.get("screenshotUrl") or event.get("screenshotStoragePath"):
+                if hasattr(captured_at, "timestamp") and (
+                    last_screenshot_image_at is None or captured_at > last_screenshot_image_at
+                ):
+                    last_screenshot_image_at = captured_at
+            else:
+                screenshots_without_image += 1
             html = event.get("html") or {}
             if isinstance(html, dict) and html.get("charCount"):
                 html_captures += 1
@@ -1529,6 +1544,20 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
                 html_dropped += n
             else:
                 html_unsyncable += n
+        elif event_type == "screenshot_upload_failed":
+            # Keep only the most recent one; the overview badge shows its reason.
+            if hasattr(captured_at, "timestamp") and (
+                screenshot_last_failure is None or captured_at > screenshot_last_failure["_at"]
+            ):
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                screenshot_last_failure = {
+                    "_at": captured_at,
+                    "at": captured_at.isoformat(),
+                    "reason": str(data.get("lastError") or "")[:200],
+                    "pendingEvents": data.get("pendingEvents"),
+                    "stuckEvents": data.get("stuckEvents"),
+                    "signedIn": data.get("signedIn"),
+                }
         elif event_type in ("html_upload_failed", "html_capture_failed"):
             # Keep only the most recent one; the overview badge shows its reason.
             if hasattr(captured_at, "timestamp") and (
@@ -1617,6 +1646,11 @@ def compute_participant_stats(participant_id: str, start_dt: datetime, end_dt: d
         # {at, stage: upload|capture, reason, pendingHtml} or None (app 1.0.28+).
         "htmlLastFailure": ({k: v for k, v in html_last_failure.items() if k != "_at"}
                             if html_last_failure else None),
+        "lastScreenshotImageAt": last_screenshot_image_at.isoformat() if last_screenshot_image_at is not None else None,
+        "screenshotsWithoutImage": screenshots_without_image,
+        # {at, reason, pendingEvents, stuckEvents, signedIn} or None (app 1.0.29+).
+        "screenshotLastFailure": ({k: v for k, v in screenshot_last_failure.items() if k != "_at"}
+                                  if screenshot_last_failure else None),
     }
     return out
 
@@ -1668,6 +1702,9 @@ def _build_participant_cache_entry(p_info: dict, start_dt: datetime, end_dt: dat
         "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
         "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
         "htmlLastFailure": html_meta.get("htmlLastFailure"),
+        "lastScreenshotImageAt": html_meta.get("lastScreenshotImageAt"),
+        "screenshotsWithoutImage": html_meta.get("screenshotsWithoutImage", 0),
+        "screenshotLastFailure": html_meta.get("screenshotLastFailure"),
         # Computed here, once an hour. The page-load path used to recompute it
         # for every participant on every request — 42 serial Firestore queries
         # per overview load, ~7 s median (2026-10-30).
@@ -2108,6 +2145,9 @@ def get_overall_status(
                     "htmlDroppedForSpace": cached.get("htmlDroppedForSpace", 0),
                     "htmlUnsyncable": cached.get("htmlUnsyncable", 0),
                     "htmlLastFailure": cached.get("htmlLastFailure"),
+                    "lastScreenshotImageAt": cached.get("lastScreenshotImageAt"),
+                    "screenshotsWithoutImage": cached.get("screenshotsWithoutImage", 0),
+                    "screenshotLastFailure": cached.get("screenshotLastFailure"),
                     # True until the next cache rebuild picks this participant up.
                     "awaitingStats": pid not in cached_by_id,
                 })
@@ -2242,6 +2282,9 @@ def get_overall_status(
                 "htmlDroppedForSpace": html_meta.get("htmlDropped", 0),
                 "htmlUnsyncable": html_meta.get("htmlUnsyncable", 0),
                 "htmlLastFailure": html_meta.get("htmlLastFailure"),
+                "lastScreenshotImageAt": html_meta.get("lastScreenshotImageAt"),
+                "screenshotsWithoutImage": html_meta.get("screenshotsWithoutImage", 0),
+                "screenshotLastFailure": html_meta.get("screenshotLastFailure"),
                 "is_test_participant": bool((p_info.get("data") or {}).get("isTestParticipant")),
                 "app_version": (p_info.get("data") or {}).get("appVersion"),
                 "app_build_number": (p_info.get("data") or {}).get("appBuildNumber"),
