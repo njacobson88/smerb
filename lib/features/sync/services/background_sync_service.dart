@@ -45,7 +45,11 @@ class BackgroundSyncService {
   /// isolate knows to upload by itself.
   static const String relayPortName = 'com.dartmouth.smerb.sync.main';
   ReceivePort? _relayPort;
-  bool _draining = false;
+  /// The drain currently running on behalf of an OS task, if any. A second
+  /// task that fires meanwhile waits for it and then uses what is left of its
+  /// own budget — on the iPhone the refresh (20 s) and processing (150 s) tasks
+  /// fired in the same second and the processing task used to give up at once.
+  Future<DrainSummary>? _activeDrain;
 
   // Sync interval
   static const Duration syncInterval = Duration(seconds: 30);
@@ -143,21 +147,50 @@ class BackgroundSyncService {
       final reply = msg['reply'];
       final budget = Duration(milliseconds: (msg['budgetMs'] as int?) ?? 60000);
       final task = (msg['task'] as String?) ?? 'unknown';
-      if (_draining) {
-        // Two OS tasks fired together; the running drain already covers it.
-        if (reply is SendPort) reply.send({'cycles': 0, 'stoppedBecause': 'drain_already_running'});
+      _handleRelayedDrain(task, budget, reply is SendPort ? reply : null);
+    });
+  }
+
+  Future<void> _handleRelayedDrain(String task, Duration budget, SendPort? reply) async {
+    final started = DateTime.now();
+    try {
+      final running = _activeDrain;
+      if (running != null) {
+        try {
+          await running;
+        } catch (_) {}
+      }
+      final remaining = budget - DateTime.now().difference(started);
+      if (remaining < const Duration(seconds: 5)) {
+        reply?.send({'cycles': 0, 'stoppedBecause': 'drain_already_running'});
         return;
       }
-      final started = DateTime.now();
-      drain(budget: budget).then((summary) async {
-        final map = summary.toMap('relay');
-        await recordBackgroundSyncEvent(database, task, map,
-            elapsed: DateTime.now().difference(started));
-        if (reply is SendPort) reply.send(map);
-      }).catchError((e) {
-        if (reply is SendPort) reply.send({'stoppedBecause': 'error', 'error': '$e'});
-      });
-    });
+      final mine = drain(budget: remaining);
+      _activeDrain = mine;
+      DrainSummary summary;
+      try {
+        summary = await mine;
+      } finally {
+        if (identical(_activeDrain, mine)) _activeDrain = null;
+      }
+      final map = summary.toMap('relay');
+      await recordBackgroundSyncEvent(database, task, map,
+          elapsed: DateTime.now().difference(started));
+      // Push the summary (and anything tiny still queued) out now: on iOS the
+      // app is suspended the moment the task ends, so without this the record
+      // of the run only reaches the dashboard at the next wake-up.
+      if (summary.cycles > 0) {
+        try {
+          await uploadService.syncEvents(
+              batchSize: 10, budget: StageBudget(const Duration(seconds: 5)));
+        } catch (e) {
+          print('[BackgroundSync] summary flush skipped: $e');
+        }
+      }
+      reply?.send(map);
+    } catch (e) {
+      reply?.send({'stoppedBecause': 'error', 'error': '$e'});
+    }
   }
 
   /// Run cycles back to back until the upload queues are empty or [budget] is
@@ -166,7 +199,6 @@ class BackgroundSyncService {
     print('[BackgroundSync] drain requested, budget ${budget.inSeconds}s');
     final previousScale = _cycleBudgetScale;
     _cycleBudgetScale = BackgroundSyncPlan.budgetScale(budget);
-    _draining = true;
     try {
       return await runDrainLoop(
         budget: budget,
@@ -186,7 +218,6 @@ class BackgroundSyncService {
         },
       );
     } finally {
-      _draining = false;
       _cycleBudgetScale = previousScale;
     }
   }

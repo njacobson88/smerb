@@ -102,6 +102,24 @@ void main() {
       expect(s.stoppedBecause, 'no_progress');
     });
 
+    test('a quiet cycle that finds the queue empty counts as drained, not stalled', () async {
+      // iOS: the wake-up fires the app's own timer first; that cycle uploads
+      // everything and the drain's own cycle then has nothing to report.
+      var html = 17;
+      final s = await runDrainLoop(
+        budget: const Duration(seconds: 20),
+        now: clock,
+        pending: () async => {'events': 0, 'html': html, 'ema': 0, 'ocr': 0},
+        runCycle: () async {
+          html = 0; // someone else emptied it
+          return const {'events': 0, 'htmlCaptures': 0};
+        },
+      );
+      expect(s.cycles, 1);
+      expect(s.stoppedBecause, 'drained');
+      expect(s.pendingAfter['html'], 0);
+    });
+
     test('respects the privacy pause', () async {
       final s = await runDrainLoop(
         budget: const Duration(minutes: 8),

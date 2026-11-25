@@ -159,7 +159,13 @@ Future<DrainSummary> runDrainLoop({
       final r = await runCycle();
       summary.add(r);
       if (DrainSummary.progressIn(r) == 0) {
-        summary.stoppedBecause = 'no_progress';
+        // A cycle that reports nothing may still have found an empty queue:
+        // on iOS the wake-up fires the app's own 30 s timer first, that cycle
+        // does the uploading, and the drain's cycle sees nothing left. Say
+        // "drained", not "no_progress", when that is what happened.
+        final left = await pending();
+        summary.stoppedBecause =
+            left.values.fold(0, (a, b) => a + b) == 0 ? 'drained' : 'no_progress';
         break;
       }
     }
